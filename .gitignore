@@ -1,6 +1,9 @@
 node_modules/
 dist/
 build/
+.gradle/
+.idea/
+*.iml
 .cache/
 .env*
 .vite/
