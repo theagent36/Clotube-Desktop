@@ -1,0 +1,11 @@
+{
+  "title": "Clotube Desktop",
+  "description": "Stream movies and TV series with a sleek dark-themed interface featuring personalized navigation, dynamic search, and seamless video playback for desktop users.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
