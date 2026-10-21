@@ -36,6 +36,8 @@ import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.screens.rememberDriveThumbnail
+import kotlinx.coroutines.delay
+import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
@@ -62,15 +64,29 @@ fun DesktopInlinePlayerPanel(
     var volume by remember { mutableFloatStateOf(1f) }
     var isMuted by remember { mutableStateOf(false) }
 
+    // Dynamic aspect ratio: initialized to 16:9, updates to exact stream aspect ratio (e.g. 2.39:1)
+    var videoAspectRatio by remember { mutableFloatStateOf(16f / 9f) }
+
     val isReleased = remember { AtomicBoolean(false) }
     val focusRequester = remember { FocusRequester() }
 
     val mediaPlayerComponent = remember {
         try {
             NativeDiscovery().discover()
-            EmbeddedMediaPlayerComponent()
+            val factory = MediaPlayerFactory(
+                "--no-video-title-show",
+                "--avcodec-hw=any",
+                "--vout=direct3d11",
+                "--drop-late-frames",
+                "--skip-frames",
+                "--network-caching=2000"
+            )
+            EmbeddedMediaPlayerComponent(factory, null, null, null, null).apply {
+                background = java.awt.Color.BLACK
+                videoSurfaceComponent().background = java.awt.Color.BLACK
+            }
         } catch (e: Throwable) {
-            System.err.println("Inline Player LibVLC error: ${e.message}")
+            System.err.println("[InlinePlayer] LibVLC initialization error: ${e.message}")
             null
         }
     }
@@ -82,21 +98,28 @@ fun DesktopInlinePlayerPanel(
 
         if (isReleased.get()) return@LaunchedEffect
 
+        surface.background = java.awt.Color.BLACK
+        comp.background = java.awt.Color.BLACK
+
         val port = LocalStreamServer.start()
         val streamUrl = "http://127.0.0.1:$port/stream?id=${media.id}&token=$accessToken"
+        val hasStarted = AtomicBoolean(false)
 
         fun startStream() {
-            SwingUtilities.invokeLater {
-                try {
-                    if (!isReleased.get()) {
-                        player.media().play(
-                            streamUrl,
-                            ":network-caching=3000",
-                            ":file-caching=2000"
-                        )
+            if (hasStarted.compareAndSet(false, true)) {
+                println("[DesktopInlinePlayerPanel] Starting stream for ${media.title} (ID: ${media.id})")
+                SwingUtilities.invokeLater {
+                    try {
+                        if (!isReleased.get()) {
+                            player.media().play(
+                                streamUrl,
+                                ":network-caching=2500",
+                                ":file-caching=1500"
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        System.err.println("[InlinePlayer] Playback start error: ${t.message}")
                     }
-                } catch (t: Throwable) {
-                    System.err.println("Inline playback failed: ${t.message}")
                 }
             }
         }
@@ -114,15 +137,56 @@ fun DesktopInlinePlayerPanel(
             }
             surface.addHierarchyListener(hierarchyListener)
         }
+
+        for (i in 0 until 10) {
+            if (hasStarted.get()) break
+            delay(100)
+            if (surface.isDisplayable) {
+                startStream()
+                break
+            }
+        }
+    }
+
+    val player = mediaPlayerComponent?.mediaPlayer()
+
+    // Query native stream aspect ratio once playback begins
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            for (i in 0 until 20) {
+                val dim = player?.video()?.videoDimension()
+                if (dim != null && dim.width > 0 && dim.height > 0) {
+                    val ratio = dim.width.toFloat() / dim.height.toFloat()
+                    if (ratio in 0.5f..3.5f) {
+                        videoAspectRatio = ratio
+                        println("[InlinePlayer] Video dimension detected: ${dim.width}x${dim.height} (ratio: $ratio)")
+                        break
+                    }
+                }
+                delay(150)
+            }
+        }
     }
 
     DisposableEffect(Unit) {
         val comp = mediaPlayerComponent
-        val player = comp?.mediaPlayer()
+
+        fun checkDimension(mp: MediaPlayer?) {
+            val dim = mp?.video()?.videoDimension()
+            if (dim != null && dim.width > 0 && dim.height > 0) {
+                val ratio = dim.width.toFloat() / dim.height.toFloat()
+                if (ratio in 0.5f..3.5f) {
+                    videoAspectRatio = ratio
+                }
+            }
+        }
 
         val listener = object : MediaPlayerEventAdapter() {
             override fun timeChanged(mediaPlayer: MediaPlayer?, newTime: Long) {
                 currentTimeMs = newTime
+                if (videoAspectRatio == (16f / 9f)) {
+                    checkDimension(mediaPlayer)
+                }
             }
             override fun lengthChanged(mediaPlayer: MediaPlayer?, newLength: Long) {
                 if (newLength > 0L) totalDurationMs = newLength
@@ -130,12 +194,26 @@ fun DesktopInlinePlayerPanel(
             override fun playing(mediaPlayer: MediaPlayer?) {
                 isPlaying = true
                 isBuffering = false
+                checkDimension(mediaPlayer)
+            }
+            override fun videoOutput(mediaPlayer: MediaPlayer?, newCount: Int) {
+                if (newCount > 0) {
+                    checkDimension(mediaPlayer)
+                }
             }
             override fun paused(mediaPlayer: MediaPlayer?) {
                 isPlaying = false
             }
             override fun buffering(mediaPlayer: MediaPlayer?, newCache: Float) {
                 isBuffering = newCache < 100f
+            }
+            override fun finished(mediaPlayer: MediaPlayer?) {
+                isPlaying = false
+                isBuffering = false
+            }
+            override fun error(mediaPlayer: MediaPlayer?) {
+                System.err.println("[InlinePlayer] LibVLC playback error")
+                isBuffering = false
             }
         }
 
@@ -145,9 +223,10 @@ fun DesktopInlinePlayerPanel(
             if (!isReleased.getAndSet(true)) {
                 try {
                     player?.events()?.removeMediaPlayerEventListener(listener)
+                    player?.controls()?.stop()
                     comp?.release()
                 } catch (t: Throwable) {
-                    System.err.println("Safe inline teardown: ${t.message}")
+                    System.err.println("[InlinePlayer] Safe teardown: ${t.message}")
                 }
             }
         }
@@ -156,8 +235,6 @@ fun DesktopInlinePlayerPanel(
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
-
-    val player = mediaPlayerComponent?.mediaPlayer()
 
     Column(
         modifier = modifier
@@ -169,7 +246,7 @@ fun DesktopInlinePlayerPanel(
                 if (keyEvent.type == KeyEventType.KeyDown) {
                     when (keyEvent.key) {
                         Key.Spacebar -> {
-                            player?.controls()?.pause()
+                            if (isPlaying) player?.controls()?.pause() else player?.controls()?.play()
                             true
                         }
                         Key.DirectionLeft -> {
@@ -234,24 +311,44 @@ fun DesktopInlinePlayerPanel(
                 .height(440.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // LEFT COLUMN: Video Viewport + Transport Bar
             Column(
                 modifier = Modifier
                     .weight(0.67f)
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF090D14))
+                    .background(Color.Black)
                     .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(14.dp))
             ) {
-                Box(
+                // Adaptive Aspect-Ratio Viewport: Skia fills the letterbox padding in pure black
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                        .background(Color.Black)
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center
                 ) {
+                    val boxWidth = maxWidth.value
+                    val boxHeight = maxHeight.value
+                    val boxRatio = if (boxHeight > 0f) boxWidth / boxHeight else (16f / 9f)
+
+                    // If video is wider than the container (e.g. 2.39:1), fit to width and let height shrink
+                    // If video is taller than the container, fit to height and let width shrink
+                    val videoModifier = if (videoAspectRatio > boxRatio) {
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(videoAspectRatio)
+                    } else {
+                        Modifier
+                            .fillMaxHeight()
+                            .aspectRatio(videoAspectRatio)
+                    }
+
                     if (mediaPlayerComponent != null) {
                         SwingPanel(
+                            background = Color.Black,
                             factory = { mediaPlayerComponent },
-                            modifier = Modifier.fillMaxSize()
+                            modifier = videoModifier
                         )
                     }
 
@@ -262,106 +359,33 @@ fun DesktopInlinePlayerPanel(
                     }
                 }
 
-                // Dedicated Transport Bar (Stripped of fake 4K badge)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .background(Color(0xFF0C1018))
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    IconButton(
-                        onClick = { player?.controls()?.pause() },
-                        modifier = Modifier.size(32.dp).pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
-                            tint = Color.White,
-                            modifier = Modifier.size(22.dp)
-                        )
+                InlineTransportBar(
+                    isPlaying = isPlaying,
+                    currentTimeMs = currentTimeMs,
+                    totalDurationMs = totalDurationMs,
+                    volume = volume,
+                    isMuted = isMuted,
+                    onPlayPause = {
+                        if (isPlaying) player?.controls()?.pause() else player?.controls()?.play()
+                    },
+                    onSkip = { deltaMs -> player?.controls()?.skipTime(deltaMs) },
+                    onSeek = { targetMs ->
+                        player?.controls()?.setTime(targetMs)
+                        currentTimeMs = targetMs
+                    },
+                    onToggleMute = {
+                        isMuted = !isMuted
+                        player?.audio()?.isMute = isMuted
+                    },
+                    onVolumeChange = { newVol ->
+                        volume = newVol
+                        isMuted = false
+                        player?.audio()?.setVolume((newVol * 100).toInt())
                     }
-
-                    IconButton(
-                        onClick = { player?.controls()?.skipTime(-10000) },
-                        modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Replay10,
-                            contentDescription = "Rewind 10s",
-                            tint = Color(0xFF94A3B8),
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { player?.controls()?.skipTime(10000) },
-                        modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Forward10,
-                            contentDescription = "Forward 10s",
-                            tint = Color(0xFF94A3B8),
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-
-                    Slider(
-                        value = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-                        onValueChange = { fraction ->
-                            val target = (fraction * totalDurationMs).toLong()
-                            player?.controls()?.setTime(target)
-                            currentTimeMs = target
-                        },
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color(0xFF00E5FF),
-                            activeTrackColor = Color(0xFF2563EB),
-                            inactiveTrackColor = Color(0xFF1E2838)
-                        ),
-                        modifier = Modifier.weight(1f).height(18.dp).pointerHoverIcon(PointerIcon.Hand)
-                    )
-
-                    Text(
-                        text = "${formatTimecode(currentTimeMs)} / ${formatTimecode(totalDurationMs)}",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-
-                    IconButton(
-                        onClick = {
-                            isMuted = !isMuted
-                            player?.audio()?.isMute = isMuted
-                        },
-                        modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Icon(
-                            imageVector = if (isMuted || volume == 0f) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
-                            contentDescription = "Mute",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    Slider(
-                        value = if (isMuted) 0f else volume,
-                        onValueChange = { newVol ->
-                            volume = newVol
-                            isMuted = false
-                            player?.audio()?.setVolume((newVol * 100).toInt())
-                        },
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color.White,
-                            activeTrackColor = Color(0xFF00E5FF),
-                            inactiveTrackColor = Color(0xFF1E2838)
-                        ),
-                        modifier = Modifier.width(76.dp).pointerHoverIcon(PointerIcon.Hand)
-                    )
-                }
+                )
             }
 
+            // RIGHT COLUMN: Episode List or Movie Metadata Card
             Surface(
                 modifier = Modifier
                     .weight(0.33f)
@@ -482,7 +506,7 @@ fun DesktopInlinePlayerPanel(
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
-                                                text = ep.durationFormatted,
+                                                text = "${ep.durationFormatted} • Direct Stream",
                                                 color = Color(0xFF64748B),
                                                 fontSize = 9.sp
                                             )
@@ -502,7 +526,6 @@ fun DesktopInlinePlayerPanel(
                         }
                     }
                 } else {
-                    // Clean Movie Details Panel (No fake bitrates or Atmos claims)
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -565,6 +588,110 @@ fun DesktopInlinePlayerPanel(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun InlineTransportBar(
+    isPlaying: Boolean,
+    currentTimeMs: Long,
+    totalDurationMs: Long,
+    volume: Float,
+    isMuted: Boolean,
+    onPlayPause: () -> Unit,
+    onSkip: (Long) -> Unit,
+    onSeek: (Long) -> Unit,
+    onToggleMute: () -> Unit,
+    onVolumeChange: (Float) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(54.dp)
+            .background(Color(0xFF0C1018))
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        IconButton(
+            onClick = onPlayPause,
+            modifier = Modifier.size(32.dp).pointerHoverIcon(PointerIcon.Hand)
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+
+        IconButton(
+            onClick = { onSkip(-10000) },
+            modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Replay10,
+                contentDescription = "Rewind 10s",
+                tint = Color(0xFF94A3B8),
+                modifier = Modifier.size(19.dp)
+            )
+        }
+
+        IconButton(
+            onClick = { onSkip(10000) },
+            modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Forward10,
+                contentDescription = "Forward 10s",
+                tint = Color(0xFF94A3B8),
+                modifier = Modifier.size(19.dp)
+            )
+        }
+
+        Slider(
+            value = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f,
+            onValueChange = { fraction ->
+                val target = (fraction * totalDurationMs).toLong()
+                onSeek(target)
+            },
+            colors = SliderDefaults.colors(
+                thumbColor = Color(0xFF00E5FF),
+                activeTrackColor = Color(0xFF2563EB),
+                inactiveTrackColor = Color(0xFF1E2838)
+            ),
+            modifier = Modifier.weight(1f).height(18.dp).pointerHoverIcon(PointerIcon.Hand)
+        )
+
+        Text(
+            text = "${formatTimecode(currentTimeMs)} / ${formatTimecode(totalDurationMs)}",
+            color = Color(0xFF94A3B8),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+
+        IconButton(
+            onClick = onToggleMute,
+            modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
+        ) {
+            Icon(
+                imageVector = if (isMuted || volume == 0f) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
+                contentDescription = "Mute",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        Slider(
+            value = if (isMuted) 0f else volume,
+            onValueChange = onVolumeChange,
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color(0xFF00E5FF),
+                inactiveTrackColor = Color(0xFF1E2838)
+            ),
+            modifier = Modifier.width(76.dp).pointerHoverIcon(PointerIcon.Hand)
+        )
     }
 }
 

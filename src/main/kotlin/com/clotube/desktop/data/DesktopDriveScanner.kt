@@ -16,24 +16,43 @@ import java.util.ArrayDeque
 
 class DesktopDriveScanner(accessToken: String) {
 
-    private val driveService: Drive
+    private val driveService: Drive?
 
     init {
-        val credentials = GoogleCredentials.create(AccessToken(accessToken, null))
-        driveService = Drive.Builder(
-            GoogleNetHttpTransport.newTrustedTransport(),
-            GsonFactory.getDefaultInstance(),
-            HttpCredentialsAdapter(credentials)
-        ).setApplicationName("Clotube-Windows").build()
+        driveService = if (accessToken.isNotBlank()) {
+            try {
+                val credentials = GoogleCredentials.create(AccessToken(accessToken, null))
+                val transport = GoogleNetHttpTransport.newTrustedTransport()
+                Drive.Builder(
+                    transport,
+                    GsonFactory.getDefaultInstance(),
+                    HttpCredentialsAdapter(credentials)
+                ).setApplicationName("Clotube-Windows").build()
+            } catch (e: Exception) {
+                System.err.println("[DesktopDriveScanner] Failed to initialize Google Drive service: ${e.message}")
+                e.printStackTrace()
+                null
+            }
+        } else {
+            System.err.println("[DesktopDriveScanner] Access token is blank. Drive service cannot be initialized.")
+            null
+        }
     }
 
     suspend fun loadMovies(): List<DesktopMediaItem> = withContext(Dispatchers.IO) {
-        val rootId = resolveBestFolder(setOf("movies", "movie", "films", "cinema")) ?: return@withContext emptyList()
-        
+        val service = driveService ?: return@withContext emptyList()
+        println("[DesktopDriveScanner] Resolving Movies folder...")
+        val rootId = resolveBestFolder(setOf("movies", "movie", "films", "cinema"))
+        if (rootId == null) {
+            System.err.println("[DesktopDriveScanner] Could not locate Movies folder in Google Drive.")
+            return@withContext emptyList()
+        }
+
+        println("[DesktopDriveScanner] Discovered Movies root folder ID: $rootId. Scanning contents...")
         val discoveredMovies = mutableListOf<DesktopMediaItem>()
         val folderQueue = ArrayDeque<String>()
         val visitedFolders = mutableSetOf<String>()
-        
+
         folderQueue.add(rootId)
         visitedFolders.add(rootId)
 
@@ -43,55 +62,54 @@ class DesktopDriveScanner(accessToken: String) {
 
             for (item in items) {
                 val resolvedId = resolveTargetId(item)
-                val isFolder = item.mimeType == "application/vnd.google-apps.folder" || 
-                              (item.mimeType == "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+                val isFolder = item.mimeType == "application/vnd.google-apps.folder" ||
+                        (item.mimeType == "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
 
                 if (isFolder) {
                     if (visitedFolders.add(resolvedId)) {
                         folderQueue.add(resolvedId)
                     }
-                } else {
+                } else if (item.mimeType?.startsWith("video/") == true || item.name.endsWith(".mkv", true) || item.name.endsWith(".mp4", true)) {
                     val rawName = item.name ?: "Unknown"
-                    val isVideo = item.mimeType?.startsWith("video/") == true ||
-                                  rawName.endsWith(".mkv", true) ||
-                                  rawName.endsWith(".mp4", true)
+                    val durationMs = item.videoMediaMetadata?.durationMillis ?: 0L
+                    val driveThumb = item.thumbnailLink?.replace("s220", "s800") ?: ""
 
-                    if (isVideo) {
-                        val durationMs = item.videoMediaMetadata?.durationMillis ?: 0L
-                        val driveThumb = item.thumbnailLink?.replace("s220", "s800") ?: ""
+                    val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
 
-                        // Resolve official movie title, release year, and theatrical poster
-                        val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
-
-                        discoveredMovies.add(
-                            DesktopMediaItem(
-                                id = resolvedId,
-                                title = meta.officialTitle,
-                                thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
-                                genre = meta.genre,
-                                durationMs = durationMs
-                            )
+                    discoveredMovies.add(
+                        DesktopMediaItem(
+                            id = resolvedId,
+                            title = meta.officialTitle,
+                            thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
+                            genre = meta.genre,
+                            durationMs = durationMs
                         )
-                    }
+                    )
                 }
             }
         }
-        
+
+        println("[DesktopDriveScanner] Finished movie scan: ${discoveredMovies.size} titles indexed.")
         discoveredMovies.sortedBy { it.title }
     }
 
     suspend fun loadSeriesFolders(): List<DesktopMediaItem> = withContext(Dispatchers.IO) {
-        val rootId = resolveBestFolder(setOf("series", "tv series", "tv shows", "shows")) ?: return@withContext emptyList()
+        val service = driveService ?: return@withContext emptyList()
+        println("[DesktopDriveScanner] Resolving Series folder...")
+        val rootId = resolveBestFolder(setOf("series", "tv series", "tv shows", "shows"))
+        if (rootId == null) {
+            System.err.println("[DesktopDriveScanner] Could not locate Series folder in Google Drive.")
+            return@withContext emptyList()
+        }
 
+        println("[DesktopDriveScanner] Discovered Series root folder ID: $rootId. Scanning shows...")
         val items = fetchFolderContents(rootId)
-        items.filter { 
-            it.mimeType == "application/vnd.google-apps.folder" || 
-            (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+        val seriesList = items.filter {
+            it.mimeType == "application/vnd.google-apps.folder" ||
+                    (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
         }.map { folder ->
             val rawName = folder.name ?: "Unknown"
             val driveThumb = folder.thumbnailLink?.replace("s220", "s800") ?: ""
-
-            // Resolve official Series Title and Poster Art from TVMaze
             val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
 
             DesktopMediaItem(
@@ -101,6 +119,9 @@ class DesktopDriveScanner(accessToken: String) {
                 genre = meta.genres
             )
         }.sortedBy { it.title }
+
+        println("[DesktopDriveScanner] Finished Series scan: ${seriesList.size} shows indexed.")
+        seriesList
     }
 
     /**
@@ -185,13 +206,14 @@ class DesktopDriveScanner(accessToken: String) {
     }
 
     private fun fetchFolderContents(folderId: String): List<com.google.api.services.drive.model.File> {
+        val service = driveService ?: return emptyList()
         val resultList = mutableListOf<com.google.api.services.drive.model.File>()
         var pageToken: String? = null
 
         do {
             try {
                 val query = "'$folderId' in parents and trashed = false"
-                val response = driveService.files().list()
+                val response = service.files().list()
                     .setQ(query)
                     .setFields("nextPageToken, files(id, name, mimeType, size, thumbnailLink, videoMediaMetadata, shortcutDetails)")
                     .setSupportsAllDrives(true)
@@ -203,6 +225,8 @@ class DesktopDriveScanner(accessToken: String) {
                 response.files?.let { resultList.addAll(it) }
                 pageToken = response.nextPageToken
             } catch (e: Exception) {
+                System.err.println("[DesktopDriveScanner] API error fetching folder contents ($folderId): ${e.message}")
+                e.printStackTrace()
                 break
             }
         } while (pageToken != null)
@@ -211,13 +235,14 @@ class DesktopDriveScanner(accessToken: String) {
     }
 
     private fun resolveBestFolder(targetNames: Set<String>): String? {
+        val service = driveService ?: return null
         val query = "(mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/vnd.google-apps.shortcut') and trashed = false"
         val candidates = mutableListOf<com.google.api.services.drive.model.File>()
 
         try {
             var pageToken: String? = null
             do {
-                val response = driveService.files().list()
+                val response = service.files().list()
                     .setQ(query)
                     .setFields("nextPageToken, files(id, name, shortcutDetails)")
                     .setSupportsAllDrives(true)
@@ -227,17 +252,23 @@ class DesktopDriveScanner(accessToken: String) {
                     .execute()
 
                 response.files?.forEach { file ->
-                    if (targetNames.contains(file.name?.trim()?.lowercase() ?: "")) {
+                    val normalized = file.name?.trim()?.lowercase() ?: ""
+                    if (targetNames.contains(normalized)) {
                         candidates.add(file)
                     }
                 }
                 pageToken = response.nextPageToken
             } while (pageToken != null)
         } catch (e: Exception) {
+            System.err.println("[DesktopDriveScanner] API error during resolveBestFolder: ${e.message}")
+            e.printStackTrace()
             return null
         }
 
-        if (candidates.isEmpty()) return null
+        if (candidates.isEmpty()) {
+            System.err.println("[DesktopDriveScanner] No folder matching target names $targetNames was found in Drive root.")
+            return null
+        }
         if (candidates.size == 1) return resolveTargetId(candidates.first())
 
         var bestId: String? = null

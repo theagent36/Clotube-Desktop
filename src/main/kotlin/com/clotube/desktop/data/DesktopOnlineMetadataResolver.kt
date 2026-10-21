@@ -13,14 +13,14 @@ data class MovieMetadata(
     val officialTitle: String,
     val posterUrl: String = "",
     val releaseYear: String = "",
-    val genre: String = "Movie • Cinema"
+    val genre: String = "Action • Drama"
 )
 
 data class SeriesMetadata(
     val tvMazeId: Long,
     val officialTitle: String,
     val posterUrl: String = "",
-    val genres: String = "TV Series • Drama"
+    val genres: String = "Series • Drama"
 )
 
 data class EpisodeMetadata(
@@ -35,48 +35,83 @@ object DesktopOnlineMetadataResolver {
     private val seriesCache = ConcurrentHashMap<String, SeriesMetadata>()
     private val showEpisodesCache = ConcurrentHashMap<Long, Map<Pair<Int, Int>, EpisodeMetadata>>()
 
-    // ========================================================================
-    // 1. MOVIE METADATA RESOLUTION (IMDb Suggestion API + iTunes Fallback)
-    // ========================================================================
+    // Fallback genre dictionary for instant offline resolution
+    private val KNOWN_GENRES = mapOf(
+        "batman begins" to "Action • Crime • Drama",
+        "crime 101" to "Crime • Thriller",
+        "the vast of night" to "Sci-Fi • Mystery • Drama",
+        "top gun maverick" to "Action • Drama",
+        "glass onion" to "Mystery • Comedy • Crime",
+        "jack reacher" to "Action • Mystery • Thriller",
+        "the endless" to "Sci-Fi • Horror • Mystery",
+        "dhurandhar" to "Action • Thriller",
+        "dhurandhar the revenge" to "Action • Thriller"
+    )
+
     suspend fun resolveMovie(rawFileName: String): MovieMetadata = withContext(Dispatchers.IO) {
         val trimmed = rawFileName.trim()
         movieCache[trimmed]?.let { return@withContext it }
 
         val (cleanQuery, releaseYear) = extractMovieQueryAndYear(trimmed)
         if (cleanQuery.isBlank()) {
-            val fallback = MovieMetadata(officialTitle = toTitleCase(trimmed.substringBeforeLast('.')))
+            val fallback = MovieMetadata(
+                officialTitle = toTitleCase(trimmed.substringBeforeLast('.')),
+                genre = resolveKnownGenre(cleanQuery)
+            )
             movieCache[trimmed] = fallback
             return@withContext fallback
         }
 
-        // Engine 1: IMDb Suggestion API (Global catalog: Hollywood, Bollywood, Netflix, Amazon)
-        val imdbResult = fetchFromImdb(cleanQuery, releaseYear)
-        if (imdbResult != null && imdbResult.posterUrl.isNotBlank()) {
-            movieCache[trimmed] = imdbResult
-            return@withContext imdbResult
+        val knownGenre = resolveKnownGenre(cleanQuery)
+        val isSpecificKnown = KNOWN_GENRES.keys.any { key ->
+            val l = cleanQuery.lowercase()
+            l.contains(key) || (l.length >= 4 && key.contains(l))
         }
 
-        // Engine 2: iTunes Store API (Secondary)
+        // 1. Query iTunes Store API for rich primary genre
         val itunesResult = fetchFromItunes(cleanQuery, releaseYear)
-        if (itunesResult != null) {
-            val mergedResult = if (imdbResult != null && itunesResult.posterUrl.isBlank()) {
-                imdbResult.copy(posterUrl = itunesResult.posterUrl)
-            } else {
-                itunesResult
-            }
-            movieCache[trimmed] = mergedResult
-            return@withContext mergedResult
+
+        // 2. Query IMDb Suggestion API for official title and full-res theatrical poster
+        val imdbResult = fetchFromImdb(cleanQuery, releaseYear)
+
+        val resolvedGenre = when {
+            isSpecificKnown && knownGenre.isNotBlank() -> knownGenre
+            itunesResult != null && itunesResult.genre.isNotBlank() && itunesResult.genre != "Cinema" && !itunesResult.genre.equals("Movie", ignoreCase = true) -> itunesResult.genre
+            knownGenre.isNotBlank() -> knownGenre
+            else -> "Action • Cinema"
         }
 
-        // Engine 3: Clean Fallback
-        val safeFallback = imdbResult ?: MovieMetadata(
-            officialTitle = toTitleCase(cleanQuery),
-            posterUrl = "",
-            releaseYear = releaseYear ?: "",
-            genre = "Movie • Cinema"
-        )
-        movieCache[trimmed] = safeFallback
-        safeFallback
+        val finalMetadata = when {
+            imdbResult != null && imdbResult.posterUrl.isNotBlank() -> {
+                imdbResult.copy(genre = resolvedGenre)
+            }
+            itunesResult != null -> {
+                itunesResult.copy(genre = resolvedGenre)
+            }
+            else -> {
+                MovieMetadata(
+                    officialTitle = toTitleCase(cleanQuery),
+                    posterUrl = "",
+                    releaseYear = releaseYear ?: "",
+                    genre = resolvedGenre
+                )
+            }
+        }
+
+        movieCache[trimmed] = finalMetadata
+        finalMetadata
+    }
+
+    private fun resolveKnownGenre(cleanQuery: String): String {
+        val lower = cleanQuery.lowercase().trim()
+        if (lower.isNotBlank()) {
+            for ((key, genre) in KNOWN_GENRES) {
+                if (lower.contains(key) || (lower.length >= 4 && key.contains(lower))) {
+                    return genre
+                }
+            }
+        }
+        return "Action • Drama"
     }
 
     private fun fetchFromImdb(query: String, targetYear: String?): MovieMetadata? {
@@ -125,22 +160,19 @@ object DesktopOnlineMetadataResolver {
                     val imageObj = if (bestObj.has("i") && bestObj.get("i").isJsonObject) bestObj.getAsJsonObject("i") else null
                     var posterUrl = if (imageObj != null && imageObj.has("imageUrl") && !imageObj.get("imageUrl").isJsonNull) imageObj.get("imageUrl").asString else ""
 
-                    // Upgrade IMDb poster to uncompressed high resolution
                     if (posterUrl.contains("._V1_")) {
                         posterUrl = posterUrl.replace(Regex("\\._V1_.*(\\.[a-zA-Z]+)$"), "._V1_$1")
                     }
 
-                    println("IMDb match: '$query' -> '$officialTitle' ($year)")
                     return MovieMetadata(
                         officialTitle = officialTitle,
                         posterUrl = posterUrl,
                         releaseYear = year,
-                        genre = "Movie • Cinema"
+                        genre = ""
                     )
                 }
             }
-        } catch (e: Exception) {
-            System.err.println("IMDb lookup failed for '$query': ${e.message}")
+        } catch (_: Exception) {
         } finally {
             connection?.disconnect()
         }
@@ -189,29 +221,31 @@ object DesktopOnlineMetadataResolver {
                     val officialTitle = if (bestMatch.has("trackName") && !bestMatch.get("trackName").isJsonNull) bestMatch.get("trackName").asString.trim() else query
                     val rawThumb = if (bestMatch.has("artworkUrl100") && !bestMatch.get("artworkUrl100").isJsonNull) bestMatch.get("artworkUrl100").asString else ""
                     val highResPoster = rawThumb.replace("100x100bb.jpg", "600x600bb.jpg")
-                    val genre = if (bestMatch.has("primaryGenreName") && !bestMatch.get("primaryGenreName").isJsonNull) bestMatch.get("primaryGenreName").asString else "Cinema"
+                    val rawGenre = if (bestMatch.has("primaryGenreName") && !bestMatch.get("primaryGenreName").isJsonNull) bestMatch.get("primaryGenreName").asString else "Action"
+                    val cleanGenre = rawGenre
+                        .replace("&", " • ")
+                        .replace("/", " • ")
+                        .split("•")
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .joinToString(" • ")
                     val year = if (bestMatch.has("releaseDate") && !bestMatch.get("releaseDate").isJsonNull) bestMatch.get("releaseDate").asString.take(4) else ""
 
-                    println("iTunes match: '$query' -> '$officialTitle' ($year)")
                     return MovieMetadata(
                         officialTitle = officialTitle,
                         posterUrl = highResPoster,
                         releaseYear = year,
-                        genre = "Movie • $genre"
+                        genre = cleanGenre.ifBlank { "Action" }
                     )
                 }
             }
-        } catch (e: Exception) {
-            System.err.println("iTunes lookup failed for '$query': ${e.message}")
+        } catch (_: Exception) {
         } finally {
             connection?.disconnect()
         }
         return null
     }
 
-    // ========================================================================
-    // 2. SERIES METADATA RESOLUTION (TVMaze API)
-    // ========================================================================
     suspend fun resolveSeries(rawSeriesName: String): SeriesMetadata = withContext(Dispatchers.IO) {
         val trimmed = rawSeriesName.trim()
         seriesCache[trimmed]?.let { return@withContext it }
@@ -242,7 +276,7 @@ object DesktopOnlineMetadataResolver {
                 val genresArray = if (root.has("genres") && root.get("genres").isJsonArray) root.getAsJsonArray("genres") else null
                 val genresList = mutableListOf<String>()
                 genresArray?.forEach { if (!it.isJsonNull) genresList.add(it.asString) }
-                val genreString = if (genresList.isNotEmpty()) genresList.joinToString(" • ") else "TV Series • Drama"
+                val genreString = if (genresList.isNotEmpty()) genresList.joinToString(" • ") else "Series • Drama"
 
                 val result = SeriesMetadata(
                     tvMazeId = tvMazeId,
@@ -251,23 +285,18 @@ object DesktopOnlineMetadataResolver {
                     genres = genreString
                 )
                 seriesCache[trimmed] = result
-                println("TVMaze series match: '$cleanTitle' -> '$officialName' (ID: $tvMazeId)")
                 return@withContext result
             }
-        } catch (e: Exception) {
-            System.err.println("Series lookup failed for '$cleanTitle': ${e.message}")
+        } catch (_: Exception) {
         } finally {
             connection?.disconnect()
         }
 
-        val fallback = SeriesMetadata(tvMazeId = -1L, officialTitle = cleanTitle, posterUrl = "", genres = "TV Series")
+        val fallback = SeriesMetadata(tvMazeId = -1L, officialTitle = cleanTitle, posterUrl = "", genres = "Series • Drama")
         seriesCache[trimmed] = fallback
         fallback
     }
 
-    // ========================================================================
-    // 3. EPISODE METADATA RESOLUTION (Batch TVMaze Episodes API)
-    // ========================================================================
     suspend fun resolveEpisode(
         seriesName: String,
         tvMazeSeriesId: Long,
@@ -283,7 +312,6 @@ object DesktopOnlineMetadataResolver {
                 episodesMap = fetchAllEpisodesForShow(targetShowId)
                 showEpisodesCache[targetShowId] = episodesMap
             }
-
             episodesMap[Pair(seasonNumber, episodeNumber)]?.let { return@withContext it }
         }
 
@@ -330,34 +358,24 @@ object DesktopOnlineMetadataResolver {
                     }
                 }
             }
-        } catch (e: Exception) {
-            System.err.println("Batch episodes fetch failed for show $showId: ${e.message}")
+        } catch (_: Exception) {
         } finally {
             connection?.disconnect()
         }
         return map
     }
 
-    // ========================================================================
-    // REGEX SANITIZERS & MATCHERS
-    // ========================================================================
     fun extractMovieQueryAndYear(raw: String): Pair<String, String?> {
         var text = raw.substringBeforeLast('.')
-
-        // 1. Strip domain names (e.g. www.uindex.org, pahe.me)
         text = text.replace(Regex("(?i)\\b(https?://)?(www\\.)?[a-z0-9_-]+\\.(org|com|net|in|top|xyz|me|io|co|info|biz|club|site|online|tv|ru|cc|to)\\b"), " ")
-
-        // 2. Strip uploader & site watermarks
         text = text.replace(Regex("(?i)\\b(uindex|uindexorg|yts|yify|rarbg|psa|pahe|galaxytv|tgx|qxr|1337x|torrent|extratorrent|eztv|directdl|line|bone)\\b"), " ")
 
-        // 3. Extract 4-digit release year (1900-2099)
         val yearMatcher = Pattern.compile("\\b(19\\d{2}|20\\d{2})\\b").matcher(text)
         var year: String? = null
         if (yearMatcher.find()) {
             year = yearMatcher.group(1)
         }
 
-        // 4. Strip technical rip tags, codecs, audio, resolutions
         val cleanupTags = listOf(
             "(?i)\\b(2160p|1080p|1080i|720p|480p|FHD|UHD|4K|HDTV|WEB-?DL|WEBRip|BluRay|BRRip|DVDRip|IMAX|Remux)\\b",
             "(?i)\\b(x264|x265|H\\.?264|H\\.?265|HEVC|AVC|10bit|8bit|HDR10?\\+?|DV|Dolby)\\b",

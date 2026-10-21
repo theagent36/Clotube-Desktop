@@ -1,12 +1,5 @@
 package com.clotube.desktop.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -16,11 +9,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -39,13 +34,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.clotube.desktop.data.DesktopDriveScanner
-import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
-import com.clotube.desktop.ui.components.ClotubeGlyphIcon
-import com.clotube.desktop.ui.components.DesktopInlinePlayerPanel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.skia.Image as SkiaImage
 import java.net.HttpURLConnection
@@ -55,7 +45,7 @@ import java.util.concurrent.ConcurrentHashMap
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
     MOVIES("Movies", Icons.Rounded.Movie),
-    TV_SERIES("TV Series", Icons.Rounded.Tv),
+    SERIES("Series", Icons.Rounded.Tv),
     RECENTS("Recents", Icons.Rounded.History)
 }
 
@@ -93,6 +83,7 @@ fun DesktopHomeScreen(
     userEmail: String,
     userName: String,
     accessToken: String = "",
+    userAvatarUrl: String = "",
     onSignOut: () -> Unit,
     activeSection: DesktopNavSection = DesktopNavSection.HOME,
     onNavigateSection: (DesktopNavSection) -> Unit = {},
@@ -103,56 +94,19 @@ fun DesktopHomeScreen(
     onMediaClick: (DesktopMediaItem) -> Unit = {},
     onClearHistory: () -> Unit = {},
     onRemoveHistoryItem: (DesktopMediaItem) -> Unit = {},
+    onRefresh: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var currentSection by remember(activeSection) { mutableStateOf(activeSection) }
     var searchQuery by remember { mutableStateOf("") }
+
+    // Screen routing states
     var selectedSeriesForDetail by remember { mutableStateOf<DesktopMediaItem?>(null) }
-
-    var activeInlineMedia by remember { mutableStateOf<DesktopMediaItem?>(null) }
-    var inlineSeriesEpisodes by remember { mutableStateOf<List<DesktopEpisode>>(emptyList()) }
-
-    LaunchedEffect(activeInlineMedia?.id) {
-        val media = activeInlineMedia ?: run {
-            inlineSeriesEpisodes = emptyList()
-            return@LaunchedEffect
-        }
-        if (inlineSeriesEpisodes.any { it.id == media.id }) {
-            return@LaunchedEffect
-        }
-        val isSeries = media.genre.contains("Series", ignoreCase = true) || series.any { it.id == media.id }
-        if (isSeries) {
-            withContext(Dispatchers.IO) {
-                try {
-                    val scanner = DesktopDriveScanner(accessToken)
-                    val details = scanner.loadSeriesDetails(media.id, media.title)
-                    val allEpisodes = details.seasons.flatMap { it.episodes }
-                    if (allEpisodes.isNotEmpty()) {
-                        inlineSeriesEpisodes = allEpisodes
-                        val firstEp = allEpisodes.first()
-                        if (activeInlineMedia?.id == media.id) {
-                            activeInlineMedia = DesktopMediaItem(
-                                id = firstEp.id,
-                                title = "${media.title} - ${firstEp.title}",
-                                thumbnailUrl = firstEp.thumbnailUrl.ifBlank { media.thumbnailUrl },
-                                genre = "S${firstEp.seasonNumber}:E${firstEp.episodeNumber}",
-                                durationMs = firstEp.durationMs
-                            )
-                        }
-                    } else {
-                        inlineSeriesEpisodes = emptyList()
-                    }
-                } catch (_: Exception) {
-                    inlineSeriesEpisodes = emptyList()
-                }
-            }
-        } else {
-            inlineSeriesEpisodes = emptyList()
-        }
-    }
+    var selectedMovieForPlayer by remember { mutableStateOf<DesktopMediaItem?>(null) }
 
     val navigateTo: (DesktopNavSection) -> Unit = { section ->
         selectedSeriesForDetail = null
+        selectedMovieForPlayer = null
         currentSection = section
         onNavigateSection(section)
     }
@@ -171,13 +125,13 @@ fun DesktopHomeScreen(
             .fillMaxSize()
             .background(Color(0xFF07090E))
     ) {
+        // 1. LEFT SIDEBAR
         DesktopFigmaSidebar(
             activeSection = currentSection,
-            recentsCount = continueWatching.size,
-            totalItemsCount = movies.size + series.size,
             onSelectSection = navigateTo
         )
 
+        // Vertical Divider
         Box(
             modifier = Modifier
                 .fillMaxHeight()
@@ -185,6 +139,7 @@ fun DesktopHomeScreen(
                 .background(Color(0xFF141923))
         )
 
+        // 2. RIGHT WORKSPACE
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -196,6 +151,7 @@ fun DesktopHomeScreen(
                 onSearchChange = { searchQuery = it },
                 userName = userName.ifBlank { userEmail.substringBefore('@').ifBlank { "Clotube User" } },
                 userEmail = userEmail,
+                userAvatarUrl = userAvatarUrl,
                 onSignOut = onSignOut
             )
 
@@ -204,13 +160,25 @@ fun DesktopHomeScreen(
                     .fillMaxWidth()
                     .weight(1f)
             ) {
+                // SERIES FULL DETAIL SCREEN
                 if (selectedSeriesForDetail != null) {
                     DesktopSeriesDetailScreen(
                         seriesItem = selectedSeriesForDetail!!,
                         accessToken = accessToken,
                         onBack = { selectedSeriesForDetail = null }
                     )
-                } else {
+                }
+                // DEDICATED MOVIE CINEMA PLAYER
+                else if (selectedMovieForPlayer != null) {
+                    DesktopMoviePlayerScreen(
+                        initialMovie = selectedMovieForPlayer!!,
+                        allMovies = filteredMovies,
+                        accessToken = accessToken,
+                        onBack = { selectedMovieForPlayer = null }
+                    )
+                }
+                // REGULAR BROWSING TABS
+                else {
                     when (currentSection) {
                         DesktopNavSection.HOME -> {
                             FigmaHomeContent(
@@ -218,23 +186,9 @@ fun DesktopHomeScreen(
                                 continueWatching = continueWatching,
                                 movies = filteredMovies,
                                 series = filteredSeries,
-                                accessToken = accessToken,
-                                activeInlineMedia = activeInlineMedia,
-                                inlineSeriesEpisodes = inlineSeriesEpisodes,
-                                onPlayMedia = { media ->
-                                    activeInlineMedia = media
-                                },
-                                onCloseInlinePlayer = {
-                                    activeInlineMedia = null
-                                },
-                                onEpisodeSelected = { ep ->
-                                    activeInlineMedia = DesktopMediaItem(
-                                        id = ep.id,
-                                        title = ep.title,
-                                        thumbnailUrl = ep.thumbnailUrl,
-                                        genre = "S${ep.seasonNumber}:E${ep.episodeNumber}",
-                                        durationMs = ep.durationMs
-                                    )
+                                onMovieClick = { movie ->
+                                    selectedMovieForPlayer = movie
+                                    onMediaClick(movie)
                                 },
                                 onNavigateSection = navigateTo,
                                 onSeriesClick = { seriesItem ->
@@ -246,13 +200,13 @@ fun DesktopHomeScreen(
                             FigmaMoviesContent(
                                 movies = filteredMovies,
                                 onMediaClick = { movie ->
-                                    activeInlineMedia = movie
-                                    currentSection = DesktopNavSection.HOME
+                                    selectedMovieForPlayer = movie
+                                    onMediaClick(movie)
                                 }
                             )
                         }
-                        DesktopNavSection.TV_SERIES -> {
-                            FigmaTvSeriesContent(
+                        DesktopNavSection.SERIES -> {
+                            FigmaSeriesContent(
                                 series = filteredSeries,
                                 continueWatching = continueWatching,
                                 onMediaClick = { seriesItem ->
@@ -264,8 +218,8 @@ fun DesktopHomeScreen(
                             FigmaRecentsContent(
                                 recents = continueWatching.ifEmpty { filteredMovies.take(3) },
                                 onMediaClick = { item ->
-                                    activeInlineMedia = item
-                                    currentSection = DesktopNavSection.HOME
+                                    selectedMovieForPlayer = item
+                                    onMediaClick(item)
                                 },
                                 onClearHistory = onClearHistory,
                                 onRemoveItem = onRemoveHistoryItem
@@ -278,119 +232,144 @@ fun DesktopHomeScreen(
     }
 }
 
+// ============================================================================
+// CLEAN HOME CONTENT: NO MINIPLAYER, FAST NATIVE SKIA SCROLLING
+// ============================================================================
 @Composable
 private fun FigmaHomeContent(
     featuredItem: DesktopMediaItem?,
     continueWatching: List<DesktopMediaItem>,
     movies: List<DesktopMediaItem>,
     series: List<DesktopMediaItem>,
-    accessToken: String,
-    activeInlineMedia: DesktopMediaItem?,
-    inlineSeriesEpisodes: List<DesktopEpisode>,
-    onPlayMedia: (DesktopMediaItem) -> Unit,
-    onCloseInlinePlayer: () -> Unit,
-    onEpisodeSelected: (DesktopEpisode) -> Unit,
+    onMovieClick: (DesktopMediaItem) -> Unit,
     onNavigateSection: (DesktopNavSection) -> Unit,
     onSeriesClick: (DesktopMediaItem) -> Unit
 ) {
-    val listState = rememberLazyListState()
-    val coroutineScope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        AnimatedVisibility(
-            visible = activeInlineMedia != null,
-            enter = expandVertically(
-                animationSpec = tween(450, easing = FastOutSlowInEasing),
-                expandFrom = Alignment.Top
-            ) + fadeIn(animationSpec = tween(300)),
-            exit = shrinkVertically(
-                animationSpec = tween(350, easing = FastOutSlowInEasing),
-                shrinkTowards = Alignment.Top
-            ) + fadeOut(animationSpec = tween(200))
+    // Recovery card if 0 titles indexed
+    if (movies.isEmpty() && series.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
         ) {
-            activeInlineMedia?.let { media ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 28.dp, vertical = 8.dp)
+            Surface(
+                modifier = Modifier.widthIn(max = 520.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF0C1018),
+                border = BorderStroke(1.dp, Color(0xFF1E2638))
+            ) {
+                Column(
+                    modifier = Modifier.padding(28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    DesktopInlinePlayerPanel(
-                        media = media,
-                        accessToken = accessToken,
-                        seriesEpisodes = inlineSeriesEpisodes,
-                        onEpisodeSelected = onEpisodeSelected,
-                        onClosePlayer = onCloseInlinePlayer
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF131D2D)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CloudOff,
+                            contentDescription = null,
+                            tint = Color(0xFF00E5FF),
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "No Media Indexed in Google Drive",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
                     )
+
+                    Text(
+                        text = "Clotube connected to your account, but found 0 movies or series folders in Drive. Check that your folders are named 'Movies' or 'Series', or verify your internet connection.",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Button(
+                        onClick = { onNavigateSection(DesktopNavSection.HOME) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(42.dp).pointerHoverIcon(PointerIcon.Hand)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
+        return
+    }
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 64.dp),
-            verticalArrangement = Arrangement.spacedBy(28.dp)
-        ) {
-            featuredItem?.let { hero ->
-                item(key = "home_hero_billboard") {
-                    FigmaHeroBanner(
-                        item = hero,
-                        overline = "FEATURED IN YOUR DRIVE",
-                        primaryButtonText = "Resume watching",
-                        onPrimaryClick = {
-                            onPlayMedia(hero)
-                            coroutineScope.launch { listState.animateScrollToItem(0) }
-                        }
-                    )
-                }
-            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 48.dp),
+        verticalArrangement = Arrangement.spacedBy(28.dp)
+    ) {
+        // 1. Hero Billboard Banner
+        featuredItem?.let { hero ->
+            FigmaHeroBanner(
+                item = hero,
+                overline = "FEATURED IN YOUR DRIVE",
+                primaryButtonText = "Resume watching",
+                onPrimaryClick = { onMovieClick(hero) }
+            )
+        }
 
-            if (continueWatching.isNotEmpty()) {
-                item(key = "home_continue_watching") {
-                    FigmaCarouselSection(
-                        overline = "PICK UP WHERE YOU LEFT OFF",
-                        title = "Continue watching",
-                        actionLabel = "View all",
-                        items = continueWatching.take(5),
-                        onActionClick = { onNavigateSection(DesktopNavSection.RECENTS) },
-                        onItemClick = { item ->
-                            onPlayMedia(item)
-                            coroutineScope.launch { listState.animateScrollToItem(0) }
-                        }
-                    )
-                }
-            }
+        // 2. Continue Watching Row
+        if (continueWatching.isNotEmpty()) {
+            FigmaCarouselSection(
+                overline = "PICK UP WHERE YOU LEFT OFF",
+                title = "Continue watching",
+                actionLabel = "View all",
+                items = continueWatching.take(5),
+                onActionClick = { onNavigateSection(DesktopNavSection.RECENTS) },
+                onItemClick = onMovieClick
+            )
+        }
 
-            if (movies.isNotEmpty()) {
-                item(key = "home_movies_row") {
-                    FigmaCarouselSection(
-                        overline = "MOVIES COLLECTION",
-                        title = "Movies",
-                        actionLabel = "View all",
-                        items = movies.take(5),
-                        onActionClick = { onNavigateSection(DesktopNavSection.MOVIES) },
-                        onItemClick = { item ->
-                            onPlayMedia(item)
-                            coroutineScope.launch { listState.animateScrollToItem(0) }
-                        }
-                    )
-                }
-            }
+        // 3. Movies Row
+        if (movies.isNotEmpty()) {
+            FigmaCarouselSection(
+                overline = "MOVIES COLLECTION",
+                title = "Movies",
+                actionLabel = "View all",
+                items = movies.take(5),
+                onActionClick = { onNavigateSection(DesktopNavSection.MOVIES) },
+                onItemClick = onMovieClick
+            )
+        }
 
-            if (series.isNotEmpty()) {
-                item(key = "home_series_row") {
-                    FigmaCarouselSection(
-                        overline = "MULTI-SEASON SHOWS",
-                        title = "TV Series",
-                        actionLabel = "View all",
-                        items = series.take(5),
-                        onActionClick = { onNavigateSection(DesktopNavSection.TV_SERIES) },
-                        onItemClick = onSeriesClick
-                    )
-                }
-            }
+        // 4. Series Row (renamed from TV Series)
+        if (series.isNotEmpty()) {
+            FigmaCarouselSection(
+                overline = "MULTI-SEASON SHOWS",
+                title = "Series",
+                actionLabel = "View all",
+                items = series.take(5),
+                onActionClick = { onNavigateSection(DesktopNavSection.SERIES) },
+                onItemClick = onSeriesClick
+            )
         }
     }
 }
@@ -515,7 +494,7 @@ private fun FigmaMoviesContent(
 }
 
 @Composable
-private fun FigmaTvSeriesContent(
+private fun FigmaSeriesContent(
     series: List<DesktopMediaItem>,
     continueWatching: List<DesktopMediaItem>,
     onMediaClick: (DesktopMediaItem) -> Unit
@@ -541,7 +520,7 @@ private fun FigmaTvSeriesContent(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "TV Series",
+                        text = "Series",
                         color = Color.White,
                         fontSize = 34.sp,
                         fontWeight = FontWeight.ExtraBold
@@ -774,9 +753,6 @@ private fun FigmaRecentsContent(
     }
 }
 
-// ============================================================================
-// CLEAN HERO BANNER (NO FAKE SPEC PILLS / CLEAN METADATA)
-// ============================================================================
 @Composable
 private fun FigmaHeroBanner(
     item: DesktopMediaItem,
@@ -789,7 +765,7 @@ private fun FigmaHeroBanner(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(360.dp)
+            .height(370.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(Color(0xFF101520))
             .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
@@ -809,7 +785,7 @@ private fun FigmaHeroBanner(
                 .background(
                     Brush.horizontalGradient(
                         colors = listOf(
-                            Color(0xF5080B11),
+                            Color(0xF8080B11),
                             Color(0xCC080B11),
                             Color(0x4D080B11)
                         )
@@ -856,19 +832,61 @@ private fun FigmaHeroBanner(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Clean real metadata only
-            val metadataString = buildString {
-                if (item.durationMs > 0L) append("${formatDuration(item.durationMs)}   •   ")
-                append(item.genre)
-            }
-            Text(
-                text = metadataString,
-                color = Color(0xFF94A3B8),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (item.durationMs > 0L) {
+                    Text(
+                        text = formatDuration(item.durationMs),
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(text = "•", color = Color(0xFF64748B), fontSize = 13.sp)
+                }
 
-            Spacer(modifier = Modifier.height(24.dp))
+                Text(
+                    text = item.genre.ifBlank { "Action • Drama" },
+                    color = Color(0xFF38BDF8),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val genreTokens = remember(item.genre) {
+                item.genre.split("•", ",")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() && !it.equals("Movie", ignoreCase = true) }
+            }
+
+            if (genreTokens.isNotEmpty()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    genreTokens.forEach { genreTag ->
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0x99131D2D),
+                            border = BorderStroke(1.dp, Color(0x661E3A5F))
+                        ) {
+                            Text(
+                                text = genreTag,
+                                color = Color(0xFFE2E8F0),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(20.dp))
+            } else {
+                Spacer(modifier = Modifier.height(16.dp))
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
@@ -1002,9 +1020,6 @@ private fun FigmaCarouselSection(
     }
 }
 
-// ============================================================================
-// CLEAN MEDIA CARD (NO FAKE 4K BADGE, ACCURATE DURATION ONLY)
-// ============================================================================
 @Composable
 fun DesktopFigmaMediaCard(
     item: DesktopMediaItem,
@@ -1056,7 +1071,6 @@ fun DesktopFigmaMediaCard(
                     )
             )
 
-            // Top-Right Duration Badge (Only when duration is present)
             if (item.durationMs > 0L) {
                 Surface(
                     modifier = Modifier
@@ -1125,8 +1139,6 @@ fun DesktopFigmaMediaCard(
 @Composable
 private fun DesktopFigmaSidebar(
     activeSection: DesktopNavSection,
-    recentsCount: Int,
-    totalItemsCount: Int,
     onSelectSection: (DesktopNavSection) -> Unit
 ) {
     Column(
@@ -1136,6 +1148,7 @@ private fun DesktopFigmaSidebar(
             .background(Color(0xFF090C12))
             .padding(horizontal = 16.dp, vertical = 20.dp)
     ) {
+        // TOP HEADER: CLEAN WORDMARK (GLYPH REMOVED)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1143,23 +1156,21 @@ private fun DesktopFigmaSidebar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ClotubeGlyphIcon(size = 34.dp)
-                Spacer(modifier = Modifier.width((-4).dp))
-                Text(
-                    text = "lotube",
-                    color = Color.White,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = (-0.5).sp
-                )
-            }
+            Text(
+                text = "Clotube",
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = (-0.4).sp
+            )
 
             Icon(
                 imageVector = Icons.Rounded.Menu,
                 contentDescription = "Menu",
                 tint = Color(0xFF64748B),
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier
+                    .size(18.dp)
+                    .pointerHoverIcon(PointerIcon.Hand)
             )
         }
 
@@ -1194,42 +1205,20 @@ private fun DesktopFigmaSidebar(
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = section.icon,
-                            contentDescription = section.label,
-                            tint = if (isSelected) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = section.label,
-                            color = if (isSelected) Color.White else Color(0xFF94A3B8),
-                            fontSize = 13.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                        )
-                    }
-
-                    if (section == DesktopNavSection.RECENTS && recentsCount > 0) {
-                        Box(
-                            modifier = Modifier
-                                .size(20.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF2563EB)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = recentsCount.coerceAtMost(99).toString(),
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = section.icon,
+                        contentDescription = section.label,
+                        tint = if (isSelected) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = section.label,
+                        color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                        fontSize = 13.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
                 }
             }
         }
@@ -1259,76 +1248,6 @@ private fun DesktopFigmaSidebar(
                 fontWeight = FontWeight.Medium
             )
         }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            color = Color(0xFF0D111A),
-            border = BorderStroke(1.dp, Color(0xFF1A2232))
-        ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.CloudQueue,
-                            contentDescription = null,
-                            tint = Color(0xFF00E5FF),
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "Cloud library",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Text(
-                        text = "Synced",
-                        color = Color(0xFF00E5FF),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Color(0xFF1E293B))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(0.68f)
-                            .fillMaxHeight()
-                            .background(
-                                Brush.horizontalGradient(
-                                    listOf(Color(0xFF2563EB), Color(0xFF00E5FF))
-                                )
-                            )
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "$totalItemsCount titles indexed in Google Drive",
-                    color = Color(0xFF64748B),
-                    fontSize = 10.sp
-                )
-            }
-        }
     }
 }
 
@@ -1338,9 +1257,12 @@ private fun DesktopFigmaTopBar(
     onSearchChange: (String) -> Unit,
     userName: String,
     userEmail: String,
+    userAvatarUrl: String = "",
     onSignOut: () -> Unit
 ) {
     var showAccountMenu by remember { mutableStateOf(false) }
+    val avatarBitmap = rememberDriveThumbnail(userAvatarUrl)
+
     val initials = remember(userName) {
         userName.split(" ")
             .mapNotNull { it.firstOrNull()?.uppercaseChar() }
@@ -1357,6 +1279,7 @@ private fun DesktopFigmaTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
+        // Search Input Pill
         Surface(
             modifier = Modifier
                 .width(420.dp)
@@ -1421,14 +1344,16 @@ private fun DesktopFigmaTopBar(
             }
         }
 
+        // Right Actions (Online Status Badge + Avatar Only)
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Online Status Badge
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = Color(0xFF0C1928),
-                border = BorderStroke(1.dp, Color(0xFF16324F))
+                color = Color(0xFF091F14),
+                border = BorderStroke(1.dp, Color(0xFF134E2F))
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
@@ -1439,83 +1364,173 @@ private fun DesktopFigmaTopBar(
                         modifier = Modifier
                             .size(6.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF00E5FF))
+                            .background(Color(0xFF22C55E))
                     )
                     Icon(
-                        imageVector = Icons.Rounded.CloudDone,
-                        contentDescription = null,
-                        tint = Color(0xFF38BDF8),
+                        imageVector = Icons.Rounded.Wifi,
+                        contentDescription = "Online",
+                        tint = Color(0xFF22C55E),
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
-                        text = "Direct stream",
-                        color = Color.White,
+                        text = "Online",
+                        color = Color(0xFF22C55E),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
             }
 
+            // CIRCULAR ACCOUNT AVATAR BUTTON (ONLY THE LOGO)
             Box {
-                Row(
+                Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(24.dp))
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.linearGradient(
+                                listOf(Color(0xFF4F46E5), Color(0xFF7C3AED))
+                            )
+                        )
+                        .border(1.5.dp, Color(0xFF38BDF8), CircleShape)
                         .clickable { showAccountMenu = true }
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(Color(0xFF6366F1), Color(0xFF8B5CF6))
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
+                    if (avatarBitmap != null) {
+                        Image(
+                            bitmap = avatarBitmap,
+                            contentDescription = userName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
                         Text(
                             text = initials,
                             color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold
                         )
                     }
-
-                    Column {
-                        Text(
-                            text = userName,
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "Google account",
-                            color = Color(0xFF64748B),
-                            fontSize = 10.sp,
-                            maxLines = 1
-                        )
-                    }
-
-                    Icon(
-                        imageVector = Icons.Rounded.KeyboardArrowDown,
-                        contentDescription = "Account menu",
-                        tint = Color(0xFF64748B),
-                        modifier = Modifier.size(16.dp)
-                    )
                 }
 
+                // ACCOUNT DETAILS POPOVER / DROPDOWN
                 DropdownMenu(
                     expanded = showAccountMenu,
                     onDismissRequest = { showAccountMenu = false },
-                    modifier = Modifier.background(Color(0xFF131824))
+                    modifier = Modifier
+                        .background(Color(0xFF10141F))
+                        .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(12.dp))
+                        .widthIn(min = 240.dp)
                 ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFF4F46E5), Color(0xFF7C3AED))
+                                        )
+                                    )
+                                    .border(1.5.dp, Color(0xFF38BDF8), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (avatarBitmap != null) {
+                                    Image(
+                                        bitmap = avatarBitmap,
+                                        contentDescription = userName,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Text(
+                                        text = initials,
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = userName,
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = userEmail,
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF161F2E),
+                            border = BorderStroke(1.dp, Color(0xFF23324A))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF22C55E))
+                                )
+                                Text(
+                                    text = "Google Account Connected",
+                                    color = Color(0xFF38BDF8),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = Color(0xFF1E2838), thickness = 1.dp)
+
                     DropdownMenuItem(
-                        text = { Text("Sign Out ($userEmail)", color = Color(0xFFF87171), fontSize = 12.sp) },
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Logout,
+                                    contentDescription = "Sign Out",
+                                    tint = Color(0xFFF87171),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Sign Out",
+                                    color = Color(0xFFF87171),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        },
                         onClick = {
                             showAccountMenu = false
                             onSignOut()

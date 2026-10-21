@@ -1,9 +1,11 @@
 # =============================================================================
 # Google Cloud Console & OAuth Credentials (CRITICAL - NEVER COMMIT)
 # =============================================================================
+*client_secrets*.json
 client_secrets.json
 client_secret*.json
 credentials.json
+token.json
 google-services.json
 tokens/
 *.token
@@ -72,3 +74,7 @@ dist/
 *.log
 /.plugins/
 /.opencode-skills/
+
+# Local Application Caches
+clotube_library_cache.json
+clotube_metadata_cache.json

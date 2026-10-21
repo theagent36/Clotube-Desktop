@@ -30,6 +30,7 @@ dependencies {
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.36.0")
     implementation("com.google.apis:google-api-services-drive:v3-rev20241027-2.0.0")
     implementation("com.google.http-client:google-http-client-gson:1.45.0")
+    implementation("com.google.code.gson:gson:2.11.0")
     implementation("uk.co.caprica:vlcj:4.8.3")
 }
 

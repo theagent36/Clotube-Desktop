@@ -30,6 +30,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.clotube.desktop.auth.AuthState
 import com.clotube.desktop.auth.DesktopAuthManager
 import com.clotube.desktop.data.DesktopDriveScanner
+import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.MediaItem
@@ -45,110 +46,68 @@ import com.clotube.desktop.ui.screens.DesktopVideoPlayerScreen
 import com.clotube.desktop.ui.screens.MediaCard
 import com.clotube.desktop.ui.theme.*
 import java.awt.Dimension
+import javax.swing.UIManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-fun main() {
-    System.setProperty("compose.interop.blending", "true")
+fun main() = application {
+    // 1. Force IPv4 socket stack for Google Drive streaming on dGPU profiles
+    System.setProperty("java.net.preferIPv4Stack", "true")
+    System.setProperty("java.net.preferIPv6Addresses", "false")
+
+    // 2. Hardware presentation settings
+    System.setProperty("compose.interop.blending", "false")
+    System.setProperty("skiko.renderApi", "DIRECT3D")
+
+    // 3. Force all Swing/AWT defaults to pure black to eliminate white background flashes
+    try {
+        UIManager.put("Panel.background", java.awt.Color.BLACK)
+        UIManager.put("Panel.foreground", java.awt.Color.BLACK)
+        UIManager.put("Window.background", java.awt.Color.BLACK)
+        UIManager.put("Viewport.background", java.awt.Color.BLACK)
+        UIManager.put("control", java.awt.Color.BLACK)
+    } catch (_: Throwable) {}
+
+    // 4. Start local streaming server
     LocalStreamServer.start()
 
-    application {
-        val windowState = rememberWindowState(
-            width = 1440.dp,
-            height = 900.dp,
-            position = WindowPosition.Aligned(Alignment.Center)
-        )
+    val windowState = rememberWindowState(
+        width = 1440.dp,
+        height = 900.dp,
+        position = WindowPosition.Aligned(Alignment.Center)
+    )
 
-        @Suppress("DEPRECATION")
-        Window(
-            onCloseRequest = ::exitApplication,
-            title = "Clotube",
-            icon = painterResource("ic_clotube.png"),
-            state = windowState
-        ) {
-            // Enforce minimum window constraints
-            LaunchedEffect(Unit) {
-                window.minimumSize = Dimension(1024, 600)
-            }
+    @Suppress("DEPRECATION")
+    Window(
+        onCloseRequest = {
+            exitApplication()
+        },
+        title = "Clotube",
+        icon = painterResource("ic_clotube.png"),
+        state = windowState
+    ) {
+        SideEffect {
+            window.background = java.awt.Color.BLACK
+            window.contentPane.background = java.awt.Color.BLACK
+            window.rootPane.background = java.awt.Color.BLACK
+        }
 
-            ClotubeTheme {
-                ClotubeRootApp()
-            }
+        // Enforce minimum window constraints
+        LaunchedEffect(Unit) {
+            window.minimumSize = Dimension(1024, 600)
+        }
+
+        ClotubeTheme {
+            App()
         }
     }
 }
 
 @Composable
 fun ClotubeRootApp() {
-    val authManager = remember { DesktopAuthManager() }
-    val authState by authManager.authState.collectAsState()
-
-    LaunchedEffect(Unit) {
-        authManager.checkExistingSession()
-    }
-
-    Crossfade(
-        targetState = authState,
-        animationSpec = tween(durationMillis = 200),
-        label = "AuthRootTransition"
-    ) { state ->
-        when (state) {
-            is AuthState.Checking -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color(0xFF000000))
-                )
-            }
-
-            is AuthState.Unauthenticated, is AuthState.Authenticating -> {
-                // Dedicated connection gate — Sidebar and Header MUST be hidden
-                DesktopLoginScreen(
-                    authState = state,
-                    onConnectClick = { authManager.signIn() },
-                    onCancelClick = { authManager.cancelSignIn() }
-                )
-            }
-
-            is AuthState.Authenticated -> {
-                var movies by remember { mutableStateOf<List<DesktopMediaItem>>(emptyList()) }
-                var series by remember { mutableStateOf<List<DesktopMediaItem>>(emptyList()) }
-                var isLoading by remember { mutableStateOf(true) }
-
-                LaunchedEffect(state.accessToken) {
-                    val scanner = DesktopDriveScanner(state.accessToken)
-                    // Fetch in parallel for speed
-                    joinAll(
-                        launch { movies = scanner.loadMovies() },
-                        launch { series = scanner.loadSeriesFolders() }
-                    )
-                    isLoading = false
-                }
-
-                if (isLoading) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color(0xFF0B0E14)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = Color(0xFF2F80ED),
-                            strokeWidth = 2.5.dp,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-                } else {
-                    MainDesktopLayout(
-                        authenticatedState = state,
-                        onSignOut = { authManager.signOut() },
-                        movies = movies,
-                        series = series
-                    )
-                }
-            }
-        }
-    }
+    App()
 }
 
 @Composable
@@ -204,6 +163,7 @@ fun MainDesktopLayout(
                 DesktopHomeScreen(
                     userEmail = authenticatedState.userEmail,
                     userName = authenticatedState.userName,
+                    userAvatarUrl = authenticatedState.userPhotoUrl ?: "",
                     onSignOut = onSignOut,
                     activeSection = activeSection,
                     onNavigateSection = { section -> activeSection = section },

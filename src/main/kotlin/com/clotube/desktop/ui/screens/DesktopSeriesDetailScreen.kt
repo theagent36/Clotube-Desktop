@@ -40,6 +40,7 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
 import kotlinx.coroutines.delay
+import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
@@ -61,13 +62,14 @@ fun DesktopSeriesDetailScreen(
     var selectedSeasonNumber by remember { mutableIntStateOf(1) }
     var activeEpisode by remember { mutableStateOf<DesktopEpisode?>(null) }
 
-    // LibVLC State
     var isPlaying by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(false) }
     var currentTimeMs by remember { mutableLongStateOf(0L) }
     var totalDurationMs by remember { mutableLongStateOf(1L) }
     var volume by remember { mutableFloatStateOf(1f) }
     var isMuted by remember { mutableStateOf(false) }
+
+    var videoAspectRatio by remember { mutableFloatStateOf(16f / 9f) }
 
     val isReleased = remember { AtomicBoolean(false) }
     val focusRequester = remember { FocusRequester() }
@@ -87,37 +89,55 @@ fun DesktopSeriesDetailScreen(
     val mediaPlayerComponent = remember {
         try {
             NativeDiscovery().discover()
-            EmbeddedMediaPlayerComponent()
+            val factory = MediaPlayerFactory(
+                "--no-video-title-show",
+                "--avcodec-hw=any",
+                "--vout=direct3d11",
+                "--aout=directsound",
+                "--audio-resampler=soxr",
+                "--network-caching=3000",
+                "--file-caching=2000",
+                "--drop-late-frames",
+                "--skip-frames"
+            )
+            EmbeddedMediaPlayerComponent(factory, null, null, null, null).apply {
+                background = java.awt.Color.BLACK
+                videoSurfaceComponent().background = java.awt.Color.BLACK
+            }
         } catch (e: Throwable) {
-            System.err.println("Series Player LibVLC error: ${e.message}")
+            System.err.println("[SeriesPlayer] LibVLC error: ${e.message}")
             null
         }
     }
 
-    // Connect playback to activeEpisode
+    val player = mediaPlayerComponent?.mediaPlayer()
+
     LaunchedEffect(activeEpisode?.id) {
         val ep = activeEpisode ?: return@LaunchedEffect
         val comp = mediaPlayerComponent ?: return@LaunchedEffect
-        val player = comp.mediaPlayer() ?: return@LaunchedEffect
+        val p = comp.mediaPlayer() ?: return@LaunchedEffect
         val surface = comp.videoSurfaceComponent() ?: return@LaunchedEffect
 
         if (isReleased.get()) return@LaunchedEffect
 
         val port = LocalStreamServer.start()
         val streamUrl = "http://127.0.0.1:$port/stream?id=${ep.id}&token=$accessToken"
+        val hasStarted = AtomicBoolean(false)
 
         fun startStream() {
-            SwingUtilities.invokeLater {
-                try {
-                    if (!isReleased.get()) {
-                        player.media().play(
-                            streamUrl,
-                            ":network-caching=3000",
-                            ":file-caching=2000"
-                        )
+            if (hasStarted.compareAndSet(false, true)) {
+                SwingUtilities.invokeLater {
+                    try {
+                        if (!isReleased.get()) {
+                            p.media().play(
+                                streamUrl,
+                                ":network-caching=2500",
+                                ":file-caching=1500"
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        System.err.println("[SeriesPlayer] Playback error: ${t.message}")
                     }
-                } catch (t: Throwable) {
-                    System.err.println("Playback start suppressed: ${t.message}")
                 }
             }
         }
@@ -135,16 +155,52 @@ fun DesktopSeriesDetailScreen(
             }
             surface.addHierarchyListener(hierarchyListener)
         }
+
+        for (i in 0 until 10) {
+            if (hasStarted.get()) break
+            delay(100)
+            if (surface.isDisplayable) {
+                startStream()
+                break
+            }
+        }
     }
 
-    // Unified single lifecycle teardown
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            for (i in 0 until 20) {
+                val dim = player?.video()?.videoDimension()
+                if (dim != null && dim.width > 0 && dim.height > 0) {
+                    val ratio = dim.width.toFloat() / dim.height.toFloat()
+                    if (ratio in 0.5f..3.5f) {
+                        videoAspectRatio = ratio
+                        break
+                    }
+                }
+                delay(150)
+            }
+        }
+    }
+
     DisposableEffect(Unit) {
         val comp = mediaPlayerComponent
-        val player = comp?.mediaPlayer()
+
+        fun checkDimension(mp: MediaPlayer?) {
+            val dim = mp?.video()?.videoDimension()
+            if (dim != null && dim.width > 0 && dim.height > 0) {
+                val ratio = dim.width.toFloat() / dim.height.toFloat()
+                if (ratio in 0.5f..3.5f) {
+                    videoAspectRatio = ratio
+                }
+            }
+        }
 
         val listener = object : MediaPlayerEventAdapter() {
             override fun timeChanged(mediaPlayer: MediaPlayer?, newTime: Long) {
                 currentTimeMs = newTime
+                if (videoAspectRatio == (16f / 9f)) {
+                    checkDimension(mediaPlayer)
+                }
             }
             override fun lengthChanged(mediaPlayer: MediaPlayer?, newLength: Long) {
                 if (newLength > 0L) totalDurationMs = newLength
@@ -152,6 +208,12 @@ fun DesktopSeriesDetailScreen(
             override fun playing(mediaPlayer: MediaPlayer?) {
                 isPlaying = true
                 isBuffering = false
+                checkDimension(mediaPlayer)
+            }
+            override fun videoOutput(mediaPlayer: MediaPlayer?, newCount: Int) {
+                if (newCount > 0) {
+                    checkDimension(mediaPlayer)
+                }
             }
             override fun paused(mediaPlayer: MediaPlayer?) {
                 isPlaying = false
@@ -170,15 +232,15 @@ fun DesktopSeriesDetailScreen(
             if (!isReleased.getAndSet(true)) {
                 try {
                     player?.events()?.removeMediaPlayerEventListener(listener)
+                    player?.controls()?.stop()
                     comp?.release()
                 } catch (t: Throwable) {
-                    System.err.println("Safe LibVLC teardown: ${t.message}")
+                    System.err.println("[SeriesPlayer] Safe teardown: ${t.message}")
                 }
             }
         }
     }
 
-    // Safe focus request: Runs only after composition and layout have settled
     LaunchedEffect(isLoading) {
         if (!isLoading) {
             delay(50)
@@ -186,9 +248,6 @@ fun DesktopSeriesDetailScreen(
         }
     }
 
-    val player = mediaPlayerComponent?.mediaPlayer()
-
-    // Outer Box is ALWAYS mounted and holds the focusRequester from frame 1
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -199,7 +258,7 @@ fun DesktopSeriesDetailScreen(
                 if (keyEvent.type == KeyEventType.KeyDown) {
                     when (keyEvent.key) {
                         Key.Spacebar -> {
-                            player?.controls()?.pause()
+                            if (isPlaying) player?.controls()?.pause() else player?.controls()?.play()
                             true
                         }
                         Key.DirectionLeft -> {
@@ -245,7 +304,6 @@ fun DesktopSeriesDetailScreen(
                 contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 12.dp, bottom = 48.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                // 1. Breadcrumb navigation
                 item(key = "breadcrumb") {
                     Row(
                         modifier = Modifier
@@ -263,7 +321,7 @@ fun DesktopSeriesDetailScreen(
                             modifier = Modifier.size(15.dp)
                         )
                         Text(
-                            text = "Back to TV Series",
+                            text = "Back to Series",
                             color = Color(0xFF94A3B8),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
@@ -271,7 +329,6 @@ fun DesktopSeriesDetailScreen(
                     }
                 }
 
-                // 2. Series Header Block
                 item(key = "series_header_block") {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -355,7 +412,6 @@ fun DesktopSeriesDetailScreen(
                     }
                 }
 
-                // 3. MAIN SPLIT VIEW (Dedicated Video Canvas + Docked Controls)
                 item(key = "main_split_view") {
                     Row(
                         modifier = Modifier
@@ -363,7 +419,6 @@ fun DesktopSeriesDetailScreen(
                             .height(580.dp),
                         horizontalArrangement = Arrangement.spacedBy(22.dp)
                     ) {
-                        // Left Column: Video Surface + Docked Controls + Ep Info
                         Column(
                             modifier = Modifier
                                 .weight(0.67f)
@@ -375,20 +430,35 @@ fun DesktopSeriesDetailScreen(
                                     .fillMaxWidth()
                                     .weight(1f)
                                     .clip(RoundedCornerShape(14.dp))
-                                    .background(Color(0xFF090D14))
+                                    .background(Color.Black)
                                     .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(14.dp))
                             ) {
-                                // Video Surface
-                                Box(
+                                BoxWithConstraints(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .weight(1f)
-                                        .background(Color.Black)
+                                        .background(Color.Black),
+                                    contentAlignment = Alignment.Center
                                 ) {
+                                    val boxWidth = maxWidth.value
+                                    val boxHeight = maxHeight.value
+                                    val boxRatio = if (boxHeight > 0f) boxWidth / boxHeight else (16f / 9f)
+
+                                    val videoModifier = if (videoAspectRatio > boxRatio) {
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(videoAspectRatio)
+                                    } else {
+                                        Modifier
+                                            .fillMaxHeight()
+                                            .aspectRatio(videoAspectRatio)
+                                    }
+
                                     if (mediaPlayerComponent != null) {
                                         SwingPanel(
+                                            background = Color.Black,
                                             factory = { mediaPlayerComponent },
-                                            modifier = Modifier.fillMaxSize()
+                                            modifier = videoModifier
                                         )
                                     }
 
@@ -399,7 +469,6 @@ fun DesktopSeriesDetailScreen(
                                     }
                                 }
 
-                                // Docked Transport Bar
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -435,7 +504,9 @@ fun DesktopSeriesDetailScreen(
                                     }
 
                                     IconButton(
-                                        onClick = { player?.controls()?.pause() },
+                                        onClick = {
+                                            if (isPlaying) player?.controls()?.pause() else player?.controls()?.play()
+                                        },
                                         modifier = Modifier.size(32.dp).pointerHoverIcon(PointerIcon.Hand)
                                     ) {
                                         Icon(
@@ -525,7 +596,6 @@ fun DesktopSeriesDetailScreen(
                                 }
                             }
 
-                            // Active Episode Information (Clean metadata only)
                             activeEpisode?.let { ep ->
                                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Text(
@@ -563,7 +633,6 @@ fun DesktopSeriesDetailScreen(
                             }
                         }
 
-                        // Right Column: Episode List Card
                         Surface(
                             modifier = Modifier
                                 .weight(0.33f)
@@ -826,7 +895,6 @@ fun DesktopSeriesDetailScreen(
                     }
                 }
 
-                // 4. BOTTOM "ABOUT THE SERIES" SECTION
                 item(key = "about_the_series") {
                     Spacer(modifier = Modifier.height(10.dp))
                     HorizontalDivider(color = Color(0xFF141A26), thickness = 1.dp)

@@ -38,7 +38,7 @@ import com.clotube.desktop.ui.theme.*
 enum class NavDestination(val label: String, val icon: ImageVector, val activeIcon: ImageVector) {
     HOME("Home", Icons.Outlined.Home, Icons.Filled.Home),
     MOVIES("Movies", Icons.Outlined.Movie, Icons.Filled.Movie),
-    TV_SERIES("TV Series", Icons.Outlined.Tv, Icons.Filled.Tv),
+    SERIES("Series", Icons.Outlined.Tv, Icons.Filled.Tv),
     RECENTS("Recents", Icons.Outlined.History, Icons.Filled.History),
     SETTINGS("Settings", Icons.Outlined.Settings, Icons.Filled.Settings)
 }
@@ -81,14 +81,13 @@ fun Sidebar(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Start
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    ClotubeGlyphIcon(size = 36.dp)
+                    ClotubeGlyphIcon(size = 32.dp)
 
                     if (!isCollapsed) {
-                        Spacer(modifier = Modifier.width((-2).dp))
                         Text(
-                            text = "lotube",
+                            text = "Clotube",
                             style = ClotubeTypography.headlineMedium.copy(
                                 fontWeight = FontWeight.ExtraBold,
                                 letterSpacing = (-0.5).sp,
@@ -130,7 +129,7 @@ fun Sidebar(
             val mainItems = listOf(
                 NavDestination.HOME,
                 NavDestination.MOVIES,
-                NavDestination.TV_SERIES,
+                NavDestination.SERIES,
                 NavDestination.RECENTS
             )
 

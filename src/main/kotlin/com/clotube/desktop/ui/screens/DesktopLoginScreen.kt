@@ -50,14 +50,12 @@ fun DesktopLoginScreen(
             // 1. Unified [C]lotube Wordmark
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                ClotubeGlyphIcon(size = 84.dp)
-
-                Spacer(modifier = Modifier.width((-4).dp))
+                ClotubeGlyphIcon(size = 80.dp)
 
                 Text(
-                    text = "lotube",
+                    text = "Clotube",
                     color = Color.White,
                     fontSize = 50.sp,
                     fontWeight = FontWeight.ExtraBold,
