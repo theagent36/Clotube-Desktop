@@ -32,6 +32,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.ui.components.ClotubeGlyphIcon
 import com.clotube.desktop.ui.theme.*
 
 enum class NavDestination(val label: String, val icon: ImageVector, val activeIcon: ImageVector) {
@@ -80,28 +81,14 @@ fun Sidebar(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.Start
                 ) {
-                    // Logo emblem
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .shadow(8.dp, RoundedCornerShape(10.dp), spotColor = AccentSecondary)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(AccentGradient),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.PlayArrow,
-                            contentDescription = "Clotube Emblem",
-                            tint = Color.White,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
+                    ClotubeGlyphIcon(size = 36.dp)
 
                     if (!isCollapsed) {
+                        Spacer(modifier = Modifier.width((-2).dp))
                         Text(
-                            text = "Clotube",
+                            text = "lotube",
                             style = ClotubeTypography.headlineMedium.copy(
                                 fontWeight = FontWeight.ExtraBold,
                                 letterSpacing = (-0.5).sp,

@@ -1,24 +1,74 @@
-node_modules/
-dist/
+# =============================================================================
+# Google Cloud Console & OAuth Credentials (CRITICAL - NEVER COMMIT)
+# =============================================================================
+client_secrets.json
+client_secret*.json
+credentials.json
+google-services.json
+tokens/
+*.token
+*oauth*token*
+clotube_watch_history.json
+
+# Signing Keystores & Keys
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# Local Properties & Environment Configurations
+local.properties
+gradle.properties
+.env
+*.env
+*.env.local
+
+# =============================================================================
+# Kotlin & Compose Multiplatform Desktop Build Artifacts
+# =============================================================================
 build/
+*/build/
 .gradle/
+*/.gradle/
+out/
+bin/
+target/
+
+# Windows Desktop Package & Installer Binaries
+/build/compose/binaries/
+*.exe
+*.msi
+*.zip
+*.tar.gz
+
+# =============================================================================
+# IDE & System Files
+# =============================================================================
 .idea/
 *.iml
-.cache/
-.env*
-.vite/
-vite.config.*.timestamp-*
-*.tsbuildinfo
-*-debug.log*
-logs/
-*.log
-.claude-replay.*
-.tmp-*
-/.figma/design-context/
+*.iws
+*.ipr
+.vscode/
+.project
+.classpath
+.settings/
 
-# Platform-managed agentplat state, not project source. In the
-# client-initiated single-repo workspace layout (make's `Path: "."` spec) the
-# repo root IS the workspace root, so these land inside this repo rather than
-# beside it.
+# OS Specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+*.swp
+*~
+
+# Frontend / Scaffolding & Logs
+node_modules/
+dist/
+.cache/
+.vite/
+*.tsbuildinfo
+*.log
 /.plugins/
 /.opencode-skills/

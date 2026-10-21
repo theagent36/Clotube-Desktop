@@ -11,12 +11,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Notifications
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,18 +26,25 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
 import com.clotube.desktop.ui.theme.*
 
 @Composable
 fun DesktopHeader(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
-    onAvatarClick: () -> Unit,
+    userName: String = "Angshuman",
+    userEmail: String = "user@gmail.com",
+    userPhotoUrl: String? = null,
+    onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showAccountMenu by remember { mutableStateOf(false) }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -173,53 +180,197 @@ fun DesktopHeader(
                 )
             }
 
-            // Mock User Avatar Button
-            val avatarInteraction = remember { MutableInteractionSource() }
-            val isAvatarHovered by avatarInteraction.collectIsHoveredAsState()
+            // User Avatar Button & Account Dropdown
+            Box {
+                val avatarInteraction = remember { MutableInteractionSource() }
+                val isAvatarHovered by avatarInteraction.collectIsHoveredAsState()
 
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (isAvatarHovered) ElevatedCardHover else ElevatedCard)
-                    .border(
-                        width = 1.dp,
-                        color = if (isAvatarHovered) AccentSecondary else BorderSubtle,
-                        shape = RoundedCornerShape(20.dp)
-                    )
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .hoverable(avatarInteraction)
-                    .clickable(
-                        interactionSource = avatarInteraction,
-                        indication = null,
-                        onClick = onAvatarClick
-                    )
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
+                val initials = remember(userName) {
+                    val parts = userName.trim().split(" ")
+                    if (parts.size >= 2) {
+                        "${parts[0].firstOrNull() ?: 'U'}${parts[1].firstOrNull() ?: 'C'}".uppercase()
+                    } else {
+                        userName.take(2).uppercase().ifEmpty { "US" }
+                    }
+                }
+
+                Row(
                     modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(AccentGradient),
-                    contentAlignment = Alignment.Center
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(if (isAvatarHovered || showAccountMenu) ElevatedCardHover else ElevatedCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (isAvatarHovered || showAccountMenu) AccentSecondary else BorderSubtle,
+                            shape = RoundedCornerShape(20.dp)
+                        )
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .hoverable(avatarInteraction)
+                        .clickable(
+                            interactionSource = avatarInteraction,
+                            indication = null,
+                            onClick = { showAccountMenu = !showAccountMenu }
+                        )
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    if (!userPhotoUrl.isNullOrBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                        ) {
+                            AsyncImage(
+                                model = userPhotoUrl,
+                                contentDescription = userName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .background(AccentGradient),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = initials,
+                                style = ClotubeTypography.labelMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            )
+                        }
+                    }
+
                     Text(
-                        text = "AM",
-                        style = ClotubeTypography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                        text = userName,
+                        style = ClotubeTypography.bodyMedium.copy(
+                            fontWeight = FontWeight.Medium,
+                            color = if (isAvatarHovered || showAccountMenu) TextWhite else TextSlateMuted
                         )
                     )
                 }
 
-                Text(
-                    text = "Angshuman",
-                    style = ClotubeTypography.bodyMedium.copy(
-                        fontWeight = FontWeight.Medium,
-                        color = if (isAvatarHovered) TextWhite else TextSlateMuted
-                    )
-                )
+                // Top-right Account Dialog / Dropdown
+                DropdownMenu(
+                    expanded = showAccountMenu,
+                    onDismissRequest = { showAccountMenu = false },
+                    modifier = Modifier
+                        .width(260.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(SurfaceDark)
+                        .border(1.dp, BorderHighlight, RoundedCornerShape(16.dp))
+                        .padding(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // User Profile Summary
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(AccentGradient),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = initials,
+                                    style = ClotubeTypography.labelLarge.copy(
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                )
+                            }
+
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = userName,
+                                    style = ClotubeTypography.titleMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextWhite
+                                    )
+                                )
+                                Text(
+                                    text = userEmail,
+                                    style = ClotubeTypography.bodySmall.copy(color = TextSlateMuted)
+                                )
+                            }
+                        }
+
+                        // Connection Status Pill
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF0F1B2B))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(LiveCyan)
+                            )
+                            Text(
+                                text = "Google Drive Connected",
+                                style = ClotubeTypography.labelSmall.copy(
+                                    color = LiveCyan,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            )
+                        }
+
+                        HorizontalDivider(color = BorderSubtle, thickness = 1.dp)
+
+                        // Sign Out Button
+                        val signOutInteraction = remember { MutableInteractionSource() }
+                        val isSignOutHovered by signOutInteraction.collectIsHoveredAsState()
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSignOutHovered) Color(0xFF2A1519) else Color.Transparent)
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .hoverable(signOutInteraction)
+                                .clickable(
+                                    interactionSource = signOutInteraction,
+                                    indication = null,
+                                    onClick = {
+                                        showAccountMenu = false
+                                        onSignOut()
+                                    }
+                                )
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Logout,
+                                contentDescription = "Sign Out",
+                                tint = if (isSignOutHovered) Color(0xFFF28B82) else TextSlateMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "Disconnect & Sign Out",
+                                style = ClotubeTypography.labelLarge.copy(
+                                    color = if (isSignOutHovered) Color(0xFFF28B82) else TextSlateMuted,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            )
+                        }
+                    }
+                }
             }
         }
     }

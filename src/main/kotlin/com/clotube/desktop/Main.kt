@@ -1,5 +1,7 @@
 package com.clotube.desktop
 
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -7,18 +9,29 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.clotube.desktop.auth.AuthState
+import com.clotube.desktop.auth.DesktopAuthManager
+import com.clotube.desktop.data.DesktopDriveScanner
+import com.clotube.desktop.media.LocalStreamServer
+import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.MediaItem
 import com.clotube.desktop.model.MockData
 import com.clotube.desktop.ui.components.DesktopHeader
@@ -26,147 +39,194 @@ import com.clotube.desktop.ui.navigation.NavDestination
 import com.clotube.desktop.ui.navigation.Sidebar
 import com.clotube.desktop.ui.screens.DesktopDetailScreen
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
+import com.clotube.desktop.ui.screens.DesktopLoginScreen
+import com.clotube.desktop.ui.screens.DesktopNavSection
+import com.clotube.desktop.ui.screens.DesktopVideoPlayerScreen
 import com.clotube.desktop.ui.screens.MediaCard
-import com.clotube.desktop.ui.screens.MediaShelf
 import com.clotube.desktop.ui.theme.*
 import java.awt.Dimension
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 
-fun main() = application {
-    val windowState = rememberWindowState(
-        width = 1440.dp,
-        height = 900.dp,
-        position = WindowPosition.Aligned(Alignment.Center)
-    )
+fun main() {
+    System.setProperty("compose.interop.blending", "true")
+    LocalStreamServer.start()
 
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "Clotube",
-        state = windowState
-    ) {
-        // Enforce minimum window constraints
-        LaunchedEffect(Unit) {
-            window.minimumSize = Dimension(1024, 600)
-        }
+    application {
+        val windowState = rememberWindowState(
+            width = 1440.dp,
+            height = 900.dp,
+            position = WindowPosition.Aligned(Alignment.Center)
+        )
 
-        ClotubeTheme {
-            ClotubeAppRoot()
+        @Suppress("DEPRECATION")
+        Window(
+            onCloseRequest = ::exitApplication,
+            title = "Clotube",
+            icon = painterResource("ic_clotube.png"),
+            state = windowState
+        ) {
+            // Enforce minimum window constraints
+            LaunchedEffect(Unit) {
+                window.minimumSize = Dimension(1024, 600)
+            }
+
+            ClotubeTheme {
+                ClotubeRootApp()
+            }
         }
     }
 }
 
 @Composable
-fun ClotubeAppRoot() {
-    var currentDestination by remember { mutableStateOf(NavDestination.HOME) }
-    var activeDetailMedia by remember { mutableStateOf<MediaItem?>(null) }
-    var searchQuery by remember { mutableStateOf("") }
-    var showProfileModal by remember { mutableStateOf(false) }
+fun ClotubeRootApp() {
+    val authManager = remember { DesktopAuthManager() }
+    val authState by authManager.authState.collectAsState()
 
-    // Filter media when user searches
-    val searchResults by remember(searchQuery) {
-        derivedStateOf {
-            if (searchQuery.isBlank()) {
-                emptyList()
-            } else {
-                MockData.allMedia.filter {
-                    it.title.contains(searchQuery, ignoreCase = true) ||
-                    it.genre.contains(searchQuery, ignoreCase = true) ||
-                    it.description.contains(searchQuery, ignoreCase = true)
+    LaunchedEffect(Unit) {
+        authManager.checkExistingSession()
+    }
+
+    Crossfade(
+        targetState = authState,
+        animationSpec = tween(durationMillis = 200),
+        label = "AuthRootTransition"
+    ) { state ->
+        when (state) {
+            is AuthState.Checking -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF000000))
+                )
+            }
+
+            is AuthState.Unauthenticated, is AuthState.Authenticating -> {
+                // Dedicated connection gate — Sidebar and Header MUST be hidden
+                DesktopLoginScreen(
+                    authState = state,
+                    onConnectClick = { authManager.signIn() },
+                    onCancelClick = { authManager.cancelSignIn() }
+                )
+            }
+
+            is AuthState.Authenticated -> {
+                var movies by remember { mutableStateOf<List<DesktopMediaItem>>(emptyList()) }
+                var series by remember { mutableStateOf<List<DesktopMediaItem>>(emptyList()) }
+                var isLoading by remember { mutableStateOf(true) }
+
+                LaunchedEffect(state.accessToken) {
+                    val scanner = DesktopDriveScanner(state.accessToken)
+                    // Fetch in parallel for speed
+                    joinAll(
+                        launch { movies = scanner.loadMovies() },
+                        launch { series = scanner.loadSeriesFolders() }
+                    )
+                    isLoading = false
+                }
+
+                if (isLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xFF0B0E14)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF2F80ED),
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                } else {
+                    MainDesktopLayout(
+                        authenticatedState = state,
+                        onSignOut = { authManager.signOut() },
+                        movies = movies,
+                        series = series
+                    )
                 }
             }
         }
     }
+}
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = VoidBackground
-    ) {
-        Row(modifier = Modifier.fillMaxSize()) {
-            // Left Navigation Rail
-            Sidebar(
-                currentDestination = currentDestination,
-                onDestinationSelected = { dest ->
-                    currentDestination = dest
-                    activeDetailMedia = null
-                }
-            )
+@Composable
+fun MainDesktopLayout(
+    authenticatedState: AuthState.Authenticated,
+    onSignOut: () -> Unit,
+    movies: List<DesktopMediaItem> = emptyList(),
+    series: List<DesktopMediaItem> = emptyList()
+) {
+    var activeSection by remember { mutableStateOf(DesktopNavSection.HOME) }
+    var activePlayingMedia by remember { mutableStateOf<DesktopMediaItem?>(null) }
 
-            // Main Content Area
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .background(VoidBackground)
-            ) {
-                // Persistent Top Bar
-                DesktopHeader(
-                    searchQuery = searchQuery,
-                    onSearchQueryChange = { searchQuery = it },
-                    onAvatarClick = { showProfileModal = !showProfileModal }
-                )
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                ) {
-                    when {
-                        // 1. Search Results View
-                        searchQuery.isNotBlank() -> {
-                            SearchResultsView(
-                                query = searchQuery,
-                                results = searchResults,
-                                onMediaClick = { activeDetailMedia = it }
-                            )
-                        }
-
-                        // 2. Detail Screen View
-                        activeDetailMedia != null -> {
-                            DesktopDetailScreen(
-                                media = activeDetailMedia!!,
-                                onBack = { activeDetailMedia = null }
-                            )
-                        }
-
-                        // 3. Tab Screens
-                        currentDestination == NavDestination.HOME -> {
-                            DesktopHomeScreen(
-                                onMediaClick = { activeDetailMedia = it }
-                            )
-                        }
-
-                        currentDestination == NavDestination.MOVIES -> {
-                            CategoryGridView(
-                                title = "Feature Films & Movies",
-                                subtitle = "Lossless 4K streams ready for instant playback",
-                                items = MockData.trendingMovies + listOf(MockData.heroBillboard),
-                                onMediaClick = { activeDetailMedia = it }
-                            )
-                        }
-
-                        currentDestination == NavDestination.TV_SERIES -> {
-                            CategoryGridView(
-                                title = "TV Series & Binge Shows",
-                                subtitle = "Full seasons with instant cloud direct streaming",
-                                items = MockData.popularSeries,
-                                onMediaClick = { activeDetailMedia = it }
-                            )
-                        }
-
-                        currentDestination == NavDestination.RECENTS -> {
-                            CategoryGridView(
-                                title = "Recently Played",
-                                subtitle = "Resume your progress across all connected displays",
-                                items = MockData.continueWatchingList,
-                                onMediaClick = { activeDetailMedia = it },
-                                showProgress = true
-                            )
-                        }
-
-                        currentDestination == NavDestination.SETTINGS -> {
-                            SettingsView()
-                        }
+    // Seed continue watching items from real drive media if available, maintaining progress
+    var continueWatching by remember(movies, series) {
+        mutableStateOf<List<DesktopMediaItem>>(
+            if (movies.isNotEmpty() || series.isNotEmpty()) {
+                val pool = (movies + series).take(4)
+                pool.mapIndexed { index, item ->
+                    val simDuration = if (item.durationMs > 0L) item.durationMs else (7200000L - index * 600000L)
+                    val fraction = when (index) {
+                        0 -> 0.62f
+                        1 -> 0.28f
+                        2 -> 0.34f
+                        else -> 0.45f
                     }
+                    item.copy(
+                        durationMs = simDuration,
+                        progressMs = (simDuration * fraction).toLong()
+                    )
                 }
+            } else emptyList()
+        )
+    }
+
+    Crossfade(
+        targetState = activePlayingMedia,
+        animationSpec = tween(durationMillis = 250),
+        label = "VideoPlayerCrossfade"
+    ) { playingItem ->
+        if (playingItem != null) {
+            DesktopVideoPlayerScreen(
+                media = playingItem,
+                accessToken = authenticatedState.accessToken,
+                onClose = { activePlayingMedia = null },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF07090E))
+            ) {
+                DesktopHomeScreen(
+                    userEmail = authenticatedState.userEmail,
+                    userName = authenticatedState.userName,
+                    onSignOut = onSignOut,
+                    activeSection = activeSection,
+                    onNavigateSection = { section -> activeSection = section },
+                    featuredItem = movies.firstOrNull() ?: series.firstOrNull(),
+                    continueWatching = continueWatching,
+                    movies = movies,
+                    series = series,
+                    onMediaClick = { clickedItem ->
+                        val simDuration = if (clickedItem.durationMs > 0L) clickedItem.durationMs else 7200000L
+                        val existing = continueWatching.find { it.id == clickedItem.id }
+                        val updated = existing?.copy(progressMs = (simDuration * 0.5f).toLong())
+                            ?: clickedItem.copy(durationMs = simDuration, progressMs = (simDuration * 0.2f).toLong())
+                        continueWatching = listOf(updated) + continueWatching.filter { it.id != clickedItem.id }
+                    },
+                    onClearHistory = {
+                        continueWatching = emptyList()
+                    },
+                    onRemoveHistoryItem = { item ->
+                        continueWatching = continueWatching.filter { it.id != item.id }
+                    },
+                    accessToken = authenticatedState.accessToken,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
     }
