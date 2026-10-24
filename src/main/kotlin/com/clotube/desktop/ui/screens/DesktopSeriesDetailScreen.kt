@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -39,6 +40,9 @@ import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
+import com.clotube.desktop.ui.components.SleekVideoScrubber
+import com.clotube.desktop.ui.components.SleekVolumeSlider
+import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.delay
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
@@ -63,13 +67,12 @@ fun DesktopSeriesDetailScreen(
     var activeEpisode by remember { mutableStateOf<DesktopEpisode?>(null) }
 
     var isPlaying by remember { mutableStateOf(false) }
-    var isBuffering by remember { mutableStateOf(false) }
+    var isBuffering by remember { mutableStateOf(true) }
+    var isFirstFrameRendered by remember { mutableStateOf(false) }
     var currentTimeMs by remember { mutableLongStateOf(0L) }
     var totalDurationMs by remember { mutableLongStateOf(1L) }
     var volume by remember { mutableFloatStateOf(1f) }
     var isMuted by remember { mutableStateOf(false) }
-
-    var videoAspectRatio by remember { mutableFloatStateOf(16f / 9f) }
 
     val isReleased = remember { AtomicBoolean(false) }
     val focusRequester = remember { FocusRequester() }
@@ -86,6 +89,22 @@ fun DesktopSeriesDetailScreen(
         isLoading = false
     }
 
+    // CUSTOM BLACK CANVAS: Prevents fractional DPI scaling gaps from glowing white
+    val videoCanvas = remember {
+        object : java.awt.Canvas() {
+            override fun update(g: java.awt.Graphics) {
+                paint(g)
+            }
+            override fun paint(g: java.awt.Graphics) {
+                g.color = java.awt.Color.BLACK
+                g.fillRect(0, 0, width, height)
+            }
+        }.apply {
+            background = java.awt.Color.BLACK
+            ignoreRepaint = true
+        }
+    }
+
     val mediaPlayerComponent = remember {
         try {
             NativeDiscovery().discover()
@@ -100,7 +119,7 @@ fun DesktopSeriesDetailScreen(
                 "--drop-late-frames",
                 "--skip-frames"
             )
-            EmbeddedMediaPlayerComponent(factory, null, null, null, null).apply {
+            EmbeddedMediaPlayerComponent(factory, videoCanvas, null, null, null).apply {
                 background = java.awt.Color.BLACK
                 videoSurfaceComponent().background = java.awt.Color.BLACK
             }
@@ -118,7 +137,10 @@ fun DesktopSeriesDetailScreen(
         val p = comp.mediaPlayer() ?: return@LaunchedEffect
         val surface = comp.videoSurfaceComponent() ?: return@LaunchedEffect
 
-        if (isReleased.get()) return@LaunchedEffect
+        isBuffering = true
+        isPlaying = false
+        isFirstFrameRendered = false
+        currentTimeMs = 0L
 
         val port = LocalStreamServer.start()
         val streamUrl = "http://127.0.0.1:$port/stream?id=${ep.id}&token=$accessToken"
@@ -166,40 +188,15 @@ fun DesktopSeriesDetailScreen(
         }
     }
 
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            for (i in 0 until 20) {
-                val dim = player?.video()?.videoDimension()
-                if (dim != null && dim.width > 0 && dim.height > 0) {
-                    val ratio = dim.width.toFloat() / dim.height.toFloat()
-                    if (ratio in 0.5f..3.5f) {
-                        videoAspectRatio = ratio
-                        break
-                    }
-                }
-                delay(150)
-            }
-        }
-    }
-
     DisposableEffect(Unit) {
         val comp = mediaPlayerComponent
-
-        fun checkDimension(mp: MediaPlayer?) {
-            val dim = mp?.video()?.videoDimension()
-            if (dim != null && dim.width > 0 && dim.height > 0) {
-                val ratio = dim.width.toFloat() / dim.height.toFloat()
-                if (ratio in 0.5f..3.5f) {
-                    videoAspectRatio = ratio
-                }
-            }
-        }
 
         val listener = object : MediaPlayerEventAdapter() {
             override fun timeChanged(mediaPlayer: MediaPlayer?, newTime: Long) {
                 currentTimeMs = newTime
-                if (videoAspectRatio == (16f / 9f)) {
-                    checkDimension(mediaPlayer)
+                if (newTime > 0L) {
+                    isFirstFrameRendered = true
+                    isBuffering = false
                 }
             }
             override fun lengthChanged(mediaPlayer: MediaPlayer?, newLength: Long) {
@@ -208,18 +205,14 @@ fun DesktopSeriesDetailScreen(
             override fun playing(mediaPlayer: MediaPlayer?) {
                 isPlaying = true
                 isBuffering = false
-                checkDimension(mediaPlayer)
-            }
-            override fun videoOutput(mediaPlayer: MediaPlayer?, newCount: Int) {
-                if (newCount > 0) {
-                    checkDimension(mediaPlayer)
-                }
             }
             override fun paused(mediaPlayer: MediaPlayer?) {
                 isPlaying = false
             }
             override fun buffering(mediaPlayer: MediaPlayer?, newCache: Float) {
-                isBuffering = newCache < 100f
+                if (newCache < 100f && !isFirstFrameRendered) {
+                    isBuffering = true
+                }
             }
             override fun finished(mediaPlayer: MediaPlayer?) {
                 isPlaying = false
@@ -425,51 +418,69 @@ fun DesktopSeriesDetailScreen(
                                 .fillMaxHeight(),
                             verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
+                            // VIDEO CONTAINER: Inset by 1dp inside the border to protect left border and eliminate right edge seam
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
                                     .clip(RoundedCornerShape(14.dp))
-                                    .background(Color.Black)
+                                    .background(Color(0xFF0C1018))
                                     .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(14.dp))
+                                    .padding(1.dp)
                             ) {
-                                BoxWithConstraints(
+                                Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .weight(1f)
-                                        .background(Color.Black),
-                                    contentAlignment = Alignment.Center
+                                        .clip(RoundedCornerShape(topStart = 13.dp, topEnd = 13.dp))
+                                        .background(Color.Black)
                                 ) {
-                                    val boxWidth = maxWidth.value
-                                    val boxHeight = maxHeight.value
-                                    val boxRatio = if (boxHeight > 0f) boxWidth / boxHeight else (16f / 9f)
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black)
+                                            .clipToBounds(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (mediaPlayerComponent != null) {
+                                            Box(modifier = Modifier.fillMaxSize()) {
+                                                SwingPanel(
+                                                    background = Color.Black,
+                                                    factory = { mediaPlayerComponent },
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
 
-                                    val videoModifier = if (videoAspectRatio > boxRatio) {
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(videoAspectRatio)
-                                    } else {
-                                        Modifier
-                                            .fillMaxHeight()
-                                            .aspectRatio(videoAspectRatio)
-                                    }
+                                                // Right-Edge Overdraw Guard
+                                                Box(
+                                                    modifier = Modifier
+                                                        .align(Alignment.CenterEnd)
+                                                        .fillMaxHeight()
+                                                        .width(2.dp)
+                                                        .background(Color.Black)
+                                                )
 
-                                    if (mediaPlayerComponent != null) {
-                                        SwingPanel(
-                                            background = Color.Black,
-                                            factory = { mediaPlayerComponent },
-                                            modifier = videoModifier
-                                        )
-                                    }
+                                                // Bottom-Edge Overdraw Guard
+                                                Box(
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomCenter)
+                                                        .fillMaxWidth()
+                                                        .height(2.dp)
+                                                        .background(Color.Black)
+                                                )
+                                            }
+                                        }
 
-                                    if (isBuffering) {
-                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                            CircularProgressIndicator(color = Color(0xFF00E5FF), modifier = Modifier.size(46.dp))
+                                        if (!isFirstFrameRendered || isBuffering) {
+                                            Box(modifier = Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+                                                if (isBuffering || !isFirstFrameRendered) {
+                                                    CircularProgressIndicator(color = Color(0xFF00E5FF), modifier = Modifier.size(46.dp))
+                                                }
+                                            }
                                         }
                                     }
-                                }
+                            }
 
-                                Row(
+                            Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(52.dp)
@@ -542,19 +553,15 @@ fun DesktopSeriesDetailScreen(
                                         )
                                     }
 
-                                    Slider(
-                                        value = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-                                        onValueChange = { fraction ->
+                                    val progress = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                                    SleekVideoScrubber(
+                                        progress = progress,
+                                        onSeek = { fraction ->
                                             val target = (fraction * totalDurationMs).toLong()
                                             player?.controls()?.setTime(target)
                                             currentTimeMs = target
                                         },
-                                        colors = SliderDefaults.colors(
-                                            thumbColor = Color(0xFF00E5FF),
-                                            activeTrackColor = Color(0xFF2563EB),
-                                            inactiveTrackColor = Color(0xFF1E2838)
-                                        ),
-                                        modifier = Modifier.weight(1f).height(18.dp).pointerHoverIcon(PointerIcon.Hand)
+                                        modifier = Modifier.weight(1f)
                                     )
 
                                     Text(
@@ -579,19 +586,14 @@ fun DesktopSeriesDetailScreen(
                                         )
                                     }
 
-                                    Slider(
-                                        value = if (isMuted) 0f else volume,
-                                        onValueChange = { newVol ->
+                                    SleekVolumeSlider(
+                                        volume = if (isMuted) 0f else volume,
+                                        onVolumeChange = { newVol ->
                                             volume = newVol
                                             isMuted = false
                                             player?.audio()?.setVolume((newVol * 100).toInt())
                                         },
-                                        colors = SliderDefaults.colors(
-                                            thumbColor = Color.White,
-                                            activeTrackColor = Color(0xFF00E5FF),
-                                            inactiveTrackColor = Color(0xFF1E2838)
-                                        ),
-                                        modifier = Modifier.width(70.dp).pointerHoverIcon(PointerIcon.Hand)
+                                        modifier = Modifier.width(70.dp)
                                     )
                                 }
                             }
@@ -767,7 +769,7 @@ fun DesktopSeriesDetailScreen(
                                 ) {
                                     items(episodes, key = { it.id }) { ep ->
                                         val isSelected = activeEpisode?.id == ep.id
-                                        val thumb = rememberDriveThumbnail(ep.thumbnailUrl)
+                                        val thumb = rememberThumbnailBitmap(primaryUrl = ep.thumbnailUrl, accessToken = accessToken)
 
                                         Surface(
                                             modifier = Modifier

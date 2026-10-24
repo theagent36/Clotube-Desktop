@@ -28,6 +28,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.ui.components.SleekVideoScrubber
+import com.clotube.desktop.ui.components.SleekVolumeSlider
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
@@ -298,10 +300,31 @@ fun DesktopVideoPlayerScreen(
                 .weight(1f)
                 .background(Color.Black)
         ) {
-            SwingPanel(
-                factory = { mediaPlayerComponent },
-                modifier = Modifier.fillMaxSize()
-            )
+            Box(modifier = Modifier.fillMaxSize()) {
+                SwingPanel(
+                    background = Color.Black,
+                    factory = { mediaPlayerComponent },
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                // Right-Edge Overdraw Guard
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(2.dp)
+                        .background(Color.Black)
+                )
+
+                // Bottom-Edge Overdraw Guard
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(Color.Black)
+                )
+            }
 
             if (isBuffering) {
                 Box(
@@ -327,19 +350,15 @@ fun DesktopVideoPlayerScreen(
                 .padding(horizontal = 24.dp, vertical = 14.dp)
         ) {
             // Timeline Scrubber
-            Slider(
-                value = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-                onValueChange = { fraction ->
+            val progress = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
+            SleekVideoScrubber(
+                progress = progress,
+                onSeek = { fraction ->
                     val targetMs = (fraction * totalDurationMs).toLong()
                     player?.controls()?.setTime(targetMs)
                     currentTimeMs = targetMs
                 },
-                colors = SliderDefaults.colors(
-                    thumbColor = Color(0xFF00E5FF),
-                    activeTrackColor = Color(0xFF2563EB),
-                    inactiveTrackColor = Color(0xFF222B3D)
-                ),
-                modifier = Modifier.fillMaxWidth().height(20.dp).pointerHoverIcon(PointerIcon.Hand)
+                modifier = Modifier.fillMaxWidth()
             )
 
             Row(
@@ -424,19 +443,14 @@ fun DesktopVideoPlayerScreen(
                         )
                     }
 
-                    Slider(
-                        value = if (isMuted) 0f else volume,
-                        onValueChange = { newVol ->
+                    SleekVolumeSlider(
+                        volume = if (isMuted) 0f else volume,
+                        onVolumeChange = { newVol ->
                             volume = newVol
                             isMuted = false
                             player?.audio()?.setVolume((newVol * 100).toInt())
                         },
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color.White,
-                            activeTrackColor = Color(0xFF00E5FF),
-                            inactiveTrackColor = Color(0xFF222B3D)
-                        ),
-                        modifier = Modifier.width(90.dp).pointerHoverIcon(PointerIcon.Hand)
+                        modifier = Modifier.width(80.dp)
                     )
                 }
             }

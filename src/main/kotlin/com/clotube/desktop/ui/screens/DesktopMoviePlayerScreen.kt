@@ -1,808 +1,1404 @@
 package com.clotube.desktop.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.automirrored.rounded.VolumeOff
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
-import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.*
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
+import androidx.compose.material.icons.automirrored.filled.VolumeMute
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
 import kotlinx.coroutines.delay
-import uk.co.caprica.vlcj.factory.MediaPlayerFactory
-import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
-import uk.co.caprica.vlcj.player.base.MediaPlayer
-import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
-import uk.co.caprica.vlcj.player.component.EmbeddedMediaPlayerComponent
-import java.awt.event.HierarchyEvent
-import java.awt.event.HierarchyListener
-import java.util.concurrent.atomic.AtomicBoolean
-import javax.swing.SwingUtilities
+import java.awt.Cursor
+import java.awt.KeyEventDispatcher
+import java.awt.KeyboardFocusManager
+import java.awt.Point
+import java.awt.Toolkit
+import java.awt.event.KeyEvent
+import java.awt.image.BufferedImage
+import kotlin.math.min
+import kotlin.math.roundToInt
 
+data class DesktopMovieItem(
+    val id: String,
+    val title: String,
+    val durationFormatted: String = "2h 19m",
+    val genres: String = "Action • Thriller",
+    val thumbnailUrl: String? = null,
+    val streamUrl: String = ""
+)
+
+enum class PlayerPopupType {
+    NONE, SUBTITLES, AUDIO, SPEED
+}
+
+enum class SeekFeedbackDirection {
+    REWIND, FORWARD
+}
+
+@Composable
+fun DesktopMoviePlayerScreen(
+    initialMovie: DesktopMovieItem,
+    allMovies: List<DesktopMovieItem> = emptyList(),
+    isFullscreen: Boolean = false,
+    onToggleFullscreen: () -> Unit = {},
+    onBack: () -> Unit
+) {
+    var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
+
+    val player = remember(currentPlayingMovie.id, currentPlayingMovie.streamUrl) {
+        DirectMemoryVideoPlayer(
+            currentPlayingMovie.streamUrl.ifBlank {
+                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+            }
+        )
+    }
+
+    DisposableEffect(player) {
+        onDispose {
+            player.release()
+        }
+    }
+
+    var controlsVisible by remember { mutableStateOf(true) }
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubFraction by remember { mutableFloatStateOf(0f) }
+    var activePopup by remember { mutableStateOf(PlayerPopupType.NONE) }
+    var seekFeedbackDirection by remember { mutableStateOf<SeekFeedbackDirection?>(null) }
+    var seekFeedbackTrigger by remember { mutableIntStateOf(0) }
+
+    // Auto-dismiss seek feedback badge after 650ms
+    LaunchedEffect(seekFeedbackTrigger) {
+        if (seekFeedbackDirection != null) {
+            delay(650L)
+            seekFeedbackDirection = null
+        }
+    }
+
+    // Active track state management
+    var currentSubtitleId by remember { mutableIntStateOf(-1) }
+    var currentAudioId by remember { mutableIntStateOf(-1) }
+    var currentSpeed by remember { mutableFloatStateOf(1.0f) }
+
+    // Synchronize LibVLC track selection
+    LaunchedEffect(player.isFirstFrameRendered) {
+        if (player.isFirstFrameRendered) {
+            currentSubtitleId = player.mediaPlayer.subpictures().track()
+            currentAudioId = player.mediaPlayer.audio().track()
+        }
+    }
+
+    // Auto-hide controls timer (paused if a menu is open or scrubbing)
+    LaunchedEffect(controlsVisible, player.isPlaying, isScrubbing, activePopup) {
+        if (controlsVisible && player.isPlaying && !isScrubbing && activePopup == PlayerPopupType.NONE) {
+            delay(3500L)
+            controlsVisible = false
+        }
+    }
+
+    // =========================================================================
+    // INVISIBLE CURSOR ARCHITECTURE
+    // =========================================================================
+    val invisibleCursor = remember {
+        val transparentImg = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB)
+        Toolkit.getDefaultToolkit().createCustomCursor(transparentImg, Point(0, 0), "invisibleCursor")
+    }
+    val defaultCursor = remember { Cursor.getDefaultCursor() }
+    val hiddenPointerIcon = remember(invisibleCursor) { PointerIcon(invisibleCursor) }
+
+    val isCursorHidden = !controlsVisible && player.isPlaying && !isScrubbing && activePopup == PlayerPopupType.NONE
+
+    // Instantly sync the AWT window cursor when controls toggle
+    LaunchedEffect(isCursorHidden) {
+        try {
+            val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+            activeWin?.cursor = if (isCursorHidden) invisibleCursor else defaultCursor
+        } catch (_: Throwable) {}
+    }
+
+    // Ensure cursor is restored when leaving the video player screen
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+                activeWin?.cursor = defaultCursor
+            } catch (_: Throwable) {}
+        }
+    }
+
+    // =========================================================================
+    // BULLETPROOF AWT KEY EVENT DISPATCHER (Immune to Compose focus loss)
+    // =========================================================================
+    DisposableEffect(player, isFullscreen, activePopup) {
+        val dispatcher = KeyEventDispatcher { e ->
+            if (e.id == KeyEvent.KEY_PRESSED) {
+                // Any key interaction makes controls and cursor visible
+                controlsVisible = true
+                try {
+                    val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+                    activeWin?.cursor = defaultCursor
+                } catch (_: Throwable) {}
+
+                when (e.keyCode) {
+                    KeyEvent.VK_LEFT -> {
+                        val newTime = (player.currentTimeMs - 10000L).coerceAtLeast(0L)
+                        player.seekToTime(newTime)
+                        seekFeedbackDirection = SeekFeedbackDirection.REWIND
+                        seekFeedbackTrigger++
+                        true
+                    }
+                    KeyEvent.VK_RIGHT -> {
+                        val newTime = (player.currentTimeMs + 10000L).coerceAtMost(player.totalDurationMs)
+                        player.seekToTime(newTime)
+                        seekFeedbackDirection = SeekFeedbackDirection.FORWARD
+                        seekFeedbackTrigger++
+                        true
+                    }
+                    KeyEvent.VK_SPACE -> {
+                        player.togglePlayPause()
+                        true
+                    }
+                    KeyEvent.VK_F -> {
+                        onToggleFullscreen()
+                        true
+                    }
+                    KeyEvent.VK_ESCAPE -> {
+                        if (activePopup != PlayerPopupType.NONE) {
+                            activePopup = PlayerPopupType.NONE
+                            true
+                        } else if (isFullscreen) {
+                            onToggleFullscreen()
+                            true
+                        } else {
+                            player.release()
+                            onBack()
+                            true
+                        }
+                    }
+                    else -> false
+                }
+            } else false
+        }
+
+        val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        kfm.addKeyEventDispatcher(dispatcher)
+
+        onDispose {
+            kfm.removeKeyEventDispatcher(dispatcher)
+        }
+    }
+
+    val activeFraction = if (isScrubbing) {
+        scrubFraction
+    } else if (player.totalDurationMs > 0L) {
+        (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+
+    val displayTimeMs = if (isScrubbing) (scrubFraction * player.totalDurationMs).toLong() else player.currentTimeMs
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF07090E))
+            .pointerHoverIcon(if (isCursorHidden) hiddenPointerIcon else PointerIcon.Default)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type == PointerEventType.Move || event.type == PointerEventType.Press) {
+                            controlsVisible = true
+                            try {
+                                val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+                                activeWin?.cursor = defaultCursor
+                            } catch (_: Throwable) {}
+                        }
+                    }
+                }
+            }
+    ) {
+        if (isFullscreen) {
+            // ========================================================
+            // FULLSCREEN CINEMA VIEW
+            // ========================================================
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                val tick = player.frameTick
+                val frame = tick.let { player.currentFrame }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = { onToggleFullscreen() },
+                                onTap = {
+                                    if (activePopup != PlayerPopupType.NONE) {
+                                        activePopup = PlayerPopupType.NONE
+                                    } else {
+                                        controlsVisible = !controlsVisible
+                                    }
+                                }
+                            )
+                        }
+                ) {
+                    if (frame != null) {
+                        val scale = min(
+                            size.width / frame.width.toFloat(),
+                            size.height / frame.height.toFloat()
+                        )
+                        val targetW = (frame.width * scale).toInt()
+                        val targetH = (frame.height * scale).toInt()
+                        val offsetX = ((size.width - targetW) / 2f).toInt()
+                        val offsetY = ((size.height - targetH) / 2f).toInt()
+
+                        drawImage(
+                            image = frame,
+                            dstOffset = IntOffset(offsetX, offsetY),
+                            dstSize = IntSize(targetW, targetH)
+                        )
+                    }
+                }
+
+                if (!player.isFirstFrameRendered || player.isBuffering) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF42A5F5),
+                        modifier = Modifier.size(52.dp).align(Alignment.Center)
+                    )
+                }
+
+                // Left (-10) Indicator
+                SeekFeedbackIndicator(
+                    direction = SeekFeedbackDirection.REWIND,
+                    visible = seekFeedbackDirection == SeekFeedbackDirection.REWIND,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = 48.dp)
+                )
+
+                // Right (+10) Indicator
+                SeekFeedbackIndicator(
+                    direction = SeekFeedbackDirection.FORWARD,
+                    visible = seekFeedbackDirection == SeekFeedbackDirection.FORWARD,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 48.dp)
+                )
+
+                AnimatedVisibility(
+                    visible = controlsVisible || isScrubbing,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.Black.copy(alpha = 0.7f),
+                                        Color.Transparent,
+                                        Color.Black.copy(alpha = 0.85f)
+                                    )
+                                )
+                            )
+                    ) {
+                        // Top Bar
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 20.dp)
+                                .align(Alignment.TopCenter),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = onToggleFullscreen,
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Exit Fullscreen", tint = Color.White)
+                            }
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Text(
+                                text = currentPlayingMovie.title,
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        // Bottom Transport Bar
+                        BottomTransportBar(
+                            player = player,
+                            activeFraction = activeFraction,
+                            displayTimeMs = displayTimeMs,
+                            isScrubbing = isScrubbing,
+                            isFullscreen = true,
+                            currentSpeed = currentSpeed,
+                            activePopup = activePopup,
+                            onTogglePopup = { popup ->
+                                if (popup == PlayerPopupType.SUBTITLES) {
+                                    currentSubtitleId = player.mediaPlayer.subpictures().track()
+                                } else if (popup == PlayerPopupType.AUDIO) {
+                                    currentAudioId = player.mediaPlayer.audio().track()
+                                }
+                                activePopup = if (activePopup == popup) PlayerPopupType.NONE else popup
+                            },
+                            onScrubStart = { isScrubbing = true; scrubFraction = it },
+                            onScrubbing = { scrubFraction = it },
+                            onScrubEnd = {
+                                player.seekToFraction(it)
+                                isScrubbing = false
+                            },
+                            onToggleFullscreen = onToggleFullscreen,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 24.dp, vertical = 18.dp)
+                        )
+                    }
+                }
+
+                // In-Player Floating Settings Panel (Inside Viewport, Highest Z-Order)
+                InPlayerSettingsPopup(
+                    activePopup = activePopup,
+                    player = player,
+                    currentSubtitleId = currentSubtitleId,
+                    currentAudioId = currentAudioId,
+                    currentSpeed = currentSpeed,
+                    onSelectSubtitle = { id ->
+                        currentSubtitleId = id
+                        player.mediaPlayer.subpictures().setTrack(id)
+                        activePopup = PlayerPopupType.NONE
+                    },
+                    onSelectAudio = { id ->
+                        currentAudioId = id
+                        player.mediaPlayer.audio().setTrack(id)
+                        activePopup = PlayerPopupType.NONE
+                    },
+                    onSelectSpeed = { speed ->
+                        currentSpeed = speed
+                        player.mediaPlayer.controls().setRate(speed)
+                        activePopup = PlayerPopupType.NONE
+                    },
+                    onDismiss = { activePopup = PlayerPopupType.NONE },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(bottom = 68.dp, end = 24.dp)
+                )
+            }
+        } else {
+            // ========================================================
+            // NORMAL VIEW (2-COLUMN SPLIT CINEMA LAYOUT)
+            // ========================================================
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 28.dp, vertical = 18.dp)
+            ) {
+                // Top "Back to Collection" Header
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {
+                                player.release()
+                                onBack()
+                            }
+                        )
+                        .padding(bottom = 16.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Back to Collection",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(28.dp)
+                ) {
+                    // LEFT COLUMN: Viewport + Controls + Metadata
+                    Column(
+                        modifier = Modifier
+                            .weight(0.68f)
+                            .fillMaxHeight()
+                    ) {
+                        Card(
+                            shape = RoundedCornerShape(12.dp),
+                            backgroundColor = Color.Black,
+                            elevation = 12.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(16f / 9.5f)
+                        ) {
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                val tick = player.frameTick
+                                val frame = tick.let { player.currentFrame }
+
+                                Canvas(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .pointerInput(Unit) {
+                                            detectTapGestures(
+                                                onDoubleTap = { onToggleFullscreen() },
+                                                onTap = {
+                                                    if (activePopup != PlayerPopupType.NONE) {
+                                                        activePopup = PlayerPopupType.NONE
+                                                    }
+                                                }
+                                            )
+                                        }
+                                ) {
+                                    if (frame != null) {
+                                        val scale = min(
+                                            size.width / frame.width.toFloat(),
+                                            size.height / frame.height.toFloat()
+                                        )
+                                        val targetW = (frame.width * scale).toInt()
+                                        val targetH = (frame.height * scale).toInt()
+                                        val offsetX = ((size.width - targetW) / 2f).toInt()
+                                        val offsetY = ((size.height - targetH) / 2f).toInt()
+
+                                        drawImage(
+                                            image = frame,
+                                            dstOffset = IntOffset(offsetX, offsetY),
+                                            dstSize = IntSize(targetW, targetH)
+                                        )
+                                    }
+                                }
+
+                                if (!player.isFirstFrameRendered || player.isBuffering) {
+                                    CircularProgressIndicator(
+                                        color = Color(0xFF42A5F5),
+                                        modifier = Modifier.size(46.dp).align(Alignment.Center)
+                                    )
+                                }
+
+                                // Left (-10) Indicator
+                                SeekFeedbackIndicator(
+                                    direction = SeekFeedbackDirection.REWIND,
+                                    visible = seekFeedbackDirection == SeekFeedbackDirection.REWIND,
+                                    modifier = Modifier
+                                        .align(Alignment.CenterStart)
+                                        .padding(start = 36.dp)
+                                )
+
+                                // Right (+10) Indicator
+                                SeekFeedbackIndicator(
+                                    direction = SeekFeedbackDirection.FORWARD,
+                                    visible = seekFeedbackDirection == SeekFeedbackDirection.FORWARD,
+                                    modifier = Modifier
+                                        .align(Alignment.CenterEnd)
+                                        .padding(end = 36.dp)
+                                )
+
+                                // Docked Bottom Transport Controls
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .align(Alignment.BottomCenter)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                listOf(Color.Transparent, Color(0xCC05070B), Color(0xF205070B))
+                                            )
+                                        )
+                                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                                ) {
+                                    BottomTransportBar(
+                                        player = player,
+                                        activeFraction = activeFraction,
+                                        displayTimeMs = displayTimeMs,
+                                        isScrubbing = isScrubbing,
+                                        isFullscreen = false,
+                                        currentSpeed = currentSpeed,
+                                        activePopup = activePopup,
+                                        onTogglePopup = { popup ->
+                                            if (popup == PlayerPopupType.SUBTITLES) {
+                                                currentSubtitleId = player.mediaPlayer.subpictures().track()
+                                            } else if (popup == PlayerPopupType.AUDIO) {
+                                                currentAudioId = player.mediaPlayer.audio().track()
+                                            }
+                                            activePopup = if (activePopup == popup) PlayerPopupType.NONE else popup
+                                        },
+                                        onScrubStart = { isScrubbing = true; scrubFraction = it },
+                                        onScrubbing = { scrubFraction = it },
+                                        onScrubEnd = {
+                                            player.seekToFraction(it)
+                                            isScrubbing = false
+                                        },
+                                        onToggleFullscreen = onToggleFullscreen,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+
+                                // IN-PLAYER FLOATING SETTINGS MENU (Renders strictly inside the 16:9.5 viewport above transport bar)
+                                InPlayerSettingsPopup(
+                                    activePopup = activePopup,
+                                    player = player,
+                                    currentSubtitleId = currentSubtitleId,
+                                    currentAudioId = currentAudioId,
+                                    currentSpeed = currentSpeed,
+                                    onSelectSubtitle = { id ->
+                                        currentSubtitleId = id
+                                        player.mediaPlayer.subpictures().setTrack(id)
+                                        activePopup = PlayerPopupType.NONE
+                                    },
+                                    onSelectAudio = { id ->
+                                        currentAudioId = id
+                                        player.mediaPlayer.audio().setTrack(id)
+                                        activePopup = PlayerPopupType.NONE
+                                    },
+                                    onSelectSpeed = { speed ->
+                                        currentSpeed = speed
+                                        player.mediaPlayer.controls().setRate(speed)
+                                        activePopup = PlayerPopupType.NONE
+                                    },
+                                    onDismiss = { activePopup = PlayerPopupType.NONE },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(bottom = 58.dp, end = 16.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(18.dp))
+
+                        // ========================================================
+                        // CLEAN MOVIE DETAILS SECTION (BUTTONS REMOVED)
+                        // ========================================================
+                        Column(
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "NOW PLAYING",
+                                color = Color(0xFF42A5F5),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = currentPlayingMovie.title,
+                                color = Color.White,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "${currentPlayingMovie.durationFormatted}  •  ${currentPlayingMovie.genres}",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    // RIGHT COLUMN: "Movies in the Drive" Playlist
+                    Column(
+                        modifier = Modifier
+                            .weight(0.32f)
+                            .fillMaxHeight()
+                    ) {
+                        Text(
+                            text = "COLLECTION",
+                            color = Color(0xFF64748B),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Movies in the Drive",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "${allMovies.size} titles",
+                                color = Color(0xFF64748B),
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(allMovies) { movie ->
+                                val isSelected = movie.id == currentPlayingMovie.id
+                                Card(
+                                    shape = RoundedCornerShape(8.dp),
+                                    backgroundColor = if (isSelected) Color(0xFF132238) else Color(0xFF0E131E),
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = if (isSelected) Color(0xFF42A5F5) else Color(0xFF1E2638)
+                                    ),
+                                    elevation = if (isSelected) 4.dp else 0.dp,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            if (movie.id != currentPlayingMovie.id) {
+                                                currentPlayingMovie = movie
+                                            }
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Card(
+                                            shape = RoundedCornerShape(6.dp),
+                                            backgroundColor = Color.Black,
+                                            modifier = Modifier
+                                                .width(72.dp)
+                                                .height(46.dp)
+                                        ) {
+                                            if (!movie.thumbnailUrl.isNullOrBlank()) {
+                                                AsyncImage(
+                                                    model = movie.thumbnailUrl,
+                                                    contentDescription = movie.title,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            } else {
+                                                Box(
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Movie,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFF475569),
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.width(12.dp))
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = movie.title,
+                                                color = if (isSelected) Color(0xFF42A5F5) else Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = "${movie.genres}  • ${movie.durationFormatted}",
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 11.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = Icons.Default.PlayArrow,
+                                                contentDescription = "Playing",
+                                                tint = Color(0xFF42A5F5),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========================================================
+// SEEK FEEDBACK BADGE (-10s / +10s CINEMA GLASS OVERLAY)
+// ========================================================
+@Composable
+private fun SeekFeedbackIndicator(
+    direction: SeekFeedbackDirection,
+    visible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(120)) + scaleIn(initialScale = 0.85f, animationSpec = tween(140)),
+        exit = fadeOut(animationSpec = tween(200)) + scaleOut(targetScale = 1.05f, animationSpec = tween(200)),
+        modifier = modifier
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = Color(0xB30C111C),
+            border = BorderStroke(1.dp, Color(0x6600E5FF)),
+            elevation = 12.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .size(76.dp)
+                    .padding(8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = if (direction == SeekFeedbackDirection.REWIND) Icons.Default.FastRewind else Icons.Default.FastForward,
+                    contentDescription = null,
+                    tint = Color(0xFF00E5FF),
+                    modifier = Modifier.size(26.dp)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (direction == SeekFeedbackDirection.REWIND) "-10" else "+10",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+// ========================================================
+// IN-PLAYER FLOATING SETTINGS MENU (UPWARD POPUP REPLACEMENT)
+// ========================================================
+@Composable
+private fun InPlayerSettingsPopup(
+    activePopup: PlayerPopupType,
+    player: DirectMemoryVideoPlayer,
+    currentSubtitleId: Int,
+    currentAudioId: Int,
+    currentSpeed: Float,
+    onSelectSubtitle: (Int) -> Unit,
+    onSelectAudio: (Int) -> Unit,
+    onSelectSpeed: (Float) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    // 1. Content buffer to ensure full layout renders throughout the funnel-down animation
+    var cachedPopupType by remember { mutableStateOf(PlayerPopupType.SUBTITLES) }
+    if (activePopup != PlayerPopupType.NONE) {
+        cachedPopupType = activePopup
+    }
+    val displayType = if (activePopup != PlayerPopupType.NONE) activePopup else cachedPopupType
+
+    // 2. Dynamic horizontal anchor matching the physical location of each transport button
+    val transformOrigin = remember(displayType) {
+        when (displayType) {
+            PlayerPopupType.SUBTITLES -> TransformOrigin(0.32f, 1.0f)
+            PlayerPopupType.AUDIO     -> TransformOrigin(0.58f, 1.0f)
+            PlayerPopupType.SPEED     -> TransformOrigin(0.82f, 1.0f)
+            PlayerPopupType.NONE      -> TransformOrigin(0.82f, 1.0f)
+        }
+    }
+
+    // 3. Fluid Pop-Up & Funnel-Down Animation
+    AnimatedVisibility(
+        visible = activePopup != PlayerPopupType.NONE,
+        enter = scaleIn(
+            initialScale = 0.12f,
+            transformOrigin = transformOrigin,
+            animationSpec = tween(
+                durationMillis = 240,
+                easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
+            )
+        ) + fadeIn(
+            animationSpec = tween(durationMillis = 160)
+        ),
+        exit = scaleOut(
+            targetScale = 0.08f,
+            transformOrigin = transformOrigin,
+            animationSpec = tween(
+                durationMillis = 190,
+                easing = FastOutLinearInEasing
+            )
+        ) + fadeOut(
+            animationSpec = tween(durationMillis = 150)
+        ),
+        modifier = modifier
+    ) {
+        Card(
+            shape = RoundedCornerShape(12.dp),
+            backgroundColor = Color(0xF20F1420),
+            border = BorderStroke(1.dp, Color(0xFF263248)),
+            elevation = 16.dp,
+            modifier = Modifier
+                .widthIn(min = 220.dp, max = 290.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume clicks to prevent dismissing overlay */ }
+        ) {
+            Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                when (displayType) {
+                    PlayerPopupType.SUBTITLES -> {
+                        Text(
+                            text = "SUBTITLES",
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+
+                        MenuOptionItem(
+                            label = "Subtitles Off",
+                            isSelected = currentSubtitleId == -1,
+                            onClick = { onSelectSubtitle(-1) }
+                        )
+
+                        val spuTracks = player.mediaPlayer.subpictures().trackDescriptions() ?: emptyList()
+                        spuTracks.filter { it.id() != -1 }.forEach { track ->
+                            MenuOptionItem(
+                                label = track.description(),
+                                isSelected = track.id() == currentSubtitleId,
+                                onClick = { onSelectSubtitle(track.id()) }
+                            )
+                        }
+                    }
+
+                    PlayerPopupType.AUDIO -> {
+                        Text(
+                            text = "AUDIO TRACK",
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+
+                        val audioTracks = player.mediaPlayer.audio().trackDescriptions() ?: emptyList()
+                        if (audioTracks.isEmpty()) {
+                            MenuOptionItem(
+                                label = "Default Audio",
+                                isSelected = true,
+                                onClick = onDismiss
+                            )
+                        } else {
+                            audioTracks.forEach { track ->
+                                MenuOptionItem(
+                                    label = track.description(),
+                                    isSelected = track.id() == currentAudioId,
+                                    onClick = { onSelectAudio(track.id()) }
+                                )
+                            }
+                        }
+                    }
+
+                    PlayerPopupType.SPEED -> {
+                        Text(
+                            text = "PLAYBACK SPEED",
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+
+                        listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
+                            MenuOptionItem(
+                                label = "${speed}x" + if (speed == 1.0f) " (Normal)" else "",
+                                isSelected = currentSpeed == speed,
+                                onClick = { onSelectSpeed(speed) }
+                            )
+                        }
+                    }
+
+                    PlayerPopupType.NONE -> {}
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MenuOptionItem(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .background(if (isSelected) Color(0xFF132238) else Color.Transparent)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = if (isSelected) Color(0xFF42A5F5) else Color.White,
+            fontSize = 13.sp,
+            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            modifier = Modifier.weight(1f)
+        )
+        if (isSelected) {
+            Text(
+                text = "✓",
+                color = Color(0xFF42A5F5),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+    }
+}
+
+// ========================================================
+// SLICK SLIDERS & TRANSPORT BAR
+// ========================================================
+@Composable
+fun SlickVolumeSlider(
+    volume: Int,
+    onVolumeChange: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isDragging by remember { mutableStateOf(false) }
+    val volumeFraction = (volume / 100f).coerceIn(0f, 1f)
+
+    BoxWithConstraints(
+        modifier = modifier
+            .width(80.dp)
+            .height(26.dp)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    isDragging = true
+                    val width = size.width.toFloat()
+                    if (width > 0f) {
+                        val frac = (down.position.x / width).coerceIn(0f, 1f)
+                        onVolumeChange((frac * 100).roundToInt())
+                    }
+
+                    val pointerId = down.id
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                        if (!change.pressed) {
+                            change.consume()
+                            if (width > 0f) {
+                                val frac = (change.position.x / width).coerceIn(0f, 1f)
+                                onVolumeChange((frac * 100).roundToInt())
+                            }
+                            isDragging = false
+                            break
+                        } else {
+                            change.consume()
+                            if (width > 0f) {
+                                val frac = (change.position.x / width).coerceIn(0f, 1f)
+                                onVolumeChange((frac * 100).roundToInt())
+                            }
+                        }
+                    }
+                }
+            },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        val density = LocalDensity.current
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(3.5.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Color(0x33FFFFFF))
+        )
+
+        if (volumeFraction > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(volumeFraction)
+                    .height(3.5.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                        )
+                    )
+            )
+        }
+
+        val thumbSize = if (isDragging) 12.dp else 10.dp
+        Box(
+            modifier = Modifier
+                .offset {
+                    val xPos = (volumeFraction * containerWidthPx) - with(density) { (thumbSize / 2).toPx() }
+                    IntOffset(
+                        xPos.roundToInt().coerceIn(
+                            0,
+                            (containerWidthPx - with(density) { thumbSize.toPx() }).roundToInt().coerceAtLeast(0)
+                        ),
+                        0
+                    )
+                }
+                .size(thumbSize)
+                .shadow(3.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xFF42A5F5))
+        )
+    }
+}
+
+@Composable
+private fun BottomTransportBar(
+    player: DirectMemoryVideoPlayer,
+    activeFraction: Float,
+    displayTimeMs: Long,
+    isScrubbing: Boolean,
+    isFullscreen: Boolean,
+    currentSpeed: Float,
+    activePopup: PlayerPopupType,
+    onTogglePopup: (PlayerPopupType) -> Unit,
+    onScrubStart: (Float) -> Unit,
+    onScrubbing: (Float) -> Unit,
+    onScrubEnd: (Float) -> Unit,
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        // Scrubber Bar
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val density = LocalDensity.current
+            val containerWidthPx = with(density) { maxWidth.toPx() }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(30.dp)
+                    .pointerInput(player.totalDurationMs) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            val width = size.width.toFloat()
+                            if (width <= 0f) return@awaitEachGesture
+
+                            val initialFraction = (down.position.x / width).coerceIn(0f, 1f)
+                            onScrubStart(initialFraction)
+
+                            val pointerId = down.id
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                if (!change.pressed) {
+                                    change.consume()
+                                    val finalFraction = (change.position.x / width).coerceIn(0f, 1f)
+                                    onScrubEnd(finalFraction)
+                                    break
+                                } else {
+                                    change.consume()
+                                    val dragFraction = (change.position.x / width).coerceIn(0f, 1f)
+                                    onScrubbing(dragFraction)
+                                }
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.5.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color(0x33FFFFFF))
+                )
+
+                if (activeFraction > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(activeFraction)
+                            .height(3.5.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                                )
+                            )
+                    )
+                }
+
+                val thumbSize = if (isScrubbing) 15.dp else 12.dp
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            val xPos = (activeFraction * containerWidthPx) - with(density) { (thumbSize / 2).toPx() }
+                            IntOffset(xPos.roundToInt().coerceAtLeast(0), 0)
+                        }
+                        .size(thumbSize)
+                        .shadow(4.dp, CircleShape)
+                        .clip(CircleShape)
+                        .background(Color(0xFF42A5F5))
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(2.dp))
+
+        // Transport Controls Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Left Controls: [Play/Pause] -> [Volume Group] -> [Timer Block]
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                IconButton(
+                    onClick = { player.togglePlayPause() },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "Play/Pause",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    IconButton(
+                        onClick = {
+                            player.setVolumeLevel(if (player.volume > 0) 0 else 100)
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = when {
+                                player.volume == 0 -> Icons.AutoMirrored.Filled.VolumeMute
+                                player.volume < 50 -> Icons.AutoMirrored.Filled.VolumeDown
+                                else -> Icons.AutoMirrored.Filled.VolumeUp
+                            },
+                            contentDescription = "Volume",
+                            tint = Color(0xFFCBD5E1),
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+
+                    SlickVolumeSlider(
+                        volume = player.volume,
+                        onVolumeChange = { newVol -> player.setVolumeLevel(newVol) },
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                Text(
+                    text = "${formatDuration(displayTimeMs)} / ${formatDuration(player.totalDurationMs)}",
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            // Right Controls: [Caption] -> [Audio Track] -> [Speed] -> [Fullscreen]
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 1. Caption / Subtitles Button
+                IconButton(
+                    onClick = { onTogglePopup(PlayerPopupType.SUBTITLES) },
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ClosedCaption,
+                        contentDescription = "Subtitles",
+                        tint = if (activePopup == PlayerPopupType.SUBTITLES) Color(0xFF42A5F5) else Color(0xFFCBD5E1),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // 2. Audio Track Button
+                IconButton(
+                    onClick = { onTogglePopup(PlayerPopupType.AUDIO) },
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Audiotrack,
+                        contentDescription = "Audio Tracks",
+                        tint = if (activePopup == PlayerPopupType.AUDIO) Color(0xFF42A5F5) else Color(0xFFCBD5E1),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // 3. Playback Speed Button / Chip
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
+                    modifier = Modifier
+                        .clickable { onTogglePopup(PlayerPopupType.SPEED) }
+                        .padding(horizontal = 2.dp)
+                ) {
+                    Text(
+                        text = "${currentSpeed}x",
+                        color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF42A5F5) else Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                    )
+                }
+
+                // 4. Fullscreen Toggle
+                IconButton(
+                    onClick = onToggleFullscreen,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        contentDescription = "Toggle Fullscreen",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ========================================================
+// DESKTOP MEDIA ITEM OVERLOAD (FOR HOMESCREEN & NAVIGATION)
+// ========================================================
 @Composable
 fun DesktopMoviePlayerScreen(
     initialMovie: DesktopMediaItem,
     allMovies: List<DesktopMediaItem> = emptyList(),
     accessToken: String,
     onBack: () -> Unit,
+    isFullscreen: Boolean = false,
+    onFullscreenToggle: ((Boolean) -> Unit)? = null,
+    onToggleFullscreen: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    var currentMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
+    val port = remember { LocalStreamServer.start() }
 
-    var isPlaying by remember { mutableStateOf(false) }
-    var isBuffering by remember { mutableStateOf(true) }
-    var currentTimeMs by remember { mutableLongStateOf(0L) }
-    var totalDurationMs by remember { mutableLongStateOf(currentMovie.durationMs.coerceAtLeast(1L)) }
-    var volume by remember { mutableFloatStateOf(1f) }
-    var isMuted by remember { mutableStateOf(false) }
-
-    var videoAspectRatio by remember { mutableFloatStateOf(16f / 9f) }
-
-    val isReleased = remember { AtomicBoolean(false) }
-    val focusRequester = remember { FocusRequester() }
-
-    val mediaPlayerComponent = remember {
-        try {
-            NativeDiscovery().discover()
-            val factory = MediaPlayerFactory(
-                "--no-video-title-show",
-                "--avcodec-hw=any",
-                "--vout=direct3d11",
-                "--aout=directsound",
-                "--audio-resampler=soxr",
-                "--network-caching=3000",
-                "--file-caching=2000",
-                "--drop-late-frames",
-                "--skip-frames"
-            )
-            EmbeddedMediaPlayerComponent(factory, null, null, null, null).apply {
-                background = java.awt.Color.BLACK
-                videoSurfaceComponent().background = java.awt.Color.BLACK
-            }
-        } catch (e: Throwable) {
-            System.err.println("[MoviePlayer] LibVLC initialization error: ${e.message}")
-            null
-        }
+    fun DesktopMediaItem.toMovieItem(): DesktopMovieItem {
+        val totalSec = (durationMs / 1000).coerceAtLeast(0)
+        val hrs = totalSec / 3600
+        val mins = (totalSec % 3600) / 60
+        val durFormatted = if (hrs > 0) "${hrs}h ${mins}m" else "${mins}m"
+        val genresFormatted = genre.ifBlank { "Movie • Cinema" }
+        val streamUrl = "http://127.0.0.1:$port/stream?id=$id&token=$accessToken"
+        return DesktopMovieItem(
+            id = id,
+            title = title,
+            durationFormatted = durFormatted,
+            genres = genresFormatted,
+            thumbnailUrl = thumbnailUrl,
+            streamUrl = streamUrl
+        )
     }
 
-    val player = mediaPlayerComponent?.mediaPlayer()
-
-    // Triggered whenever the active movie changes
-    LaunchedEffect(currentMovie.id) {
-        val comp = mediaPlayerComponent ?: return@LaunchedEffect
-        val p = comp.mediaPlayer() ?: return@LaunchedEffect
-        val surface = comp.videoSurfaceComponent() ?: return@LaunchedEffect
-
-        if (isReleased.get()) return@LaunchedEffect
-
-        isBuffering = true
-        isPlaying = false
-        currentTimeMs = 0L
-        totalDurationMs = currentMovie.durationMs.coerceAtLeast(1L)
-        videoAspectRatio = 16f / 9f
-
-        // 1. Synchronously halt existing decoders and yield for D3D11 swapchain cleanup
-        p.controls().stop()
-        delay(150)
-
-        surface.background = java.awt.Color.BLACK
-        comp.background = java.awt.Color.BLACK
-
-        val port = LocalStreamServer.start()
-        val streamUrl = "http://127.0.0.1:$port/stream?id=${currentMovie.id}&token=$accessToken"
-        val hasStarted = AtomicBoolean(false)
-
-        fun startStream() {
-            if (hasStarted.compareAndSet(false, true)) {
-                println("[DesktopMoviePlayerScreen] Starting stream for ${currentMovie.title} (ID: ${currentMovie.id})")
-                SwingUtilities.invokeLater {
-                    try {
-                        if (!isReleased.get()) {
-                            p.media().play(
-                                streamUrl,
-                                ":network-caching=3000",
-                                ":file-caching=2000"
-                            )
-                        }
-                    } catch (t: Throwable) {
-                        System.err.println("[MoviePlayer] Playback start error: ${t.message}")
-                    }
-                }
-            }
-        }
-
-        if (surface.isDisplayable) {
-            startStream()
-        } else {
-            val hierarchyListener = object : HierarchyListener {
-                override fun hierarchyChanged(e: HierarchyEvent) {
-                    if ((e.changeFlags and HierarchyEvent.DISPLAYABILITY_CHANGED.toLong()) != 0L && surface.isDisplayable) {
-                        surface.removeHierarchyListener(this)
-                        startStream()
-                    }
-                }
-            }
-            surface.addHierarchyListener(hierarchyListener)
-        }
-
-        for (i in 0 until 10) {
-            if (hasStarted.get()) break
-            delay(100)
-            if (surface.isDisplayable) {
-                startStream()
-                break
-            }
-        }
+    val convertedInitial = remember(initialMovie.id, accessToken, port) {
+        initialMovie.toMovieItem()
+    }
+    val convertedAll = remember(allMovies, accessToken, port) {
+        allMovies.map { it.toMovieItem() }
     }
 
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            for (i in 0 until 20) {
-                val dim = player?.video()?.videoDimension()
-                if (dim != null && dim.width > 0 && dim.height > 0) {
-                    val ratio = dim.width.toFloat() / dim.height.toFloat()
-                    if (ratio in 0.5f..3.5f) {
-                        videoAspectRatio = ratio
-                        break
-                    }
-                }
-                delay(150)
+    DesktopMoviePlayerScreen(
+        initialMovie = convertedInitial,
+        allMovies = convertedAll,
+        isFullscreen = isFullscreen,
+        onToggleFullscreen = onToggleFullscreen ?: {
+            if (onFullscreenToggle != null) {
+                onFullscreenToggle(!isFullscreen)
             }
-        }
-    }
-
-    DisposableEffect(Unit) {
-        val comp = mediaPlayerComponent
-
-        fun checkDimension(mp: MediaPlayer?) {
-            val dim = mp?.video()?.videoDimension()
-            if (dim != null && dim.width > 0 && dim.height > 0) {
-                val ratio = dim.width.toFloat() / dim.height.toFloat()
-                if (ratio in 0.5f..3.5f) {
-                    videoAspectRatio = ratio
-                }
-            }
-        }
-
-        val listener = object : MediaPlayerEventAdapter() {
-            override fun timeChanged(mediaPlayer: MediaPlayer?, newTime: Long) {
-                currentTimeMs = newTime
-                if (videoAspectRatio == (16f / 9f)) {
-                    checkDimension(mediaPlayer)
-                }
-            }
-            override fun lengthChanged(mediaPlayer: MediaPlayer?, newLength: Long) {
-                if (newLength > 0L) totalDurationMs = newLength
-            }
-            override fun playing(mediaPlayer: MediaPlayer?) {
-                isPlaying = true
-                isBuffering = false
-                checkDimension(mediaPlayer)
-            }
-            override fun videoOutput(mediaPlayer: MediaPlayer?, newCount: Int) {
-                if (newCount > 0) {
-                    checkDimension(mediaPlayer)
-                }
-            }
-            override fun paused(mediaPlayer: MediaPlayer?) {
-                isPlaying = false
-            }
-            override fun buffering(mediaPlayer: MediaPlayer?, newCache: Float) {
-                isBuffering = newCache < 100f
-            }
-            override fun finished(mediaPlayer: MediaPlayer?) {
-                isPlaying = false
-                isBuffering = false
-            }
-            override fun error(mediaPlayer: MediaPlayer?) {
-                System.err.println("[MoviePlayer] LibVLC playback error")
-                isBuffering = false
-            }
-        }
-
-        player?.events()?.addMediaPlayerEventListener(listener)
-
-        onDispose {
-            if (!isReleased.getAndSet(true)) {
-                try {
-                    player?.events()?.removeMediaPlayerEventListener(listener)
-                    // Halt decoding and flush pipeline synchronously before releasing component
-                    player?.controls()?.stop()
-                    comp?.release()
-                } catch (t: Throwable) {
-                    System.err.println("[MoviePlayer] Safe teardown: ${t.message}")
-                }
-            }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        delay(50)
-        runCatching { focusRequester.requestFocus() }
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color(0xFF07090E))
-            .padding(horizontal = 24.dp, vertical = 14.dp)
-            .focusRequester(focusRequester)
-            .focusable()
-            .onKeyEvent { keyEvent ->
-                if (keyEvent.type == KeyEventType.KeyDown) {
-                    when (keyEvent.key) {
-                        Key.Spacebar -> {
-                            if (isPlaying) player?.controls()?.pause() else player?.controls()?.play()
-                            true
-                        }
-                        Key.DirectionLeft -> {
-                            player?.controls()?.skipTime(-10000)
-                            true
-                        }
-                        Key.DirectionRight -> {
-                            player?.controls()?.skipTime(10000)
-                            true
-                        }
-                        Key.Escape -> {
-                            onBack()
-                            true
-                        }
-                        else -> false
-                    }
-                } else false
-            }
-    ) {
-        // TOP BREADCRUMB ROW
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable { onBack() }
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .padding(vertical = 4.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "Back",
-                    tint = Color(0xFF94A3B8),
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = "Back to Collection",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = Color(0xFF0C1928),
-                border = BorderStroke(1.dp, Color(0xFF16324F))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF00E5FF))
-                    )
-                    Text(
-                        text = "Hardware Direct Stream Active",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // MAIN SPLIT: Zero-Scroll Fixed Height Layout
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(20.dp)
-        ) {
-            // LEFT COLUMN (~65% width): Reduced Height Player + Movie Details Below (NO THUMBNAIL)
-            Column(
-                modifier = Modifier
-                    .weight(0.65f)
-                    .fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                // Video Viewport & Transport Container
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color.Black)
-                        .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(14.dp))
-                ) {
-                    BoxWithConstraints(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .background(Color.Black),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        val boxWidth = maxWidth.value
-                        val boxHeight = maxHeight.value
-                        val boxRatio = if (boxHeight > 0f) boxWidth / boxHeight else (16f / 9f)
-
-                        val videoModifier = if (videoAspectRatio > boxRatio) {
-                            Modifier.fillMaxWidth().aspectRatio(videoAspectRatio)
-                        } else {
-                            Modifier.fillMaxHeight().aspectRatio(videoAspectRatio)
-                        }
-
-                        if (mediaPlayerComponent != null) {
-                            SwingPanel(
-                                background = Color.Black,
-                                factory = { mediaPlayerComponent },
-                                modifier = videoModifier
-                            )
-                        }
-
-                        if (isBuffering) {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(color = Color(0xFF00E5FF), modifier = Modifier.size(46.dp))
-                            }
-                        }
-                    }
-
-                    // Transport Controls Row
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp)
-                            .background(Color(0xFF0C1018))
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        IconButton(
-                            onClick = {
-                                if (isPlaying) player?.controls()?.pause() else player?.controls()?.play()
-                            },
-                            modifier = Modifier.size(32.dp).pointerHoverIcon(PointerIcon.Hand)
-                        ) {
-                            Icon(
-                                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                contentDescription = if (isPlaying) "Pause" else "Play",
-                                tint = Color.White,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { player?.controls()?.skipTime(-10000) },
-                            modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Replay10,
-                                contentDescription = "Rewind 10s",
-                                tint = Color(0xFF94A3B8),
-                                modifier = Modifier.size(19.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { player?.controls()?.skipTime(10000) },
-                            modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Forward10,
-                                contentDescription = "Forward 10s",
-                                tint = Color(0xFF94A3B8),
-                                modifier = Modifier.size(19.dp)
-                            )
-                        }
-
-                        Slider(
-                            value = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-                            onValueChange = { fraction ->
-                                val target = (fraction * totalDurationMs).toLong()
-                                player?.controls()?.setTime(target)
-                                currentTimeMs = target
-                            },
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color(0xFF00E5FF),
-                                activeTrackColor = Color(0xFF2563EB),
-                                inactiveTrackColor = Color(0xFF1E2838)
-                            ),
-                            modifier = Modifier.weight(1f).height(18.dp).pointerHoverIcon(PointerIcon.Hand)
-                        )
-
-                        Text(
-                            text = "${formatTimecode(currentTimeMs)} / ${formatTimecode(totalDurationMs)}",
-                            color = Color(0xFF94A3B8),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-
-                        IconButton(
-                            onClick = {
-                                isMuted = !isMuted
-                                player?.audio()?.isMute = isMuted
-                            },
-                            modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                        ) {
-                            Icon(
-                                imageVector = if (isMuted || volume == 0f) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
-                                contentDescription = "Mute",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-
-                        Slider(
-                            value = if (isMuted) 0f else volume,
-                            onValueChange = { newVol ->
-                                volume = newVol
-                                isMuted = false
-                                player?.audio()?.setVolume((newVol * 100).toInt())
-                            },
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
-                                activeTrackColor = Color(0xFF00E5FF),
-                                inactiveTrackColor = Color(0xFF1E2838)
-                            ),
-                            modifier = Modifier.width(76.dp).pointerHoverIcon(PointerIcon.Hand)
-                        )
-                    }
-                }
-
-                // DETAILS OF THE MOVIE BELOW THE PLAYER (NO THUMBNAIL)
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "NOW PLAYING",
-                                color = Color(0xFF38BDF8),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.3.sp
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = currentMovie.title,
-                                color = Color.White,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Surface(
-                                modifier = Modifier
-                                    .height(34.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { }
-                                    .pointerHoverIcon(PointerIcon.Hand),
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF131824),
-                                border = BorderStroke(1.dp, Color(0xFF263346))
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(Icons.Rounded.Add, null, tint = Color.White, modifier = Modifier.size(15.dp))
-                                    Text("My list", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                            }
-
-                            Button(
-                                onClick = onBack,
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E2638)),
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier
-                                    .height(34.dp)
-                                    .pointerHoverIcon(PointerIcon.Hand)
-                            ) {
-                                Text("Exit Player", color = Color(0xFFCBD5E1), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                            }
-                        }
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (currentMovie.durationMs > 0L) {
-                            Text(
-                                text = formatDuration(currentMovie.durationMs),
-                                color = Color(0xFFCBD5E1),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(text = "•", color = Color(0xFF64748B), fontSize = 12.sp)
-                        }
-
-                        Text(
-                            text = currentMovie.genre.ifBlank { "Action • Cinema" },
-                            color = Color(0xFF38BDF8),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    val genreTokens = remember(currentMovie.genre) {
-                        currentMovie.genre.split("•", ",")
-                            .map { it.trim() }
-                            .filter { it.isNotBlank() && !it.equals("Movie", ignoreCase = true) }
-                    }
-
-                    if (genreTokens.isNotEmpty()) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            genreTokens.forEach { genreTag ->
-                                Surface(
-                                    shape = RoundedCornerShape(5.dp),
-                                    color = Color(0x99131D2D),
-                                    border = BorderStroke(1.dp, Color(0x661E3A5F))
-                                ) {
-                                    Text(
-                                        text = genreTag,
-                                        color = Color(0xFFE2E8F0),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Text(
-                        text = "Streaming master-quality source file directly from Google Drive in master quality via hardware-accelerated Direct3D playback.",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 11.sp,
-                        lineHeight = 16.sp
-                    )
-                }
-            }
-
-            // RIGHT COLUMN (~35% width): SCROLLABLE LIST OF "Movies in the Drive"
-            Surface(
-                modifier = Modifier
-                    .weight(0.35f)
-                    .fillMaxHeight(),
-                shape = RoundedCornerShape(14.dp),
-                color = Color(0xFF0C1018),
-                border = BorderStroke(1.dp, Color(0xFF18202F))
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = "COLLECTION",
-                                color = Color(0xFF38BDF8),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.2.sp
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Movies in the Drive",
-                                color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                        }
-
-                        Text(
-                            text = "${allMovies.size} titles",
-                            color = Color(0xFF64748B),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = Color(0xFF161E2E), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(allMovies, key = { it.id }) { item ->
-                            val isSelected = item.id == currentMovie.id
-                            val thumb = rememberDriveThumbnail(item.thumbnailUrl)
-
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { currentMovie = item }
-                                    .pointerHoverIcon(PointerIcon.Hand),
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (isSelected) Color(0xFF131E30) else Color(0xFF0F141F),
-                                border = if (isSelected) BorderStroke(1.dp, Color(0xFF2563EB)) else BorderStroke(1.dp, Color(0xFF161E2E))
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    // Movie Thumbnail
-                                    Box(
-                                        modifier = Modifier
-                                            .width(84.dp)
-                                            .height(48.dp)
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(Color(0xFF161E2E)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (thumb != null) {
-                                            Image(
-                                                bitmap = thumb,
-                                                contentDescription = item.title,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier.fillMaxSize()
-                                            )
-                                        }
-
-                                        if (isSelected) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(22.dp)
-                                                    .clip(CircleShape)
-                                                    .background(Color(0xFF2563EB)),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.PlayArrow,
-                                                    contentDescription = null,
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    // Title & Details
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = item.title,
-                                            color = Color.White,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = item.genre.ifBlank { "Movie" },
-                                            color = Color(0xFF38BDF8),
-                                            fontSize = 10.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (item.durationMs > 0L) {
-                                            Text(
-                                                text = formatDuration(item.durationMs),
-                                                color = Color(0xFF64748B),
-                                                fontSize = 9.sp
-                                            )
-                                        }
-                                    }
-
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.GraphicEq,
-                                            contentDescription = "Playing",
-                                            tint = Color(0xFF00E5FF),
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.CloudDone,
-                            contentDescription = null,
-                            tint = Color(0xFF38BDF8),
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Text(
-                            text = "Direct Stream Ready",
-                            color = Color(0xFF64748B),
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
-        }
-    }
+        },
+        onBack = onBack
+    )
 }
 
-private fun formatTimecode(ms: Long): String {
-    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+private fun formatDuration(millis: Long): String {
+    val totalSeconds = (millis / 1000).coerceAtLeast(0)
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
     return if (hours > 0) {
-        "%02d:%02d:%02d".format(hours, minutes, seconds)
+        String.format("%02d:%02d:%02d", hours, minutes, seconds)
     } else {
-        "%02d:%02d".format(minutes, seconds)
+        String.format("%02d:%02d", minutes, seconds)
     }
-}
-
-private fun formatDuration(durationMs: Long): String {
-    val totalMinutes = (durationMs / 60000L).coerceAtLeast(1L)
-    val hours = totalMinutes / 60L
-    val minutes = totalMinutes % 60L
-    return if (hours > 0L) "${hours}h %02dm".format(minutes) else "${minutes}m"
 }

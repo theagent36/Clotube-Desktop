@@ -35,7 +35,7 @@ import androidx.compose.ui.unit.sp
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
-import com.clotube.desktop.ui.screens.rememberDriveThumbnail
+import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.delay
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
@@ -345,11 +345,31 @@ fun DesktopInlinePlayerPanel(
                     }
 
                     if (mediaPlayerComponent != null) {
-                        SwingPanel(
-                            background = Color.Black,
-                            factory = { mediaPlayerComponent },
-                            modifier = videoModifier
-                        )
+                        Box(modifier = videoModifier) {
+                            SwingPanel(
+                                background = Color.Black,
+                                factory = { mediaPlayerComponent },
+                                modifier = Modifier.fillMaxSize()
+                            )
+
+                            // Right-Edge Overdraw Guard
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .fillMaxHeight()
+                                    .width(2.dp)
+                                    .background(Color.Black)
+                            )
+
+                            // Bottom-Edge Overdraw Guard
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .fillMaxWidth()
+                                    .height(2.dp)
+                                    .background(Color.Black)
+                            )
+                        }
                     }
 
                     if (isBuffering) {
@@ -444,7 +464,7 @@ fun DesktopInlinePlayerPanel(
                         ) {
                             items(seriesEpisodes, key = { it.id }) { ep ->
                                 val isSelected = ep.id == (activeEpisodeId.ifBlank { media.id })
-                                val thumb = rememberDriveThumbnail(ep.thumbnailUrl)
+                                val thumb = rememberThumbnailBitmap(primaryUrl = ep.thumbnailUrl)
 
                                 Surface(
                                     modifier = Modifier
@@ -649,18 +669,14 @@ private fun InlineTransportBar(
             )
         }
 
-        Slider(
-            value = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-            onValueChange = { fraction ->
+        val progress = if (totalDurationMs > 0L) (currentTimeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
+        SleekVideoScrubber(
+            progress = progress,
+            onSeek = { fraction ->
                 val target = (fraction * totalDurationMs).toLong()
                 onSeek(target)
             },
-            colors = SliderDefaults.colors(
-                thumbColor = Color(0xFF00E5FF),
-                activeTrackColor = Color(0xFF2563EB),
-                inactiveTrackColor = Color(0xFF1E2838)
-            ),
-            modifier = Modifier.weight(1f).height(18.dp).pointerHoverIcon(PointerIcon.Hand)
+            modifier = Modifier.weight(1f)
         )
 
         Text(
@@ -682,15 +698,10 @@ private fun InlineTransportBar(
             )
         }
 
-        Slider(
-            value = if (isMuted) 0f else volume,
-            onValueChange = onVolumeChange,
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White,
-                activeTrackColor = Color(0xFF00E5FF),
-                inactiveTrackColor = Color(0xFF1E2838)
-            ),
-            modifier = Modifier.width(76.dp).pointerHoverIcon(PointerIcon.Hand)
+        SleekVolumeSlider(
+            volume = if (isMuted) 0f else volume,
+            onVolumeChange = onVolumeChange,
+            modifier = Modifier.width(70.dp)
         )
     }
 }

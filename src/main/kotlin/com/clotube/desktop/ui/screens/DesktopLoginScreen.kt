@@ -26,13 +26,13 @@ import com.clotube.desktop.ui.components.ClotubeGlyphIcon
 
 @Composable
 fun DesktopLoginScreen(
-    authState: AuthState,
-    onConnectClick: () -> Unit,
-    onCancelClick: () -> Unit,
+    isLoading: Boolean = false,
+    errorMessage: String? = null,
+    onSignInClick: () -> Unit,
+    onCancelClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val isAuthenticating = authState is AuthState.Authenticating
-    val errorMessage = (authState as? AuthState.Unauthenticated)?.errorMessage
+    val isAuthenticating = isLoading
 
     Box(
         modifier = modifier
@@ -113,7 +113,7 @@ fun DesktopLoginScreen(
                     }
                 } else {
                     Button(
-                        onClick = onConnectClick,
+                        onClick = onSignInClick,
                         shape = RoundedCornerShape(26.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF2F80ED)
@@ -135,3 +135,20 @@ fun DesktopLoginScreen(
         }
     }
 }
+
+@Composable
+fun DesktopLoginScreen(
+    authState: AuthState,
+    onConnectClick: () -> Unit,
+    onCancelClick: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    DesktopLoginScreen(
+        isLoading = authState is AuthState.Authenticating,
+        errorMessage = (authState as? AuthState.Unauthenticated)?.errorMessage,
+        onSignInClick = onConnectClick,
+        onCancelClick = onCancelClick,
+        modifier = modifier
+    )
+}
+

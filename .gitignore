@@ -10,7 +10,7 @@ google-services.json
 tokens/
 *.token
 *oauth*token*
-clotube_watch_history.json
+auth_state.json
 
 # Signing Keystores & Keys
 *.jks
@@ -25,6 +25,15 @@ gradle.properties
 .env
 *.env
 *.env.local
+
+# =============================================================================
+# Local Media Library & Image Caches
+# =============================================================================
+cache/
+cache/**
+clotube_library_cache.json
+clotube_metadata_cache.json
+clotube_watch_history.json
 
 # =============================================================================
 # Kotlin & Compose Multiplatform Desktop Build Artifacts
@@ -74,7 +83,3 @@ dist/
 *.log
 /.plugins/
 /.opencode-skills/
-
-# Local Application Caches
-clotube_library_cache.json
-clotube_metadata_cache.json

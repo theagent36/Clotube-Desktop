@@ -21,6 +21,7 @@ repositories {
 
 dependencies {
     implementation(compose.desktop.currentOs)
+    implementation(compose.material)
     implementation(compose.material3)
     implementation(compose.materialIconsExtended)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
@@ -29,6 +30,7 @@ dependencies {
     implementation("com.google.api-client:google-api-client:2.7.0")
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.36.0")
     implementation("com.google.apis:google-api-services-drive:v3-rev20241027-2.0.0")
+    implementation("com.google.apis:google-api-services-oauth2:v2-rev20200213-2.0.0")
     implementation("com.google.http-client:google-http-client-gson:1.45.0")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("uk.co.caprica:vlcj:4.8.3")
@@ -54,3 +56,4 @@ compose.desktop {
         }
     }
 }
+
