@@ -3,44 +3,67 @@ package com.clotube.desktop.ui.components
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.skia.*
 import java.io.File
 import java.net.HttpURLConnection
-import java.net.URI
+import java.net.URL
 import java.security.MessageDigest
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
-// In-memory cache for instant 0ms access to decoded thumbnails
-private val thumbnailMemoryCache = ConcurrentHashMap<String, ImageBitmap>()
+/**
+ * Context-aware image sizing:
+ * - CARD: 900px downsampling with quality 88 delivers razor-sharp text on 1080p/1440p/4K displays.
+ * - HERO: 1920px downsampling with quality 90 delivers native full-HD widescreen billboard art.
+ */
+enum class ThumbnailSize(val maxDimension: Int, val jpegQuality: Int) {
+    CARD(maxDimension = 900, jpegQuality = 88),
+    HERO(maxDimension = 1920, jpegQuality = 90)
+}
 
-// Negative cache: prevents infinite network retries for dead/invalid URLs
+// Bounded LRU in-memory cache (Capacity: 90 active textures)
+private const val MEMORY_CACHE_CAPACITY = 90
+private val thumbnailMemoryCache: MutableMap<String, ImageBitmap> =
+    Collections.synchronizedMap(
+        object : LinkedHashMap<String, ImageBitmap>(MEMORY_CACHE_CAPACITY, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean {
+                return size > MEMORY_CACHE_CAPACITY
+            }
+        }
+    )
+
 private val failedUrlCache = ConcurrentHashMap.newKeySet<String>()
-
-// Throttled dispatcher: prevents network flooding and UI thread starvation
-private val imageFetchDispatcher = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
+private val urlHashCache = ConcurrentHashMap<String, String>()
+private val imageFetchDispatcher = Dispatchers.IO.limitedParallelism(4)
+private val isEvictionScheduled = AtomicBoolean(false)
 
 private val diskCacheDir = File("cache", "thumbnails").apply {
     if (!exists()) mkdirs()
 }
 
-/**
- * High-performance, downsampled, disk-cached image loader for Compose Desktop:
- * 1. Checks in-memory cache (0ms).
- * 2. Checks local disk cache (`cache/thumbnails/{hash}.png`) (<1ms).
- * 3. Downloads from network, downsamples via Skia Surface to max 480px, and caches to disk.
- * 4. Eliminates VRAM bloat and Skia real-time downsampling lag.
- */
 @Composable
 fun rememberThumbnailBitmap(
     primaryUrl: String?,
     fallbackUrl: String? = null,
-    accessToken: String = ""
+    accessToken: String = "",
+    size: ThumbnailSize = ThumbnailSize.CARD
 ): ImageBitmap? {
-    val effectiveKey = primaryUrl?.ifBlank { null } ?: fallbackUrl?.ifBlank { null } ?: return null
+    val effectiveUrl = primaryUrl?.ifBlank { null } ?: fallbackUrl?.ifBlank { null } ?: return null
+    val effectiveKey = "${effectiveUrl}_${size.name}"
+
+    // Run one-time asynchronous startup disk maintenance
+    if (isEvictionScheduled.compareAndSet(false, true)) {
+        CoroutineScope(Dispatchers.IO).launch {
+            pruneDiskCache()
+        }
+    }
 
     thumbnailMemoryCache[effectiveKey]?.let { return it }
 
@@ -50,27 +73,24 @@ fun rememberThumbnailBitmap(
         if (bitmapState != null || failedUrlCache.contains(effectiveKey)) return@LaunchedEffect
 
         val loaded = withContext(imageFetchDispatcher) {
-            // Check persistent disk cache first
-            val diskImage = loadFromDiskCache(effectiveKey)
+            val diskImage = loadFromDiskCache(effectiveUrl, size)
             if (diskImage != null) {
                 return@withContext diskImage
             }
 
             var result: ImageBitmap? = null
 
-            // Step 1: Attempt Primary URL
-            if (!primaryUrl.isNullOrBlank() && !failedUrlCache.contains(primaryUrl)) {
-                result = fetchAndProcessImage(primaryUrl, effectiveKey, accessToken)
+            if (!primaryUrl.isNullOrBlank() && !failedUrlCache.contains("${primaryUrl}_${size.name}")) {
+                result = fetchAndProcessImage(primaryUrl, accessToken, size)
                 if (result == null) {
-                    failedUrlCache.add(primaryUrl)
+                    failedUrlCache.add("${primaryUrl}_${size.name}")
                 }
             }
 
-            // Step 2: Attempt Fallback URL
-            if (result == null && !fallbackUrl.isNullOrBlank() && fallbackUrl != primaryUrl && !failedUrlCache.contains(fallbackUrl)) {
-                result = fetchAndProcessImage(fallbackUrl, effectiveKey, accessToken)
+            if (result == null && !fallbackUrl.isNullOrBlank() && fallbackUrl != primaryUrl && !failedUrlCache.contains("${fallbackUrl}_${size.name}")) {
+                result = fetchAndProcessImage(fallbackUrl, accessToken, size)
                 if (result == null) {
-                    failedUrlCache.add(fallbackUrl)
+                    failedUrlCache.add("${fallbackUrl}_${size.name}")
                 }
             }
 
@@ -90,16 +110,18 @@ fun rememberThumbnailBitmap(
     return bitmapState
 }
 
-private fun getDiskCacheFile(key: String): File {
-    val md = MessageDigest.getInstance("MD5")
-    val digest = md.digest(key.toByteArray(Charsets.UTF_8))
-    val hash = digest.joinToString("") { "%02x".format(it) }
-    return File(diskCacheDir, "$hash.png")
+private fun getDiskCacheFile(url: String, size: ThumbnailSize): File {
+    val hash = urlHashCache.computeIfAbsent(url) { raw ->
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(raw.toByteArray(Charsets.UTF_8))
+        digest.joinToString("") { "%02x".format(it) }
+    }
+    return File(diskCacheDir, "$hash-${size.name.lowercase()}.jpg")
 }
 
-private fun loadFromDiskCache(key: String): ImageBitmap? {
+private fun loadFromDiskCache(url: String, size: ThumbnailSize): ImageBitmap? {
     return try {
-        val file = getDiskCacheFile(key)
+        val file = getDiskCacheFile(url, size)
         if (file.exists() && file.length() > 0) {
             val bytes = file.readBytes()
             val skiaImage = Image.makeFromEncoded(bytes)
@@ -112,24 +134,55 @@ private fun loadFromDiskCache(key: String): ImageBitmap? {
     }
 }
 
-private fun saveToDiskCache(key: String, bytes: ByteArray) {
+private fun saveToDiskCache(url: String, size: ThumbnailSize, bytes: ByteArray) {
     try {
-        val file = getDiskCacheFile(key)
+        val file = getDiskCacheFile(url, size)
         file.writeBytes(bytes)
     } catch (_: Exception) {}
 }
 
-private fun fetchAndProcessImage(urlString: String, effectiveKey: String, accessToken: String): ImageBitmap? {
+private fun pruneDiskCache() {
+    try {
+        if (!diskCacheDir.exists()) return
+        val files = diskCacheDir.listFiles() ?: return
+        val now = System.currentTimeMillis()
+        val thirtyDaysMs = 30L * 24 * 60 * 60 * 1000
+
+        for (file in files) {
+            if (now - file.lastModified() > thirtyDaysMs) {
+                file.delete()
+            }
+        }
+
+        val remainingFiles = diskCacheDir.listFiles() ?: return
+        val totalBytes = remainingFiles.sumOf { it.length() }
+        val maxCapBytes = 500L * 1024 * 1024
+        val targetBytes = 400L * 1024 * 1024
+
+        if (totalBytes > maxCapBytes) {
+            val sortedByOldest = remainingFiles.sortedBy { it.lastModified() }
+            var currentSize = totalBytes
+            for (oldFile in sortedByOldest) {
+                if (currentSize <= targetBytes) break
+                val size = oldFile.length()
+                if (oldFile.delete()) {
+                    currentSize -= size
+                }
+            }
+        }
+    } catch (_: Exception) {}
+}
+
+private fun fetchAndProcessImage(urlString: String, accessToken: String, size: ThumbnailSize): ImageBitmap? {
     val rawBytes = downloadBytesWithRedirects(urlString, accessToken) ?: return null
     return try {
         val originalImage = Image.makeFromEncoded(rawBytes)
         val origW = originalImage.width
         val origH = originalImage.height
 
-        // Downsample master-quality posters (3000x4500) to card resolution (max 480px width)
-        val maxDimension = 480
-        val downsampledImage: Image = if (origW > maxDimension || origH > maxDimension) {
-            val scale = min(maxDimension.toFloat() / origW, maxDimension.toFloat() / origH)
+        val maxDim = size.maxDimension
+        val downsampledImage: Image = if (origW > maxDim || origH > maxDim) {
+            val scale = min(maxDim.toFloat() / origW, maxDim.toFloat() / origH)
             val targetW = (origW * scale).toInt().coerceAtLeast(1)
             val targetH = (origH * scale).toInt().coerceAtLeast(1)
 
@@ -144,14 +197,9 @@ private fun fetchAndProcessImage(urlString: String, effectiveKey: String, access
             originalImage
         }
 
-        // Cache downsampled PNG bytes to disk
-        val pngData = downsampledImage.encodeToData(EncodedImageFormat.PNG, 85)
-        if (pngData != null) {
-            val bytes = pngData.bytes
-            saveToDiskCache(urlString, bytes)
-            if (effectiveKey != urlString) {
-                saveToDiskCache(effectiveKey, bytes)
-            }
+        val jpegData = downsampledImage.encodeToData(EncodedImageFormat.JPEG, size.jpegQuality)
+        if (jpegData != null) {
+            saveToDiskCache(urlString, size, jpegData.bytes)
         }
 
         downsampledImage.toComposeImageBitmap()
@@ -167,7 +215,7 @@ private fun downloadBytesWithRedirects(initialUrl: String, accessToken: String):
     while (redirects < 5) {
         var connection: HttpURLConnection? = null
         try {
-            val url = URI(currentUrl).toURL()
+            val url = URL(currentUrl)
             connection = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 6000
@@ -180,8 +228,8 @@ private fun downloadBytesWithRedirects(initialUrl: String, accessToken: String):
                 )
                 setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
 
-                val host = url.host?.lowercase() ?: ""
-                if ((host.contains("googleusercontent.com") || host.contains("drive.google.com") || host.contains("googleapis.com") || host.contains("google.com")) && accessToken.isNotBlank()) {
+                val host = url.host.lowercase()
+                if ((host.contains("googleusercontent.com") || host.contains("drive.google.com") || host.contains("googleapis.com")) && accessToken.isNotBlank()) {
                     setRequestProperty("Authorization", "Bearer $accessToken")
                 }
             }
@@ -194,7 +242,7 @@ private fun downloadBytesWithRedirects(initialUrl: String, accessToken: String):
                 currentUrl = if (location.startsWith("http://") || location.startsWith("https://")) {
                     location
                 } else {
-                    URI(currentUrl).resolve(location).toString()
+                    URL(URL(currentUrl), location).toString()
                 }
                 redirects++
                 continue

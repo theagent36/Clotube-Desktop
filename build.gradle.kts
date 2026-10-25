@@ -41,17 +41,23 @@ compose.desktop {
         mainClass = "com.clotube.desktop.MainKt"
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            targetFormats(
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe
+            )
             packageName = "Clotube"
             packageVersion = "1.0.0"
-            description = "Clotube Desktop Streaming Client"
+            description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"
 
             windows {
                 menuGroup = "Clotube"
                 upgradeUuid = "68c2d159-86cf-44f2-9cb7-285223ab49e0"
-                iconFile.set(project.file("src/main/resources/ic_clotube.ico"))
+                perUserInstall = true
+                dirChooser = true
+                // Embeds the multi-resolution .ico into the native .exe and installer shortcuts
+                iconFile.set(project.file("src/main/resources/app_icon.ico"))
             }
         }
     }

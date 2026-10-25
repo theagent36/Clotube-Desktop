@@ -32,22 +32,23 @@ class DesktopDriveScanner(
 
     companion object {
         private const val INITIAL_FAST_PAINT_SIZE = 5
-        private const val SUBSEQUENT_PACKET_SIZE = 4 // Exactly 1 row in a 4-column grid
+        private const val SUBSEQUENT_PACKET_SIZE = 4
+
+        // [7.2] Reusable singleton HTTP transport and JSON factory across all scanner instances
+        private val sharedHttpTransport by lazy { GoogleNetHttpTransport.newTrustedTransport() }
+        private val sharedJsonFactory by lazy { GsonFactory.getDefaultInstance() }
     }
 
     init {
         driveService = try {
-            val transport = GoogleNetHttpTransport.newTrustedTransport()
-            val jsonFactory = GsonFactory.getDefaultInstance()
             val activeCredential = credential ?: DesktopAuthManager.getCredential()
 
             if (activeCredential != null) {
-                // Native Credential automatically handles 401 token refreshes with zero crashes
-                Drive.Builder(transport, jsonFactory, activeCredential)
+                Drive.Builder(sharedHttpTransport, sharedJsonFactory, activeCredential)
                     .setApplicationName("Clotube-Windows")
                     .build()
             } else if (accessToken.isNotBlank()) {
-                Drive.Builder(transport, jsonFactory) { request ->
+                Drive.Builder(sharedHttpTransport, sharedJsonFactory) { request ->
                     request.headers.authorization = "Bearer $accessToken"
                 }.setApplicationName("Clotube-Windows").build()
             } else {

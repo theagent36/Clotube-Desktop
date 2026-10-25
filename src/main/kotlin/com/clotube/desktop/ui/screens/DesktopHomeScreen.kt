@@ -29,8 +29,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -42,16 +42,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clotube.desktop.model.DesktopMediaItem
+import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import org.jetbrains.skia.Image as SkiaImage
-import java.net.HttpURLConnection
-import java.net.URI
-import java.util.concurrent.ConcurrentHashMap
-
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
     MOVIES("Movies", Icons.Rounded.Movie),
@@ -59,13 +55,21 @@ enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     RECENTS("Recents", Icons.Rounded.History)
 }
 
-private val thumbnailCache = ConcurrentHashMap<String, ImageBitmap>()
-
-@Deprecated("Use rememberThumbnailBitmap with fallback support", ReplaceWith("rememberThumbnailBitmap(url)"))
-@Composable
-fun rememberDriveThumbnail(url: String?): ImageBitmap? {
-    return rememberThumbnailBitmap(primaryUrl = url)
-}
+// [4.7] Hoisted immutable graphics tokens to prevent 60fps GC allocation churn
+private val CardBottomScrimBrush = Brush.verticalGradient(
+    listOf(Color.Transparent, Color(0xCC05070B), Color(0xF205070B))
+)
+private val CardSurfaceColor = Color(0xFF0F1420)
+private val CardBorderColor = Color(0xFF1B2333)
+private val CardShape = RoundedCornerShape(12.dp)
+private val ChipShape = RoundedCornerShape(18.dp)
+private val ChipActiveColor = Color(0xFF2563EB)
+private val ChipInactiveColor = Color(0xFF111622)
+private val ChipBorderColor = Color(0xFF1E2638)
+private val BadgeShape = RoundedCornerShape(4.dp)
+private val BadgeBackground = Color(0xCC000000)
+private val CardProgressTrackColor = Color(0x661E293B)
+private val CardProgressFillColor = Color(0xFF00E5FF)
 
 @Composable
 fun DesktopHomeScreen(
@@ -259,27 +263,24 @@ private fun DesktopFigmaSidebar(
             .padding(horizontal = 16.dp, vertical = 20.dp)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp)
         ) {
+            Image(
+                painter = androidx.compose.ui.res.painterResource("app_icon.png"),
+                contentDescription = "Clotube Logo",
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(8.dp))
+            )
+
             Text(
                 text = "Clotube",
                 color = Color.White,
-                fontSize = 22.sp,
+                fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold,
-                letterSpacing = (-0.4).sp
-            )
-
-            Icon(
-                imageVector = Icons.Rounded.Menu,
-                contentDescription = "Menu",
-                tint = Color(0xFF64748B),
-                modifier = Modifier
-                    .size(18.dp)
-                    .pointerHoverIcon(PointerIcon.Hand)
+                letterSpacing = 0.5.sp
             )
         }
 
@@ -1687,7 +1688,12 @@ private fun FigmaHeroBanner(
     accessToken: String = "",
     onPrimaryClick: () -> Unit
 ) {
-    val backdrop = rememberThumbnailBitmap(primaryUrl = item.thumbnailUrl, fallbackUrl = item.fallbackThumbnailUrl, accessToken = accessToken)
+    val heroBitmap = rememberThumbnailBitmap(
+        primaryUrl = item.thumbnailUrl,
+        fallbackUrl = item.fallbackThumbnailUrl,
+        accessToken = accessToken,
+        size = ThumbnailSize.HERO
+    )
 
     Box(
         modifier = Modifier
@@ -1697,11 +1703,12 @@ private fun FigmaHeroBanner(
             .background(Color(0xFF101520))
             .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
     ) {
-        if (backdrop != null) {
+        if (heroBitmap != null) {
             Image(
-                bitmap = backdrop,
+                bitmap = heroBitmap,
                 contentDescription = item.title,
                 contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.High,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -1959,14 +1966,15 @@ fun DesktopFigmaMediaCard(
     val thumbnailBitmap = rememberThumbnailBitmap(
         primaryUrl = item.thumbnailUrl,
         fallbackUrl = item.fallbackThumbnailUrl,
-        accessToken = accessToken
+        accessToken = accessToken,
+        size = ThumbnailSize.CARD
     )
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF0F1420))
-            .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(12.dp))
+            .clip(CardShape)
+            .background(CardSurfaceColor)
+            .border(1.dp, CardBorderColor, CardShape)
             .clickable(onClick = onClick)
             .pointerHoverIcon(PointerIcon.Hand)
     ) {
@@ -1976,18 +1984,15 @@ fun DesktopFigmaMediaCard(
                 bitmap = thumbnailBitmap,
                 contentDescription = item.title,
                 contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.Medium,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
-            // Elegant cinema card fallback with gradient and title instead of black box
+            // Cinema card fallback using hoisted surface color
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF1E293B), Color(0xFF090D16))
-                        )
-                    ),
+                    .background(CardSurfaceColor),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
@@ -2019,7 +2024,7 @@ fun DesktopFigmaMediaCard(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
+                    .background(BadgeBackground, BadgeShape)
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Text(
@@ -2031,16 +2036,12 @@ fun DesktopFigmaMediaCard(
             }
         }
 
-        // Bottom Scrim & Metadata
+        // Bottom Scrim using hoisted brush
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomStart)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color(0xCC05070B), Color(0xF205070B))
-                    )
-                )
+                .background(CardBottomScrimBrush)
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Column {
@@ -2073,13 +2074,13 @@ fun DesktopFigmaMediaCard(
                     .fillMaxWidth()
                     .height(3.dp)
                     .align(Alignment.BottomCenter)
-                    .background(Color(0x661E293B))
+                    .background(CardProgressTrackColor)
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(progressFraction)
                         .fillMaxHeight()
-                        .background(Color(0xFF00E5FF))
+                        .background(CardProgressFillColor)
                 )
             }
         }

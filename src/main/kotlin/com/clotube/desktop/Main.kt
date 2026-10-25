@@ -65,7 +65,7 @@ fun main() = application {
         onCloseRequest = ::exitApplication,
         state = windowState,
         title = "Clotube",
-        icon = painterResource("ic_clotube.png")
+        icon = painterResource("app_icon.png") // Sets Windows taskbar, window frame, and Alt+Tab icon
     ) {
         SideEffect {
             window.background = AwtColor.BLACK

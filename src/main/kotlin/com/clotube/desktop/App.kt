@@ -170,13 +170,15 @@ fun App(
                             if (seriesChanged) {
                                 series = mergeLibraryItems(series, freshSeries)
                             }
-
-                            DesktopLibraryCache.save(email, movies, series)
                         } else {
                             println("[App] Library clean and matches disk cache for $email.")
-                            DesktopLibraryCache.save(email, movies, series)
                         }
-                        println("[App] Full background sync finished. Persisted ${movies.size} movies and ${series.size} series for $email.")
+
+                        // [3.4] Single authoritative persistence write after both streams complete
+                        if (movies.isNotEmpty() || series.isNotEmpty()) {
+                            DesktopLibraryCache.save(email, movies, series)
+                            println("[App] Full background sync finished. Persisted ${movies.size} movies and ${series.size} series for $email.")
+                        }
                     }
                 } catch (e: Exception) {
                     System.err.println("[App] Progressive sync error for $email: ${e.message}")
