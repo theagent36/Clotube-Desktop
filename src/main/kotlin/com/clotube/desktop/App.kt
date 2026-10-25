@@ -60,42 +60,41 @@ fun App(
 
     val coroutineScope = rememberCoroutineScope()
 
-    // 1. Account Change Observer with Automatic Dirty Title Self-Healing
+    // 1. Account Change Observer with Frame-1 Theatrical Poster Preservation
     LaunchedEffect(authState.userEmail) {
         val email = authState.userEmail
         if (email.isNotBlank()) {
             val userCache = DesktopLibraryCache.loadSync(email)
             if (userCache != null && (userCache.movies.isNotEmpty() || userCache.series.isNotEmpty())) {
-                // Instantly sanitize any dirty titles and heal broken URLs in the cache on startup
                 val sanitizedMovies = userCache.movies.map { item ->
-                    val isBrokenUrl = item.thumbnailUrl?.contains("m.media-amazon.com") == true
                     val guaranteedDriveThumb = item.fallbackThumbnailUrl?.ifBlank { null }
                         ?: "https://drive.google.com/thumbnail?id=${item.id}&sz=w800"
 
-                    val meta = DesktopOnlineMetadataResolver.resolveMovieSync(item.title)
+                    // If cached item already has a valid online poster, KEEP IT! Never downgrade to video frames.
+                    val existingPoster = item.thumbnailUrl?.takeIf { it.isNotBlank() && !it.contains("drive.google.com/thumbnail") }
+
+                    val meta = if (existingPoster == null) {
+                        DesktopOnlineMetadataResolver.resolveMovieSync(item.title)
+                    } else null
+
+                    val resolvedPoster = existingPoster 
+                        ?: meta?.posterUrl?.takeIf { it.isNotBlank() }
+                        ?: item.thumbnailUrl?.takeIf { it.isNotBlank() }
+                        ?: guaranteedDriveThumb
+
                     item.copy(
-                        title = meta.officialTitle,
-                        thumbnailUrl = if (isBrokenUrl) guaranteedDriveThumb else (meta.posterUrl.ifBlank { item.thumbnailUrl ?: guaranteedDriveThumb }),
+                        title = item.title.ifBlank { meta?.officialTitle ?: item.title },
+                        thumbnailUrl = resolvedPoster,
                         fallbackThumbnailUrl = guaranteedDriveThumb,
-                        genre = if (item.genre == "Action • Drama") meta.genre else item.genre,
-                        language = if (item.language.isBlank()) meta.language else item.language
-                    )
-                }
-
-                val sanitizedSeries = userCache.series.map { item ->
-                    val isBrokenUrl = item.thumbnailUrl?.contains("m.media-amazon.com") == true
-                    val guaranteedDriveThumb = item.fallbackThumbnailUrl?.ifBlank { null }
-                        ?: "https://drive.google.com/thumbnail?id=${item.id}&sz=w800"
-                    item.copy(
-                        thumbnailUrl = if (isBrokenUrl) guaranteedDriveThumb else (item.thumbnailUrl ?: guaranteedDriveThumb),
-                        fallbackThumbnailUrl = guaranteedDriveThumb
+                        genre = if (item.genre.isNotBlank() && item.genre != "Action • Drama") item.genre else (meta?.genre ?: item.genre),
+                        language = if (item.language.isNotBlank() && item.language != "Unknown") item.language else (meta?.language ?: item.language)
                     )
                 }
 
                 movies = sanitizedMovies
-                series = sanitizedSeries
+                series = userCache.series
                 isInitialLoading = false
-                println("[App] Loaded and sanitized cached library for account: $email (${movies.size} movies, ${series.size} series)")
+                println("[App] Loaded cached library for account: $email (${movies.size} movies, ${series.size} series) with official posters preserved.")
             } else {
                 movies = emptyList()
                 series = emptyList()
