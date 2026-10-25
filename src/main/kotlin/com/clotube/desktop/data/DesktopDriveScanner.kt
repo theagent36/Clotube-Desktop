@@ -400,123 +400,143 @@ class DesktopDriveScanner(
     }
 
     /**
-     * Resolves complete TV Series metadata, season folders, and episode files from Google Drive.
+     * Hierarchically loads all episodes for a TV series from Google Drive adhering to:
+     * [Series Name Folder] -> [Season No. Folder] -> [Episode Video Files]
+     * Falls back to treating root series folder as Season 1 if no season subfolders exist.
      */
-    suspend fun loadSeriesDetails(seriesFolderId: String, rawTitle: String): DesktopSeries = withContext(Dispatchers.IO) {
-        val seriesMeta = DesktopOnlineMetadataResolver.resolveSeries(rawTitle)
-        val cleanTitle = seriesMeta.officialTitle
-
+    suspend fun loadEpisodesForSeries(
+        seriesFolderId: String,
+        seriesTitle: String
+    ): List<DesktopSeriesEpisode> = withContext(Dispatchers.IO) {
         val rootItems = fetchFolderContents(seriesFolderId)
         val seasonFolders = rootItems.filter {
             it.mimeType == "application/vnd.google-apps.folder" ||
             (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
         }
 
-        val seasonsList = mutableListOf<DesktopSeason>()
+        val episodes = mutableListOf<DesktopSeriesEpisode>()
 
         if (seasonFolders.isNotEmpty()) {
             for (seasonFolder in seasonFolders) {
                 val seasonFolderId = resolveTargetId(seasonFolder)
                 val seasonName = seasonFolder.name ?: "Season 1"
-                val seasonNumMatcher = java.util.regex.Pattern.compile("\\d+").matcher(seasonName)
-                val seasonNumber = if (seasonNumMatcher.find()) seasonNumMatcher.group().toIntOrNull() ?: 1 else 1
+                val seasonNumber = DesktopOnlineMetadataResolver.parseSeasonNumberFromFolder(seasonName)
 
                 val files = fetchFolderContents(seasonFolderId)
-                val videoFiles = files.filter { 
-                    it.mimeType?.startsWith("video/") == true || 
-                    it.name?.endsWith(".mkv", true) == true || 
-                    it.name?.endsWith(".mp4", true) == true 
+                val videoFiles = files.filter { file ->
+                    val mime = file.mimeType ?: ""
+                    val name = file.name ?: ""
+                    mime.startsWith("video/") || name.endsWith(".mkv", ignoreCase = true) || name.endsWith(".mp4", ignoreCase = true)
                 }
 
-                val episodes = videoFiles.map { epFile ->
-                    val epId = resolveTargetId(epFile)
-                    val rawEpName = epFile.name ?: "Episode"
-                    val durationMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
-                    val parsed = DesktopOnlineMetadataResolver.parseSeasonAndEpisodeNumbers(rawEpName)
-                    val epNum = parsed?.second ?: 1
-                    val actualSeason = parsed?.first ?: seasonNumber
-
+                for (file in videoFiles) {
+                    val fileId = resolveTargetId(file)
+                    val rawName = file.name ?: "Unknown"
+                    val episodeNumber = DesktopOnlineMetadataResolver.parseEpisodeNumberFromFileName(rawName, seasonNumber)
                     val epMeta = DesktopOnlineMetadataResolver.resolveEpisode(
-                        cleanTitle,
-                        seriesMeta.tvMazeId,
-                        actualSeason,
-                        epNum,
-                        rawEpName
+                        seriesName = seriesTitle,
+                        tvMazeSeriesId = -1L,
+                        seasonNumber = seasonNumber,
+                        episodeNumber = episodeNumber,
+                        rawFileName = rawName
                     )
 
-                    DesktopEpisode(
-                        id = epId,
-                        seriesId = seriesFolderId,
-                        seriesTitle = cleanTitle,
-                        seasonNumber = actualSeason,
-                        episodeNumber = epNum,
-                        title = epMeta.officialTitle,
-                        durationMs = if (durationMs > 0L) durationMs else (epMeta.durationMinutes * 60000L),
-                        durationFormatted = if (durationMs > 0L) formatDuration(durationMs) else "${epMeta.durationMinutes} min",
-                        thumbnailUrl = epMeta.thumbnailUrl.ifBlank { epFile.thumbnailLink?.replace("s220", "s800") ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800" },
-                        synopsis = "With visibility falling and the route disappearing beneath fresh snow, the team must decide whether to press toward the ridge or risk everything by turning back."
-                    )
-                }.sortedBy { it.episodeNumber }
+                    val durationMs = file.videoMediaMetadata?.durationMillis ?: 0L
+                    val effectiveDurationMs = if (durationMs > 0L) durationMs else (epMeta.durationMinutes * 60_000L)
+                    val durationFormatted = if (effectiveDurationMs > 0L) formatDuration(effectiveDurationMs) else "${epMeta.durationMinutes} min"
+                    val driveThumb = file.thumbnailLink?.replace("s220", "s800")
+                        ?: "https://drive.google.com/thumbnail?id=$fileId&sz=w800"
+                    val streamUrl = "https://www.googleapis.com/drive/v3/files/${fileId}?alt=media"
 
-                if (episodes.isNotEmpty()) {
-                    seasonsList.add(
-                        DesktopSeason(
+                    episodes.add(
+                        DesktopEpisode(
+                            id = fileId,
+                            seriesId = seriesFolderId,
+                            seriesTitle = seriesTitle,
                             seasonNumber = seasonNumber,
-                            title = "Season $seasonNumber",
-                            episodes = episodes
+                            episodeNumber = episodeNumber,
+                            title = epMeta.officialTitle,
+                            durationMs = effectiveDurationMs,
+                            durationFormatted = durationFormatted,
+                            thumbnailUrl = epMeta.thumbnailUrl.ifBlank { driveThumb },
+                            streamUrl = streamUrl,
+                            synopsis = "With visibility falling and the route disappearing beneath fresh snow, the team must decide whether to press toward the ridge or risk everything by turning back."
                         )
                     )
                 }
             }
         } else {
-            val videoFiles = rootItems.filter { 
-                it.mimeType?.startsWith("video/") == true || 
-                it.name?.endsWith(".mkv", true) == true || 
-                it.name?.endsWith(".mp4", true) == true 
+            // Flat fallback: treat the root folder as Season 1
+            val videoFiles = rootItems.filter { file ->
+                val mime = file.mimeType ?: ""
+                val name = file.name ?: ""
+                mime.startsWith("video/") || name.endsWith(".mkv", ignoreCase = true) || name.endsWith(".mp4", ignoreCase = true)
             }
-            val episodes = videoFiles.map { epFile ->
-                val epId = resolveTargetId(epFile)
-                val rawEpName = epFile.name ?: "Episode"
-                val durationMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
-                val parsed = DesktopOnlineMetadataResolver.parseSeasonAndEpisodeNumbers(rawEpName)
-                val seasonNum = parsed?.first ?: 1
-                val epNum = parsed?.second ?: 1
 
+            for (file in videoFiles) {
+                val fileId = resolveTargetId(file)
+                val rawName = file.name ?: "Unknown"
+                val parsedSeasonAndEp = DesktopOnlineMetadataResolver.parseSeasonAndEpisodeNumbers(rawName)
+                val seasonNumber = parsedSeasonAndEp?.first ?: 1
+                val episodeNumber = DesktopOnlineMetadataResolver.parseEpisodeNumberFromFileName(rawName, seasonNumber)
                 val epMeta = DesktopOnlineMetadataResolver.resolveEpisode(
-                    cleanTitle,
-                    seriesMeta.tvMazeId,
-                    seasonNum,
-                    epNum,
-                    rawEpName
+                    seriesName = seriesTitle,
+                    tvMazeSeriesId = -1L,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    rawFileName = rawName
                 )
 
-                DesktopEpisode(
-                    id = epId,
-                    seriesId = seriesFolderId,
-                    seriesTitle = cleanTitle,
-                    seasonNumber = seasonNum,
-                    episodeNumber = epNum,
-                    title = epMeta.officialTitle,
-                    durationMs = if (durationMs > 0L) durationMs else (epMeta.durationMinutes * 60000L),
-                    durationFormatted = if (durationMs > 0L) formatDuration(durationMs) else "${epMeta.durationMinutes} min",
-                    thumbnailUrl = epMeta.thumbnailUrl.ifBlank { epFile.thumbnailLink?.replace("s220", "s800") ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800" },
-                    synopsis = "With visibility falling and the route disappearing beneath fresh snow, the team must decide whether to press toward the ridge or risk everything by turning back."
-                )
-            }
+                val durationMs = file.videoMediaMetadata?.durationMillis ?: 0L
+                val effectiveDurationMs = if (durationMs > 0L) durationMs else (epMeta.durationMinutes * 60_000L)
+                val durationFormatted = if (effectiveDurationMs > 0L) formatDuration(effectiveDurationMs) else "${epMeta.durationMinutes} min"
+                val driveThumb = file.thumbnailLink?.replace("s220", "s800")
+                    ?: "https://drive.google.com/thumbnail?id=$fileId&sz=w800"
+                val streamUrl = "https://www.googleapis.com/drive/v3/files/${fileId}?alt=media"
 
-            val grouped = episodes.groupBy { it.seasonNumber }
-            grouped.forEach { (sNum, eps) ->
-                seasonsList.add(
-                    DesktopSeason(
-                        seasonNumber = sNum,
-                        title = "Season $sNum",
-                        episodes = eps.sortedBy { it.episodeNumber }
+                episodes.add(
+                    DesktopEpisode(
+                        id = fileId,
+                        seriesId = seriesFolderId,
+                        seriesTitle = seriesTitle,
+                        seasonNumber = seasonNumber,
+                        episodeNumber = episodeNumber,
+                        title = epMeta.officialTitle,
+                        durationMs = effectiveDurationMs,
+                        durationFormatted = durationFormatted,
+                        thumbnailUrl = epMeta.thumbnailUrl.ifBlank { driveThumb },
+                        streamUrl = streamUrl,
+                        synopsis = "With visibility falling and the route disappearing beneath fresh snow, the team must decide whether to press toward the ridge or risk everything by turning back."
                     )
                 )
             }
         }
 
-        seasonsList.sortBy { it.seasonNumber }
+        // Sort ascending: first by seasonNumber, then by episodeNumber
+        val sortedEpisodes = episodes.sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
+        val seasonCount = sortedEpisodes.map { it.seasonNumber }.distinct().size
+        println("[DesktopDriveScanner] Indexed $seasonCount seasons and ${sortedEpisodes.size} total episodes for series: $seriesTitle")
+
+        sortedEpisodes
+    }
+
+    /**
+     * Resolves complete TV Series metadata, season folders, and episode files from Google Drive.
+     */
+    suspend fun loadSeriesDetails(seriesFolderId: String, rawTitle: String): DesktopSeries = withContext(Dispatchers.IO) {
+        val seriesMeta = DesktopOnlineMetadataResolver.resolveSeries(rawTitle)
+        val cleanTitle = seriesMeta.officialTitle
+        val allEpisodes = loadEpisodesForSeries(seriesFolderId, cleanTitle)
+
+        val seasonsList = allEpisodes.groupBy { it.seasonNumber }
+            .map { (sNum, eps) ->
+                DesktopSeason(
+                    seasonNumber = sNum,
+                    title = "Season $sNum",
+                    episodes = eps.sortedBy { it.episodeNumber }
+                )
+            }
+            .sortedBy { it.seasonNumber }
 
         DesktopSeries(
             id = seriesFolderId,

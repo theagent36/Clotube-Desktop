@@ -121,13 +121,16 @@ fun DesktopHomeScreen(
         else series.filter { it.title.contains(searchQuery, ignoreCase = true) }
     }
 
+    val isAnyPlayerActive = selectedMovieForPlayer != null || selectedSeriesForDetail != null
+    val hideNavigation = effectiveFullscreen && isAnyPlayerActive
+
     Row(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF07090E))
     ) {
-        // 1. LEFT SIDEBAR (Hidden during OS fullscreen)
-        if (!effectiveFullscreen) {
+        // 1. LEFT SIDEBAR (Hidden during active media fullscreen)
+        if (!hideNavigation) {
             DesktopFigmaSidebar(
                 activeSection = currentSection,
                 onSelectSection = navigateTo
@@ -149,8 +152,8 @@ fun DesktopHomeScreen(
                 .fillMaxHeight()
                 .background(Color(0xFF07090E))
         ) {
-            // Top App Bar (Hidden during OS fullscreen)
-            if (!effectiveFullscreen) {
+            // Top App Bar (Hidden during active media fullscreen)
+            if (!hideNavigation) {
                 DesktopFigmaTopBar(
                     searchQuery = searchQuery,
                     onSearchChange = { searchQuery = it },
@@ -170,12 +173,12 @@ fun DesktopHomeScreen(
                     DesktopSeriesDetailScreen(
                         seriesItem = selectedSeriesForDetail!!,
                         accessToken = accessToken,
+                        isFullscreen = effectiveFullscreen,
+                        onToggleFullscreen = onToggleFullscreen,
                         onBack = { 
-                            if (effectiveFullscreen) {
-                                onToggleFullscreen()
-                            }
-                            selectedSeriesForDetail = null 
-                        }
+                            if (effectiveFullscreen) onToggleFullscreen() else selectedSeriesForDetail = null 
+                        },
+                        modifier = Modifier.fillMaxSize()
                     )
                 } else if (selectedMovieForPlayer != null) {
                     DesktopMoviePlayerScreen(
@@ -183,9 +186,7 @@ fun DesktopHomeScreen(
                         allMovies = filteredMovies,
                         accessToken = accessToken,
                         onBack = {
-                            if (effectiveFullscreen) {
-                                onToggleFullscreen()
-                            }
+                            if (effectiveFullscreen) onToggleFullscreen()
                             selectedMovieForPlayer = null
                         },
                         isFullscreen = effectiveFullscreen,

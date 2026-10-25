@@ -737,6 +737,123 @@ object DesktopOnlineMetadataResolver {
         return null
     }
 
+    /**
+     * Extracts the integer season number from a season folder name.
+     * Handles patterns such as: "Season 1", "Season 02", "S1", "S03", "Season - 2", "Series 1".
+     * Returns 1 if no number is found.
+     */
+    fun parseSeasonNumberFromFolder(folderName: String): Int {
+        val clean = folderName.trim()
+        if (clean.isBlank()) return 1
+
+        // 1. Matches "Season 1", "Season 02", "Series 1", "Season - 2", "Season_02", etc.
+        val seasonKeywordPattern = Regex("(?i)\\b(?:season|series|staffel|saison)\\s*[-_.]*\\s*(\\d{1,3})\\b")
+        seasonKeywordPattern.find(clean)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 2. Matches "S1", "S02", "S03", "S-02", "S 2", "s1"
+        val sPattern = Regex("(?i)\\bS\\s*[-_.]*\\s*(\\d{1,3})\\b")
+        sPattern.find(clean)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 3. Standalone pure number folder: "1", "01", "02"
+        val pureNumberPattern = Regex("^\\s*0*(\\d{1,3})\\s*$")
+        pureNumberPattern.find(clean)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 4. Any standalone 1-2 digit number that is not a 4-digit year
+        val anyNumberPattern = Regex("(?<!\\d)(?!19\\d{2}|20\\d{2})0*([1-9]\\d?)(?!\\d)")
+        anyNumberPattern.find(clean)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        return 1
+    }
+
+    /**
+     * Extracts the episode number from an episode video filename.
+     * Context-aware: accepts the inferred [seasonNumber] from the parent folder.
+     * Matches patterns:
+     *   1. S01E05 / s1e5
+     *   2. 1x05 / 01x05
+     *   3. Episode 05 / Ep 5 / Ep.05
+     *   4. Standalone leading or trailing numbers: "01 - Pilot.mkv", "01.mkv", "Pilot - 01.mp4"
+     * Strips codec tags (1080p, x264, HEVC, AAC, etc.) before matching so resolutions are not mistaken for episode numbers.
+     */
+    fun parseEpisodeNumberFromFileName(fileName: String, seasonNumber: Int = 1): Int {
+        var text = fileName.substringBeforeLast('.').trim()
+
+        // Strip codec tags, resolutions, and typical container audio/video indicators
+        val codecStripPattern = Regex(
+            "(?i)\\b(" +
+            "2160p|1080p|1080i|720p|480p|360p|4k|uhd|fhd|hdtv|hdr\\d*|dovi|dv|" +
+            "bluray|blu-ray|brrip|bdrip|dvdrip|dvd|hdrip|web[-_]?dl|web[-_]?rip|webri|web|" +
+            "imax|remux|untouched|proper|repack|extended|unrated|" +
+            "x264|x265|h\\.?264|h\\.?265|hevc|avc|10bit|8bit|" +
+            "aac\\d*|ddp?\\d*|dd\\d*|ac3|eac3|dts[-_]?hd|dts|truehd|atmos|mp3|flac|opus|" +
+            "5\\.1ch|2\\.0ch|5\\.1|7\\.1|" +
+            "dual[-_\\s]*audio|multi[-_\\s]*audio|esubs?|msubs?|subbed|subs?" +
+            ")\\b"
+        )
+        text = text.replace(codecStripPattern, " ")
+        text = text.replace(Regex("\\[[^\\]]*\\]"), " ")
+
+        // 1. S01E05 / s1e5 / S1E5
+        val sPattern = Regex("(?i)\\bS\\s*\\d{1,2}\\s*[-_.]*\\s*E\\s*0*(\\d{1,3})\\b")
+        sPattern.find(text)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 2. 1x05 / 01x05
+        val xPattern = Regex("(?i)\\b\\d{1,2}\\s*x\\s*0*(\\d{1,3})\\b")
+        xPattern.find(text)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 3. Episode 05 / Ep 5 / Ep.05 / Ep_05 / E05
+        val epPattern = Regex("(?i)\\b(?:episode|ep|e)\\s*[-_.:#]?\\s*0*(\\d{1,3})\\b")
+        epPattern.find(text)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // Context-aware: If seasonNumber is provided, strip explicit references to that season (e.g., S01, Season 1)
+        // so that the season number itself is not mistaken for a standalone episode number
+        var contextText = text
+        if (seasonNumber > 0) {
+            val seasonPattern = Regex("(?i)\\b(?:season|series|s)\\s*[-_.]*\\s*0*$seasonNumber\\b")
+            contextText = contextText.replace(seasonPattern, " ")
+
+            // Handle [Season]-[Episode] or [Season].[Episode] like "1-05" or "01 - 05 - Pilot"
+            val seasonEpPrefix = Regex("(?i)(?:^|[-_\\s])0*$seasonNumber\\s*[-_.]\\s*0*(\\d{1,3})(?:[-_\\s]|$)")
+            seasonEpPrefix.find(text)?.let { match ->
+                match.groupValues[1].toIntOrNull()?.let { return it }
+            }
+        }
+
+        // 4a. Standalone leading numbers: "01 - Pilot.mkv", "01.mkv", "05 - Title"
+        val leadingNumPattern = Regex("^\\s*0*(\\d{1,3})(?:\\s*[-–—._\\s]+|$)")
+        leadingNumPattern.find(contextText)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 4b. Standalone trailing numbers: "Pilot - 01.mp4", "Pilot 01"
+        val trailingNumPattern = Regex("(?:[-–—._\\s]+|^)0*(\\d{1,3})\\s*$")
+        trailingNumPattern.find(contextText)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        // 4c. Number delimited by separators (e.g. "Series Name - 05 - Pilot") excluding 4-digit years
+        val delimitedNumPattern = Regex("(?<!\\d)(?!19\\d{2}|20\\d{2})0*([1-9]\\d{0,2})(?!\\d)")
+        delimitedNumPattern.find(contextText)?.let { match ->
+            match.groupValues[1].toIntOrNull()?.let { return it }
+        }
+
+        return 1
+    }
+
     private fun toTitleCase(input: String): String {
         val minorWords = setOf("a", "an", "the", "and", "but", "or", "for", "nor", "on", "at", "to", "from", "by", "of", "in")
         return input.split(" ").filter { it.isNotBlank() }.mapIndexed { index, word ->

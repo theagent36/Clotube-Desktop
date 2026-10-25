@@ -10,6 +10,7 @@ data class DesktopEpisode(
     val durationMs: Long = 0L,
     val durationFormatted: String = "",
     val thumbnailUrl: String = "",
+    val streamUrl: String = "",
     val synopsis: String = "",
     val isWatched: Boolean = false,
     val progressFraction: Float = 0f

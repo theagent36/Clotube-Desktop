@@ -32,12 +32,16 @@ private const val SWP_NOSIZE = 0x0001
 private const val SW_MAXIMIZE = 3
 private const val SW_RESTORE = 9
 
+private fun User32.IsZoomed(hwnd: HWND): Boolean {
+    val currentStyle = GetWindowLong(hwnd, GWL_STYLE)
+    return (currentStyle and WS_MAXIMIZE) != 0
+}
+
 fun main() = application {
-    // REMOVED: System.setProperty("compose.interop.blending", "true")
-    // (This setting throttles Skiko Direct3D hardware presentation and causes UI frame drops)
     System.setProperty("java.net.preferIPv4Stack", "true")
     System.setProperty("java.net.preferIPv6Addresses", "false")
     System.setProperty("sun.awt.noerasebackground", "true")
+    System.setProperty("compose.interop.blending", "true")
     System.setProperty("skiko.renderApi", "DIRECT3D")
 
     try {
@@ -49,23 +53,32 @@ fun main() = application {
         UIManager.put("control", black)
     } catch (_: Throwable) {}
 
+    Runtime.getRuntime().addShutdownHook(Thread({
+        try {
+            LocalStreamServer.stop()
+        } catch (_: Throwable) {}
+    }, "Clotube-ShutdownHook"))
+
     LocalStreamServer.start()
 
-    // Default window starts maximized or floating
     val windowState = rememberWindowState(placement = WindowPlacement.Maximized, width = 1280.dp, height = 820.dp)
     var isFullscreenActive by remember { mutableStateOf(false) }
 
-    // State memory: remembers if the window was maximized before entering fullscreen
     var wasMaximizedBeforeFullscreen by remember { mutableStateOf(true) }
     var hasEverEnteredFullscreen by remember { mutableStateOf(false) }
-
     val savedFloatingRect = remember { RECT() }
 
     Window(
-        onCloseRequest = ::exitApplication,
+        onCloseRequest = {
+            try {
+                LocalStreamServer.stop()
+            } catch (_: Throwable) {}
+            exitApplication()
+            kotlin.system.exitProcess(0)
+        },
         state = windowState,
         title = "Clotube",
-        icon = painterResource("app_icon.png") // Sets Windows taskbar, window frame, and Alt+Tab icon
+        icon = painterResource("ic_clotube.png")
     ) {
         SideEffect {
             window.background = AwtColor.BLACK
@@ -73,11 +86,9 @@ fun main() = application {
             window.rootPane.background = AwtColor.BLACK
         }
 
-        // Win32 Borderless Fullscreen Engine (Keeps native Direct3D swapchain alive & preserves Maximized state)
+        // Win32 Borderless Fullscreen Engine (Preserves Maximized State & Prevents Window Shrinking)
         LaunchedEffect(isFullscreenActive) {
             if (!isFullscreenActive && !hasEverEnteredFullscreen) {
-                // Do nothing on initial composition or normal navigation.
-                // Prevents "Back to Collection" from modifying the window geometry.
                 return@LaunchedEffect
             }
 
@@ -89,21 +100,15 @@ fun main() = application {
 
                     if (isFullscreenActive) {
                         hasEverEnteredFullscreen = true
-
-                        // 1. Detect if the window is currently maximized
-                        val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
-                        wasMaximizedBeforeFullscreen = (currentStyle and WS_MAXIMIZE != 0) ||
-                            (window.extendedState and java.awt.Frame.MAXIMIZED_BOTH != 0) ||
-                            (windowState.placement == WindowPlacement.Maximized)
+                        wasMaximizedBeforeFullscreen = user32.IsZoomed(hwnd)
                         if (!wasMaximizedBeforeFullscreen) {
                             user32.GetWindowRect(hwnd, savedFloatingRect)
                         }
 
-                        // 2. Remove titlebar and borders
+                        val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
                         val borderlessStyle = currentStyle and (WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX).inv()
                         user32.SetWindowLong(hwnd, GWL_STYLE, borderlessStyle)
 
-                        // 3. Match native physical screen bounds (covers taskbar)
                         val monitor = user32.MonitorFromWindow(hwnd, WinUser.MONITOR_DEFAULTTONEAREST)
                         val monitorInfo = WinUser.MONITORINFO()
                         user32.GetMonitorInfo(monitor, monitorInfo)
@@ -122,13 +127,11 @@ fun main() = application {
                             SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
                         )
                     } else {
-                        // 4. Exiting Fullscreen: Restore window styles
                         val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
                         val standardStyle = currentStyle or WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX
                         user32.SetWindowLong(hwnd, GWL_STYLE, standardStyle)
 
                         if (wasMaximizedBeforeFullscreen) {
-                            // RESTORE DIRECTLY TO MAXIMIZED (Never collapse to floating 1280x820)
                             user32.ShowWindow(hwnd, SW_MAXIMIZE)
                             user32.SetWindowPos(
                                 hwnd,
@@ -137,7 +140,6 @@ fun main() = application {
                                 SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
                             )
                         } else {
-                            // Restore to saved floating dimensions
                             user32.ShowWindow(hwnd, SW_RESTORE)
                             val w = (savedFloatingRect.right - savedFloatingRect.left).coerceAtLeast(1024)
                             val h = (savedFloatingRect.bottom - savedFloatingRect.top).coerceAtLeast(700)

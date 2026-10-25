@@ -34,6 +34,7 @@ dependencies {
     implementation("com.google.http-client:google-http-client-gson:1.45.0")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("uk.co.caprica:vlcj:4.8.3")
+    testImplementation(kotlin("test"))
 }
 
 compose.desktop {
