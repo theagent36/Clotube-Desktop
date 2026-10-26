@@ -42,12 +42,15 @@ object SharedVlcFactory {
     }
 }
 
+private fun MediaPlayer.subtitles() = this.subpictures()
+
 class DirectMemoryVideoPlayer(
     val mediaUrl: String,
     val onFirstFrame: () -> Unit = {}
 ) {
     private val isReleased = AtomicBoolean(false)
     private val releaseExecutor = Executors.newSingleThreadExecutor()
+    private var hasAppliedPreferences = AtomicBoolean(false)
 
     val mediaPlayer = SharedVlcFactory.instance.mediaPlayers().newEmbeddedMediaPlayer()
 
@@ -70,10 +73,32 @@ class DirectMemoryVideoPlayer(
     private var nativePitch: Int = 0
 
     private val eventListener = object : MediaPlayerEventAdapter() {
+        private fun applyPreferencesDelayed(mp: MediaPlayer) {
+            if (hasAppliedPreferences.compareAndSet(false, true)) {
+                val scheduler = Executors.newSingleThreadScheduledExecutor()
+                scheduler.schedule({
+                    try {
+                        if (!isReleased.get()) {
+                            DesktopTrackPreferences.applyStickyPreferences(mp)
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        scheduler.shutdown()
+                    }
+                }, 450, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        }
+
         override fun playing(mp: MediaPlayer) {
             if (isReleased.get()) return
             isPlaying = true
             isBuffering = false
+            applyPreferencesDelayed(mp)
+        }
+
+        override fun videoOutput(mp: MediaPlayer, newCount: Int) {
+            if (isReleased.get()) return
+            applyPreferencesDelayed(mp)
         }
 
         override fun buffering(mp: MediaPlayer, newCache: Float) {
@@ -184,8 +209,16 @@ class DirectMemoryVideoPlayer(
             mediaPlayer.audio().setVolume(volume)
         } catch (_: Throwable) {}
 
-        mediaPlayer.media().play(mediaUrl)
+        mediaPlayer.media().play(
+            mediaUrl,
+            ":network-caching=2000",
+            ":file-caching=1500",
+            ":clock-jitter=0",
+            ":clock-synchro=0"
+        )
     }
+
+    var isMuted by mutableStateOf(false)
 
     fun seekToFraction(fraction: Float) {
         if (isReleased.get()) return
@@ -199,30 +232,101 @@ class DirectMemoryVideoPlayer(
 
     fun seekToTime(timeMs: Long) {
         if (isReleased.get()) return
-        val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
-        val clampedTime = if (totalMs > 0L) timeMs.coerceIn(0L, totalMs) else timeMs.coerceAtLeast(0L)
-        mediaPlayer.controls().setTime(clampedTime)
-        currentTimeMs = clampedTime
+        val length = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
+        val target = if (length > 0L) timeMs.coerceIn(0L, length) else timeMs.coerceAtLeast(0L)
+        mediaPlayer.controls().setTime(target)
+        currentTimeMs = target
+    }
+
+    fun play() {
+        if (isReleased.get()) return
+        mediaPlayer.controls().play()
+        isPlaying = true
+    }
+
+    fun pause() {
+        if (isReleased.get()) return
+        mediaPlayer.controls().pause()
+        isPlaying = false
     }
 
     fun togglePlayPause() {
         if (isReleased.get()) return
         if (mediaPlayer.status().isPlaying) {
             mediaPlayer.controls().pause()
+            isPlaying = false
         } else {
             mediaPlayer.controls().play()
+            isPlaying = true
         }
+    }
+
+    @JvmName("changeMuted")
+    fun setMuted(muted: Boolean) {
+        if (isReleased.get()) return
+        isMuted = muted
+        try {
+            mediaPlayer.audio().setMute(muted)
+        } catch (_: Throwable) {}
     }
 
     fun setVolumeLevel(vol: Int) {
         if (isReleased.get()) return
         volume = vol.coerceIn(0, 100)
-        mediaPlayer.audio().setVolume(volume)
-        if (volume > 0) {
-            try {
+        try {
+            mediaPlayer.audio().setVolume(volume)
+            if (volume > 0) {
                 mediaPlayer.audio().setMute(false)
-            } catch (_: Throwable) {}
+                isMuted = false
+            } else {
+                isMuted = true
+            }
+        } catch (_: Throwable) {}
+    }
+
+    // Add track discovery and selection helpers
+    fun getAudioTracks(): List<Pair<Int, String>> {
+        return try {
+            mediaPlayer.audio().trackDescriptions()?.map { it.id() to it.description() } ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
         }
+    }
+
+    fun getSubtitleTracks(): List<Pair<Int, String>> {
+        return try {
+            mediaPlayer.subtitles().trackDescriptions()?.map { it.id() to it.description() } ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun setAudioTrack(trackId: Int, description: String = "") {
+        try {
+            mediaPlayer.audio().setTrack(trackId)
+            if (description.isNotBlank()) {
+                DesktopTrackPreferences.saveAudioTrack(description)
+            }
+        } catch (e: Exception) {
+            System.err.println("[DirectMemoryVideoPlayer] Failed to set audio track: ${e.message}")
+        }
+    }
+
+    fun setSubtitleTrack(trackId: Int, description: String = "", isOff: Boolean = (trackId == -1)) {
+        try {
+            mediaPlayer.subtitles().setTrack(trackId)
+            DesktopTrackPreferences.saveSubtitleTrack(description, isOff)
+        } catch (e: Exception) {
+            System.err.println("[DirectMemoryVideoPlayer] Failed to set subtitle track: ${e.message}")
+        }
+    }
+
+    fun getActiveAudioTrackId(): Int {
+        return try { mediaPlayer.audio().track() } catch (_: Exception) { -1 }
+    }
+
+    fun getActiveSubtitleTrackId(): Int {
+        return try { mediaPlayer.subtitles().track() } catch (_: Exception) { -1 }
     }
 
     /**

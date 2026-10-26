@@ -56,10 +56,16 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.clotube.desktop.data.DesktopWatchHistoryManager
+import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.awt.Cursor
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -67,6 +73,7 @@ import java.awt.Point
 import java.awt.Toolkit
 import java.awt.event.KeyEvent
 import java.awt.image.BufferedImage
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -91,11 +98,24 @@ enum class SeekFeedbackDirection {
 fun DesktopMoviePlayerScreen(
     initialMovie: DesktopMovieItem,
     allMovies: List<DesktopMovieItem> = emptyList(),
+    userEmail: String = "",
+    accessToken: String = "",
+    initialSeekMs: Long = 0L,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
     onBack: () -> Unit
 ) {
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
+
+    val effectiveInitialSeekMs = remember(currentPlayingMovie.id, userEmail) {
+        if (currentPlayingMovie.id == initialMovie.id) {
+            initialSeekMs
+        } else if (userEmail.isNotBlank()) {
+            DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)
+        } else {
+            0L
+        }
+    }
 
     val player = remember(currentPlayingMovie.id, currentPlayingMovie.streamUrl) {
         DirectMemoryVideoPlayer(
@@ -105,8 +125,62 @@ fun DesktopMoviePlayerScreen(
         )
     }
 
+    val hasAppliedInitialSeek = remember(currentPlayingMovie.id) { AtomicBoolean(false) }
+
+    LaunchedEffect(player.isPlaying, player.isBuffering, effectiveInitialSeekMs) {
+        if (player.currentTimeMs >= 2500L) {
+            hasAppliedInitialSeek.set(true)
+            return@LaunchedEffect
+        }
+
+        if (player.isPlaying && !player.isBuffering && effectiveInitialSeekMs > 1000L && hasAppliedInitialSeek.compareAndSet(false, true)) {
+            delay(150L)
+            if (player.currentTimeMs < 2500L) {
+                player.seekToTime(effectiveInitialSeekMs)
+                println("[DesktopMoviePlayerScreen] Resumed ${currentPlayingMovie.title} at ${effectiveInitialSeekMs}ms")
+            }
+        }
+    }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    val saveMovieProgress = {
+        val curTime = player.currentTimeMs
+        val totalDur = player.totalDurationMs
+        val currentMovie = currentPlayingMovie
+        if (curTime > 0L && userEmail.isNotBlank()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                        email = userEmail,
+                        fileId = currentMovie.id,
+                        title = currentMovie.title,
+                        positionMs = curTime,
+                        durationMs = totalDur,
+                        isSeries = false
+                    )
+                    if (accessToken.isNotBlank()) {
+                        DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                    }
+                } catch (t: Throwable) {
+                    System.err.println("[DesktopMoviePlayerScreen] Failed to save watch progress: ${t.message}")
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(player.isPlaying, userEmail, currentPlayingMovie.id) {
+        if (player.isPlaying && userEmail.isNotBlank()) {
+            while (isActive) {
+                delay(5000L)
+                saveMovieProgress()
+            }
+        }
+    }
+
     DisposableEffect(player) {
         onDispose {
+            saveMovieProgress()
             player.release()
         }
     }
@@ -221,6 +295,7 @@ fun DesktopMoviePlayerScreen(
                             onToggleFullscreen()
                             true
                         } else {
+                            saveMovieProgress()
                             player.release()
                             onBack()
                             true
@@ -399,8 +474,10 @@ fun DesktopMoviePlayerScreen(
                             },
                             onScrubStart = { isScrubbing = true; scrubFraction = it },
                             onScrubbing = { scrubFraction = it },
-                            onScrubEnd = {
-                                player.seekToFraction(it)
+                            onScrubEnd = { frac ->
+                                val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                                val targetMs = (frac * totalDur).toLong()
+                                player.seekToTime(targetMs)
                                 isScrubbing = false
                             },
                             onToggleFullscreen = onToggleFullscreen,
@@ -457,6 +534,7 @@ fun DesktopMoviePlayerScreen(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
                             onClick = {
+                                saveMovieProgress()
                                 player.release()
                                 onBack()
                             }
@@ -587,8 +665,10 @@ fun DesktopMoviePlayerScreen(
                                         },
                                         onScrubStart = { isScrubbing = true; scrubFraction = it },
                                         onScrubbing = { scrubFraction = it },
-                                        onScrubEnd = {
-                                            player.seekToFraction(it)
+                                        onScrubEnd = { frac ->
+                                            val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                                            val targetMs = (frac * totalDur).toLong()
+                                            player.seekToTime(targetMs)
                                             isScrubbing = false
                                         },
                                         onToggleFullscreen = onToggleFullscreen,
@@ -1142,15 +1222,16 @@ private fun BottomTransportBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(30.dp)
-                    .pointerInput(player.totalDurationMs) {
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .pointerInput(Unit) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
                             val width = size.width.toFloat()
                             if (width <= 0f) return@awaitEachGesture
 
-                            val initialFraction = (down.position.x / width).coerceIn(0f, 1f)
-                            onScrubStart(initialFraction)
+                            var lastFrac = (down.position.x / width).coerceIn(0f, 1f)
+                            onScrubStart(lastFrac)
 
                             val pointerId = down.id
                             while (true) {
@@ -1158,13 +1239,12 @@ private fun BottomTransportBar(
                                 val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                                 if (!change.pressed) {
                                     change.consume()
-                                    val finalFraction = (change.position.x / width).coerceIn(0f, 1f)
-                                    onScrubEnd(finalFraction)
+                                    onScrubEnd(lastFrac)
                                     break
                                 } else {
                                     change.consume()
-                                    val dragFraction = (change.position.x / width).coerceIn(0f, 1f)
-                                    onScrubbing(dragFraction)
+                                    lastFrac = (change.position.x / width).coerceIn(0f, 1f)
+                                    onScrubbing(lastFrac)
                                 }
                             }
                         }
@@ -1239,13 +1319,18 @@ private fun BottomTransportBar(
                 ) {
                     IconButton(
                         onClick = {
-                            player.setVolumeLevel(if (player.volume > 0) 0 else 100)
+                            if (player.isMuted || player.volume == 0) {
+                                player.setMuted(false)
+                                if (player.volume == 0) player.setVolumeLevel(100)
+                            } else {
+                                player.setMuted(true)
+                            }
                         },
                         modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             imageVector = when {
-                                player.volume == 0 -> Icons.AutoMirrored.Filled.VolumeMute
+                                player.isMuted || player.volume == 0 -> Icons.AutoMirrored.Filled.VolumeMute
                                 player.volume < 50 -> Icons.AutoMirrored.Filled.VolumeDown
                                 else -> Icons.AutoMirrored.Filled.VolumeUp
                             },
@@ -1256,7 +1341,7 @@ private fun BottomTransportBar(
                     }
 
                     SlickVolumeSlider(
-                        volume = player.volume,
+                        volume = if (player.isMuted) 0 else player.volume,
                         onVolumeChange = { newVol -> player.setVolumeLevel(newVol) },
                         modifier = Modifier.padding(end = 4.dp)
                     )
@@ -1346,6 +1431,8 @@ fun DesktopMoviePlayerScreen(
     initialMovie: DesktopMediaItem,
     allMovies: List<DesktopMediaItem> = emptyList(),
     accessToken: String,
+    userEmail: String = "",
+    initialSeekMs: Long = 0L,
     onBack: () -> Unit,
     isFullscreen: Boolean = false,
     onFullscreenToggle: ((Boolean) -> Unit)? = null,
@@ -1381,6 +1468,9 @@ fun DesktopMoviePlayerScreen(
     DesktopMoviePlayerScreen(
         initialMovie = convertedInitial,
         allMovies = convertedAll,
+        userEmail = userEmail,
+        accessToken = accessToken,
+        initialSeekMs = initialSeekMs,
         isFullscreen = isFullscreen,
         onToggleFullscreen = onToggleFullscreen ?: {
             if (onFullscreenToggle != null) {

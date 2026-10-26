@@ -14,12 +14,17 @@ import com.clotube.desktop.auth.DesktopAuthManager
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopOnlineMetadataResolver
+import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.model.DesktopMediaItem
+import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
 import com.clotube.desktop.ui.screens.DesktopLoginScreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
 private val isScanningActive = AtomicBoolean(false)
@@ -31,13 +36,51 @@ fun App(
 ) {
     var authState by remember { mutableStateOf(DesktopAuthManager.getSavedAuthState()) }
     var isAuthenticating by remember { mutableStateOf(false) }
-
-    var movies by remember { mutableStateOf<List<DesktopMediaItem>>(emptyList()) }
-    var series by remember { mutableStateOf<List<DesktopMediaItem>>(emptyList()) }
-    var isInitialLoading by remember { mutableStateOf(true) }
     var rescanTrigger by remember { mutableIntStateOf(0) }
 
-    var continueWatching by remember(movies, series) {
+    val userEmail = authState.userEmail
+    val accessToken = authState.accessToken
+
+    // 1. FRAME-1 SYNCHRONOUS PROFILE CACHE LOAD (Keyed to active account email)
+    val cachedProfile = remember(userEmail) {
+        if (!userEmail.isNullOrBlank()) {
+            DesktopLibraryCache.loadSync(userEmail)
+        } else {
+            null
+        }
+    }
+
+    var movies by remember(userEmail) {
+        mutableStateOf<List<DesktopMediaItem>>(
+            cachedProfile?.movies?.map { rawItem ->
+                val item = DesktopLibraryCache.sanitizeMediaItem(rawItem)
+                val guaranteedDriveThumb = item.fallbackThumbnailUrl?.takeIf { !it.isNullOrBlank() }
+                    ?: if (!item.id.isNullOrBlank()) "https://drive.google.com/thumbnail?id=${item.id}&sz=w800" else ""
+                val existingPoster = item.thumbnailUrl?.takeIf { !it.isNullOrBlank() && !it.contains("drive.google.com/thumbnail") }
+                val resolvedPoster = existingPoster
+                    ?: item.thumbnailUrl?.takeIf { !it.isNullOrBlank() }
+                    ?: guaranteedDriveThumb
+                item.copy(
+                    thumbnailUrl = resolvedPoster,
+                    fallbackThumbnailUrl = guaranteedDriveThumb
+                )
+            } ?: emptyList()
+        )
+    }
+
+    var series by remember(userEmail) {
+        mutableStateOf<List<DesktopMediaItem>>(
+            cachedProfile?.series?.map { DesktopLibraryCache.sanitizeMediaItem(it) } ?: emptyList()
+        )
+    }
+
+    var isInitialLoading by remember(userEmail) {
+        mutableStateOf<Boolean>(
+            !userEmail.isNullOrBlank() && (cachedProfile == null || (cachedProfile.movies.isEmpty() && cachedProfile.series.isEmpty()))
+        )
+    }
+
+    var continueWatching by remember(userEmail, movies, series) {
         mutableStateOf<List<DesktopMediaItem>>(
             if (movies.isNotEmpty() || series.isNotEmpty()) {
                 val pool = (movies + series).take(4)
@@ -60,131 +103,101 @@ fun App(
 
     val coroutineScope = rememberCoroutineScope()
 
-    // 1. Account Change Observer with Frame-1 Theatrical Poster Preservation
-    LaunchedEffect(authState.userEmail) {
-        val email = authState.userEmail
-        if (email.isNotBlank()) {
-            val userCache = DesktopLibraryCache.loadSync(email)
-            if (userCache != null && (userCache.movies.isNotEmpty() || userCache.series.isNotEmpty())) {
-                val sanitizedMovies = userCache.movies.map { item ->
-                    val guaranteedDriveThumb = item.fallbackThumbnailUrl?.ifBlank { null }
-                        ?: "https://drive.google.com/thumbnail?id=${item.id}&sz=w800"
-
-                    // If cached item already has a valid online poster, KEEP IT! Never downgrade to video frames.
-                    val existingPoster = item.thumbnailUrl?.takeIf { it.isNotBlank() && !it.contains("drive.google.com/thumbnail") }
-
-                    val meta = if (existingPoster == null) {
-                        DesktopOnlineMetadataResolver.resolveMovieSync(item.title)
-                    } else null
-
-                    val resolvedPoster = existingPoster 
-                        ?: meta?.posterUrl?.takeIf { it.isNotBlank() }
-                        ?: item.thumbnailUrl?.takeIf { it.isNotBlank() }
-                        ?: guaranteedDriveThumb
-
-                    item.copy(
-                        title = item.title.ifBlank { meta?.officialTitle ?: item.title },
-                        thumbnailUrl = resolvedPoster,
-                        fallbackThumbnailUrl = guaranteedDriveThumb,
-                        genre = if (item.genre.isNotBlank() && item.genre != "Action • Drama") item.genre else (meta?.genre ?: item.genre),
-                        language = if (item.language.isNotBlank() && item.language != "Unknown") item.language else (meta?.language ?: item.language)
-                    )
-                }
-
-                movies = sanitizedMovies
-                series = userCache.series
-                isInitialLoading = false
-                println("[App] Loaded cached library for account: $email (${movies.size} movies, ${series.size} series) with official posters preserved.")
-            } else {
-                movies = emptyList()
-                series = emptyList()
-                isInitialLoading = true
-                println("[App] No cache found for $email. Preparing progressive fast-paint scan...")
+    // Synchronize Android/Drive Watch History in Background
+    LaunchedEffect(userEmail, accessToken) {
+        if (!userEmail.isNullOrBlank() && !accessToken.isNullOrBlank()) {
+            // Start offline safety net worker for this profile
+            DesktopWatchHistorySync.startAutoRecoveryWorker(userEmail) {
+                DesktopAuthManager.getCredential()?.accessToken ?: accessToken
             }
-        } else {
-            movies = emptyList()
-            series = emptyList()
-            isInitialLoading = false
+
+            withContext(Dispatchers.IO) {
+                DesktopWatchHistorySync.pullAndMerge(userEmail, accessToken)
+            }
         }
     }
 
-    // 2. Progressive Flow Ingestion with Self-Healing OAuth Refresh
-    LaunchedEffect(authState.accessToken, authState.userEmail, rescanTrigger) {
-        val email = authState.userEmail
-
-        if (email.isNotBlank() && isScanningActive.compareAndSet(false, true)) {
-            coroutineScope.launch(Dispatchers.IO) {
-                try {
-                    val credential = DesktopAuthManager.getCredential()
-                    val scanner = DesktopDriveScanner(credential = credential)
-
-                    var freshMovies: List<DesktopMediaItem> = emptyList()
-                    var freshSeries: List<DesktopMediaItem> = emptyList()
-
-                    // Collect movies stream progressively
-                    val moviesJob = launch {
-                        scanner.streamMovies().collect { incomingMovies ->
-                            if (authState.userEmail.equals(email, ignoreCase = true)) {
-                                freshMovies = incomingMovies
-                                movies = incomingMovies
-                                // Unlock the screen as soon as the first 5 movies arrive
-                                if (incomingMovies.isNotEmpty()) {
-                                    isInitialLoading = false
-                                }
-                            }
-                        }
-                    }
-
-                    // Collect series stream progressively
-                    val seriesJob = launch {
-                        scanner.streamSeriesFolders().collect { incomingSeries ->
-                            if (authState.userEmail.equals(email, ignoreCase = true)) {
-                                freshSeries = incomingSeries
-                                series = incomingSeries
-                                if (incomingSeries.isNotEmpty()) {
-                                    isInitialLoading = false
-                                }
-                            }
-                        }
-                    }
-
-                    // Wait for both background streams to complete indexing the full library
-                    joinAll(moviesJob, seriesJob)
-
-                    if (authState.userEmail.equals(email, ignoreCase = true)) {
-                        val hasDirtyTitles = movies.any { DesktopOnlineMetadataResolver.isTitleDirty(it.title) }
-                        val hasMissingLanguages = movies.any { it.language.isBlank() }
-                        val moviesChanged = hasMediaLibraryChanged(movies, freshMovies)
-                        val seriesChanged = hasMediaLibraryChanged(series, freshSeries)
-
-                        if (moviesChanged || seriesChanged || hasDirtyTitles || hasMissingLanguages || isInitialLoading) {
-                            println("[App] Folder language change or updates detected. Refreshing library metadata...")
-
-                            movies = if (moviesChanged || hasDirtyTitles || hasMissingLanguages) {
-                                freshMovies
-                            } else {
-                                mergeLibraryItems(movies, freshMovies)
-                            }
-
-                            if (seriesChanged) {
-                                series = mergeLibraryItems(series, freshSeries)
-                            }
-                        } else {
-                            println("[App] Library clean and matches disk cache for $email.")
-                        }
-
-                        // [3.4] Single authoritative persistence write after both streams complete
-                        if (movies.isNotEmpty() || series.isNotEmpty()) {
-                            DesktopLibraryCache.save(email, movies, series)
-                            println("[App] Full background sync finished. Persisted ${movies.size} movies and ${series.size} series for $email.")
-                        }
-                    }
-                } catch (e: Exception) {
-                    System.err.println("[App] Progressive sync error for $email: ${e.message}")
-                } finally {
-                    isInitialLoading = false
-                    isScanningActive.set(false)
+    // App shutdown flush
+    DisposableEffect(userEmail, accessToken) {
+        val hook = Thread {
+            if (!userEmail.isNullOrBlank() && !accessToken.isNullOrBlank()) {
+                kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                    DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
                 }
+            }
+        }
+        Runtime.getRuntime().addShutdownHook(hook)
+        onDispose {
+            DesktopWatchHistorySync.stopAutoRecoveryWorker()
+            try {
+                Runtime.getRuntime().removeShutdownHook(hook)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    // 2. Library Ingestion & Quiet Background Revalidation
+    LaunchedEffect(authState.accessToken, authState.userEmail, rescanTrigger) {
+        val token = authState.accessToken
+        val email = authState.userEmail
+        if (token.isNullOrBlank() || email.isNullOrBlank()) return@LaunchedEffect
+        if (!isScanningActive.compareAndSet(false, true)) return@LaunchedEffect
+
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val credential = DesktopAuthManager.getCredential()
+                val scanner = DesktopDriveScanner(accessToken = token, credential = credential)
+
+                // CASE A: User has cached media already loaded on screen
+                if (movies.isNotEmpty() || series.isNotEmpty()) {
+                    println("[App] Cached media active (${movies.size} movies, ${series.size} series). Running quiet background revalidation...")
+
+                    // Perform one-shot scans in parallel without touching the UI
+                    val freshMoviesDeferred = async { scanner.loadMovies() }
+                    val freshSeriesDeferred = async { scanner.loadSeriesFolders() }
+
+                    val freshMovies = freshMoviesDeferred.await()
+                    val freshSeries = freshSeriesDeferred.await()
+
+                    // Check for actual differences
+                    val moviesChanged = freshMovies.isNotEmpty() && (freshMovies.map { it.id } != movies.map { it.id })
+                    val seriesChanged = freshSeries.isNotEmpty() && (freshSeries.map { it.id } != series.map { it.id })
+
+                    if (moviesChanged || seriesChanged) {
+                        println("[App] Changes detected in Google Drive library. Updating UI smoothly.")
+                        if (moviesChanged) movies = freshMovies
+                        if (seriesChanged) series = freshSeries
+                        DesktopLibraryCache.save(email, if (moviesChanged) freshMovies else movies, if (seriesChanged) freshSeries else series)
+                    } else {
+                        println("[App] Drive library matches local cache. Zero UI re-renders needed.")
+                    }
+                }
+                // CASE B: Cold start with 0 cached media (First-time user or empty cache)
+                else {
+                    println("[App] Empty local cache. Using fast-paint progressive streaming...")
+                    launch {
+                        scanner.streamMovies().collect { batch ->
+                            if (batch.isNotEmpty()) {
+                                movies = batch
+                                isInitialLoading = false
+                                DesktopLibraryCache.save(email, batch, series)
+                            }
+                        }
+                    }
+                    launch {
+                        scanner.streamSeriesFolders().collect { batch ->
+                            if (batch.isNotEmpty()) {
+                                series = batch
+                                isInitialLoading = false
+                                DesktopLibraryCache.save(email, movies, batch)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                System.err.println("[App] Background library revalidation error: ${e.message}")
+            } finally {
+                isInitialLoading = false
+                isScanningActive.set(false)
             }
         }
     }
@@ -196,6 +209,7 @@ fun App(
                 isAuthenticating = true
                 coroutineScope.launch {
                     val newState = DesktopAuthManager.startDesktopOAuthFlow()
+                    clearThumbnailMemoryCache()
                     authState = newState
                     isAuthenticating = false
                 }
@@ -216,47 +230,60 @@ fun App(
                 )
             }
         } else {
-            DesktopHomeScreen(
-                userEmail = authState.userEmail,
-                userName = authState.userName,
-                accessToken = authState.accessToken,
-                userAvatarUrl = authState.userPhotoUrl ?: "",
-                movies = movies,
-                series = series,
-                continueWatching = continueWatching,
-                onMediaClick = { clickedItem ->
-                    val simDuration = if (clickedItem.durationMs > 0L) clickedItem.durationMs else 7200000L
-                    val existing = continueWatching.find { it.id == clickedItem.id }
-                    val updated = existing?.copy(progressMs = (simDuration * 0.5f).toLong())
-                        ?: clickedItem.copy(durationMs = simDuration, progressMs = (simDuration * 0.2f).toLong())
-                    continueWatching = listOf(updated) + continueWatching.filter { it.id != clickedItem.id }
-                },
-                onClearHistory = {
-                    continueWatching = emptyList()
-                },
-                onRemoveHistoryItem = { item ->
-                    continueWatching = continueWatching.filter { it.id != item.id }
-                },
-                isFullscreen = isFullscreen,
-                onToggleFullscreen = onToggleFullscreen,
-                isAppFullscreen = isFullscreen,
-                onFullscreenToggle = { onToggleFullscreen() },
-                onRescan = {
-                    println("[App] Manual cloud rescan requested.")
-                    isScanningActive.set(false)
-                    rescanTrigger++
-                },
-                onSignOut = {
-                    val loggingOutEmail = authState.userEmail
-                    println("[App] Signing out account: $loggingOutEmail")
-                    DesktopAuthManager.signOut()
-                    // Instantly flush in-memory media and reset auth state
-                    movies = emptyList()
-                    series = emptyList()
-                    continueWatching = emptyList()
-                    authState = DesktopAuthManager.getSavedAuthState()
-                }
-            )
+            // 3. KEY BY USER EMAIL: Destroys previous account's composition tree immediately on account switch
+            key(userEmail) {
+                DesktopHomeScreen(
+                    userEmail = userEmail,
+                    userName = authState.userName,
+                    accessToken = accessToken,
+                    userAvatarUrl = authState.userPhotoUrl ?: "",
+                    movies = movies,
+                    series = series,
+                    continueWatching = continueWatching,
+                    onMediaClick = { clickedItem ->
+                        val simDuration = if (clickedItem.durationMs > 0L) clickedItem.durationMs else 7200000L
+                        val existing = continueWatching.find { it.id == clickedItem.id }
+                        val updated = existing?.copy(progressMs = (simDuration * 0.5f).toLong())
+                            ?: clickedItem.copy(durationMs = simDuration, progressMs = (simDuration * 0.2f).toLong())
+                        continueWatching = listOf(updated) + continueWatching.filter { it.id != clickedItem.id }
+                    },
+                    onClearHistory = {
+                        continueWatching = emptyList()
+                    },
+                    onRemoveHistoryItem = { item ->
+                        continueWatching = continueWatching.filter { it.id != item.id }
+                    },
+                    isFullscreen = isFullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
+                    isAppFullscreen = isFullscreen,
+                    onFullscreenToggle = { onToggleFullscreen() },
+                    onRescan = {
+                        println("[App] Manual cloud rescan requested.")
+                        isScanningActive.set(false)
+                        rescanTrigger++
+                    },
+                    onSignOut = {
+                        val loggingOutEmail = userEmail
+                        val currentToken = accessToken
+                        println("[App] User signing out from: $loggingOutEmail")
+                        DesktopWatchHistorySync.stopAutoRecoveryWorker()
+                        if (!loggingOutEmail.isNullOrBlank() && !currentToken.isNullOrBlank()) {
+                            @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+                            GlobalScope.launch(Dispatchers.IO) {
+                                DesktopWatchHistorySync.pushLocalHistory(loggingOutEmail, currentToken, force = true)
+                            }
+                        }
+                        clearThumbnailMemoryCache()
+                        DesktopLibraryCache.clearMemory(loggingOutEmail)
+                        DesktopAuthManager.signOut()
+                        // Instantly flush in-memory media and reset auth state
+                        movies = emptyList()
+                        series = emptyList()
+                        continueWatching = emptyList()
+                        authState = DesktopAuthManager.getSavedAuthState()
+                    }
+                )
+            }
         }
     }
 }
@@ -288,7 +315,7 @@ private fun mergeLibraryItems(
         val existing = currentMap[freshItem.id]
         if (existing != null &&
             !DesktopOnlineMetadataResolver.isTitleDirty(existing.title) &&
-            existing.language.isNotBlank()) {
+            !existing.language.isNullOrBlank()) {
             existing
         } else {
             freshItem

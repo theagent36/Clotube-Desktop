@@ -31,6 +31,8 @@ gradle.properties
 # =============================================================================
 cache/
 cache/**
+cache/series/
+cache/series/**
 clotube_library_cache.json
 clotube_metadata_cache.json
 clotube_watch_history.json

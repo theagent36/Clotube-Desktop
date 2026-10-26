@@ -120,8 +120,10 @@ fun DesktopVideoPlayerScreen(
                     try {
                         player.media().play(
                             streamUrl,
-                            ":network-caching=3000",
-                            ":file-caching=2000"
+                            ":network-caching=2000",
+                            ":file-caching=1500",
+                            ":clock-jitter=0",
+                            ":clock-synchro=0"
                         )
                     } catch (t: Throwable) {
                         System.err.println("Error initiating playback: ${t.message}")

@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -45,6 +46,8 @@ import androidx.compose.ui.unit.sp
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import kotlinx.coroutines.delay
+import uk.co.caprica.vlcj.player.base.MediaPlayer
+import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
 import java.awt.Cursor
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -52,6 +55,8 @@ import java.awt.Point
 import java.awt.Toolkit
 import java.awt.event.KeyEvent
 import java.awt.image.BufferedImage
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.swing.SwingUtilities
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -70,6 +75,12 @@ fun DesktopSeriesPlayerScreen(
     episodeTitle: String = "",
     seasonNumber: Int = 1,
     episodeNumber: Int = 1,
+    nextEpisodeTitle: String = "",
+    nextSeasonNumber: Int = 1,
+    nextEpisodeNumber: Int = 1,
+    initialSeekMs: Long = 0L,
+    onInitialSeekApplied: (() -> Unit)? = null,
+    onProgressUpdate: ((Long) -> Unit)? = null,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
     onNavigateBack: () -> Unit,
@@ -85,6 +96,12 @@ fun DesktopSeriesPlayerScreen(
         episodeTitle = episodeTitle,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
+        nextEpisodeTitle = nextEpisodeTitle,
+        nextSeasonNumber = nextSeasonNumber,
+        nextEpisodeNumber = nextEpisodeNumber,
+        initialSeekMs = initialSeekMs,
+        onInitialSeekApplied = onInitialSeekApplied,
+        onProgressUpdate = onProgressUpdate,
         isFullscreen = isFullscreen,
         onToggleFullscreen = onToggleFullscreen,
         onNavigateBack = onNavigateBack,
@@ -103,6 +120,12 @@ fun DesktopSeriesPlayerScreen(
     episodeTitle: String = "",
     seasonNumber: Int = 1,
     episodeNumber: Int = 1,
+    nextEpisodeTitle: String = "",
+    nextSeasonNumber: Int = 1,
+    nextEpisodeNumber: Int = 1,
+    initialSeekMs: Long = 0L,
+    onInitialSeekApplied: (() -> Unit)? = null,
+    onProgressUpdate: ((Long) -> Unit)? = null,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
     onNavigateBack: () -> Unit,
@@ -123,6 +146,12 @@ fun DesktopSeriesPlayerScreen(
         episodeTitle = episodeTitle,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
+        nextEpisodeTitle = nextEpisodeTitle,
+        nextSeasonNumber = nextSeasonNumber,
+        nextEpisodeNumber = nextEpisodeNumber,
+        initialSeekMs = initialSeekMs,
+        onInitialSeekApplied = onInitialSeekApplied,
+        onProgressUpdate = onProgressUpdate,
         isFullscreen = isFullscreen,
         onToggleFullscreen = onToggleFullscreen,
         onNavigateBack = onNavigateBack,
@@ -142,6 +171,12 @@ fun DesktopSeriesPlayerScreen(
     episodeTitle: String = "",
     seasonNumber: Int = 1,
     episodeNumber: Int = 1,
+    nextEpisodeTitle: String = "",
+    nextSeasonNumber: Int = 1,
+    nextEpisodeNumber: Int = 1,
+    initialSeekMs: Long = 0L,
+    onInitialSeekApplied: (() -> Unit)? = null,
+    onProgressUpdate: ((Long) -> Unit)? = null,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
     onNavigateBack: () -> Unit,
@@ -161,6 +196,12 @@ fun DesktopSeriesPlayerScreen(
         episodeTitle = episodeTitle,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
+        nextEpisodeTitle = nextEpisodeTitle,
+        nextSeasonNumber = nextSeasonNumber,
+        nextEpisodeNumber = nextEpisodeNumber,
+        initialSeekMs = initialSeekMs,
+        onInitialSeekApplied = onInitialSeekApplied,
+        onProgressUpdate = onProgressUpdate,
         isFullscreen = isFullscreen,
         onToggleFullscreen = onToggleFullscreen,
         onNavigateBack = onNavigateBack,
@@ -179,6 +220,12 @@ private fun DesktopSeriesPlayerContent(
     episodeTitle: String,
     seasonNumber: Int,
     episodeNumber: Int,
+    nextEpisodeTitle: String,
+    nextSeasonNumber: Int,
+    nextEpisodeNumber: Int,
+    initialSeekMs: Long = 0L,
+    onInitialSeekApplied: (() -> Unit)? = null,
+    onProgressUpdate: ((Long) -> Unit)? = null,
     isFullscreen: Boolean,
     onToggleFullscreen: () -> Unit,
     onNavigateBack: () -> Unit,
@@ -201,6 +248,52 @@ private fun DesktopSeriesPlayerContent(
     var seekFeedbackDirection by remember { mutableStateOf<SeriesSeekFeedbackDirection?>(null) }
     var seekFeedbackTrigger by remember { mutableIntStateOf(0) }
 
+    // Auto-Play & Binge State
+    var isAutoPlayDismissed by remember(player) { mutableStateOf(false) }
+    var hasAutoPlayTriggered by remember(player) { mutableStateOf(false) }
+
+    val remainingMs = remember(player.currentTimeMs, player.totalDurationMs) {
+        (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
+    }
+
+    // Dynamic countdown tracking actual remaining seconds
+    val autoPlayCountdownSeconds = remember(remainingMs) {
+        (remainingMs / 1000).toInt().coerceAtLeast(1)
+    }
+
+    // LibVLC Native Event Hook for finished playback
+    DisposableEffect(player, hasNextEpisode, onNextEpisode) {
+        val listener = object : MediaPlayerEventAdapter() {
+            override fun finished(mediaPlayer: MediaPlayer) {
+                SwingUtilities.invokeLater {
+                    if (hasNextEpisode && onNextEpisode != null && !hasAutoPlayTriggered) {
+                        hasAutoPlayTriggered = true
+                        onNextEpisode()
+                    }
+                }
+            }
+        }
+        player.mediaPlayer.events().addMediaPlayerEventListener(listener)
+        onDispose {
+            player.mediaPlayer.events().removeMediaPlayerEventListener(listener)
+        }
+    }
+
+    // Trigger condition: Last 35 seconds of the episode
+    val shouldShowAutoPlayPrompt = hasNextEpisode && 
+            !isAutoPlayDismissed && 
+            !hasAutoPlayTriggered &&
+            player.totalDurationMs > 40000L && 
+            remainingMs in 1L..35000L
+
+    // Auto-advance to next episode when runtime reaches 0
+    LaunchedEffect(shouldShowAutoPlayPrompt, remainingMs) {
+        if (shouldShowAutoPlayPrompt && remainingMs <= 800L && !hasAutoPlayTriggered && onNextEpisode != null) {
+            hasAutoPlayTriggered = true
+            onNextEpisode()
+        }
+    }
+
     val invisibleCursor = remember {
         val transparentImg = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB)
         Toolkit.getDefaultToolkit().createCustomCursor(transparentImg, Point(0, 0), "invisibleSeriesCursor")
@@ -208,7 +301,7 @@ private fun DesktopSeriesPlayerContent(
     val defaultCursor = remember { Cursor.getDefaultCursor() }
     val hiddenPointerIcon = remember(invisibleCursor) { PointerIcon(invisibleCursor) }
 
-    val isCursorHidden = !controlsVisible && player.isPlaying && !isScrubbing && activePopup == SeriesPlayerPopupType.NONE
+    val isCursorHidden = !controlsVisible && player.isPlaying && !isScrubbing && activePopup == SeriesPlayerPopupType.NONE && !shouldShowAutoPlayPrompt
 
     LaunchedEffect(isCursorHidden) {
         try {
@@ -235,8 +328,8 @@ private fun DesktopSeriesPlayerContent(
 
     LaunchedEffect(player.isFirstFrameRendered) {
         if (player.isFirstFrameRendered) {
-            currentSubtitleId = player.mediaPlayer.subpictures().track()
-            currentAudioId = player.mediaPlayer.audio().track()
+            currentSubtitleId = player.getActiveSubtitleTrackId()
+            currentAudioId = player.getActiveAudioTrackId()
         }
     }
 
@@ -251,6 +344,59 @@ private fun DesktopSeriesPlayerContent(
         if (optimisticSeekMs >= 0L) {
             if (kotlin.math.abs(player.currentTimeMs - optimisticSeekMs) < 1500L) {
                 optimisticSeekMs = -1L
+            }
+        }
+    }
+
+    // Initial Auto-Resume Seek Hook with Mid-Stream Guard
+    val hasAppliedInitialSeek = remember(player) { AtomicBoolean(false) }
+
+    LaunchedEffect(player, initialSeekMs) {
+        // If the player is ALREADY mid-stream (e.g. during a fullscreen switch), NEVER seek backward!
+        if (player.currentTimeMs >= 2500L) {
+            hasAppliedInitialSeek.set(true)
+            onInitialSeekApplied?.invoke()
+            return@LaunchedEffect
+        }
+
+        // Apply initial resume position only on fresh start
+        if (initialSeekMs > 1000L && hasAppliedInitialSeek.compareAndSet(false, true)) {
+            // Wait briefly for player buffer ready if currentTimeMs is 0
+            var attempts = 0
+            while (attempts < 20 && !player.isPlaying && !player.isFirstFrameRendered) {
+                delay(100L)
+                attempts++
+            }
+            if (player.currentTimeMs < 2500L) {
+                println("[DesktopSeriesPlayer] Initial seek to saved position: ${initialSeekMs}ms")
+                player.seekToTime(initialSeekMs)
+            }
+            onInitialSeekApplied?.invoke()
+        }
+    }
+
+    // Periodic progress reporting every 5 seconds while actively playing
+    LaunchedEffect(player, onProgressUpdate) {
+        while (true) {
+            delay(5000L)
+            if (player.isPlaying && player.currentTimeMs > 0L) {
+                onProgressUpdate?.invoke(player.currentTimeMs)
+            }
+        }
+    }
+
+    // Report progress when playback pauses
+    LaunchedEffect(player.isPlaying) {
+        if (!player.isPlaying && player.currentTimeMs > 0L) {
+            onProgressUpdate?.invoke(player.currentTimeMs)
+        }
+    }
+
+    // Report progress on player teardown/navigation
+    DisposableEffect(player) {
+        onDispose {
+            if (player.currentTimeMs > 0L) {
+                onProgressUpdate?.invoke(player.currentTimeMs)
             }
         }
     }
@@ -270,6 +416,7 @@ private fun DesktopSeriesPlayerContent(
                         optimisticSeekMs = newTime
                         seekFeedbackDirection = SeriesSeekFeedbackDirection.REWIND
                         seekFeedbackTrigger++
+                        onProgressUpdate?.invoke(newTime)
                         true
                     }
                     KeyEvent.VK_RIGHT -> {
@@ -278,6 +425,7 @@ private fun DesktopSeriesPlayerContent(
                         optimisticSeekMs = newTime
                         seekFeedbackDirection = SeriesSeekFeedbackDirection.FORWARD
                         seekFeedbackTrigger++
+                        onProgressUpdate?.invoke(newTime)
                         true
                     }
                     KeyEvent.VK_SPACE -> {
@@ -390,7 +538,7 @@ private fun DesktopSeriesPlayerContent(
             }
         }
 
-        // Minimalist spinner only
+        // Minimalist Loading Spinner
         if (!player.isFirstFrameRendered || player.isBuffering) {
             Box(
                 modifier = Modifier
@@ -406,6 +554,7 @@ private fun DesktopSeriesPlayerContent(
             }
         }
 
+        // Seek Feedback Indicator
         SeriesSeekFeedbackIndicator(
             direction = SeriesSeekFeedbackDirection.REWIND,
             visible = seekFeedbackDirection == SeriesSeekFeedbackDirection.REWIND,
@@ -417,20 +566,22 @@ private fun DesktopSeriesPlayerContent(
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 54.dp)
         )
 
+        // Settings Popup Overlay
         SeriesInPlayerSettingsPopup(
             activePopup = activePopup,
             player = player,
             currentSubtitleId = currentSubtitleId,
             currentAudioId = currentAudioId,
             currentSpeed = currentSpeed,
-            onSelectSubtitle = { id ->
-                currentSubtitleId = id
-                player.mediaPlayer.subpictures().setTrack(id)
+            onSelectSubtitle = { trackId, trackTitle ->
+                val isOff = trackId == -1 || trackTitle.equals("Off", ignoreCase = true)
+                player.setSubtitleTrack(trackId, trackTitle, isOff)
+                currentSubtitleId = trackId
                 activePopup = SeriesPlayerPopupType.NONE
             },
-            onSelectAudio = { id ->
-                currentAudioId = id
-                player.mediaPlayer.audio().setTrack(id)
+            onSelectAudio = { trackId, trackTitle ->
+                player.setAudioTrack(trackId, trackTitle)
+                currentAudioId = trackId
                 activePopup = SeriesPlayerPopupType.NONE
             },
             onSelectSpeed = { speed ->
@@ -444,6 +595,108 @@ private fun DesktopSeriesPlayerContent(
                 .padding(bottom = 74.dp, end = 24.dp)
         )
 
+        // Floating "Up Next" Auto-Play Countdown Card
+        AnimatedVisibility(
+            visible = shouldShowAutoPlayPrompt,
+            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(bottom = 84.dp, end = 24.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xF20F1522),
+                border = BorderStroke(1.dp, Color(0xFF263346)),
+                elevation = 16.dp,
+                modifier = Modifier.widthIn(min = 280.dp, max = 320.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Header: Status + Dismiss 'X'
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "UP NEXT IN ${autoPlayCountdownSeconds}S",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Cancel Auto-Play",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clip(CircleShape)
+                                .clickable { isAutoPlayDismissed = true }
+                                .pointerHoverIcon(PointerIcon.Hand)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Next Episode Title & Index
+                    val nextEpCode = "S%02dE%02d".format(nextSeasonNumber, nextEpisodeNumber)
+                    val nextDisplayTitle = if (nextEpisodeTitle.isNotBlank()) "$nextEpCode • $nextEpisodeTitle" else nextEpCode
+                    Text(
+                        text = nextDisplayTitle,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Redesigned Full-Width "Play Now" Button (Dismiss Button Removed)
+                    Button(
+                        onClick = {
+                            if (onNextEpisode != null) {
+                                hasAutoPlayTriggered = true
+                                onNextEpisode()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            backgroundColor = Color(0xFF2563EB),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        elevation = ButtonDefaults.elevation(defaultElevation = 4.dp, pressedElevation = 2.dp),
+                        contentPadding = PaddingValues(vertical = 10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .pointerHoverIcon(PointerIcon.Hand)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Play Now",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // HUD Transport Overlay
         AnimatedVisibility(
             visible = controlsVisible || isScrubbing,
             enter = fadeIn(),
@@ -464,6 +717,7 @@ private fun DesktopSeriesPlayerContent(
                         )
                     )
             ) {
+                // Top Header Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -509,6 +763,7 @@ private fun DesktopSeriesPlayerContent(
                     }
                 }
 
+                // Bottom Transport HUD
                 SeriesBottomTransportBar(
                     player = player,
                     activeFraction = activeFraction,
@@ -522,6 +777,10 @@ private fun DesktopSeriesPlayerContent(
                     hasPreviousEpisode = hasPreviousEpisode,
                     hasNextEpisode = hasNextEpisode,
                     onTogglePopup = { popup ->
+                        if (activePopup != popup && popup != SeriesPlayerPopupType.NONE) {
+                            currentSubtitleId = player.getActiveSubtitleTrackId()
+                            currentAudioId = player.getActiveAudioTrackId()
+                        }
                         activePopup = if (activePopup == popup) SeriesPlayerPopupType.NONE else popup
                     },
                     onScrubStart = { frac ->
@@ -532,13 +791,13 @@ private fun DesktopSeriesPlayerContent(
                         scrubFraction = frac
                     },
                     onScrubEnd = { frac ->
+                        val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                        val target = (frac * totalDur).toLong()
+                        optimisticSeekMs = target
+                        player.seekToTime(target)
                         isScrubbing = false
-                        if (player.totalDurationMs > 0L) {
-                            val targetTime = (frac * player.totalDurationMs).toLong()
-                            optimisticSeekMs = targetTime
-                            player.seekToTime(targetTime)
-                        } else {
-                            player.seekToFraction(frac)
+                        if (target > 0L) {
+                            onProgressUpdate?.invoke(target)
                         }
                     },
                     onToggleFullscreen = onToggleFullscreen,
@@ -603,8 +862,8 @@ private fun SeriesInPlayerSettingsPopup(
     currentSubtitleId: Int,
     currentAudioId: Int,
     currentSpeed: Float,
-    onSelectSubtitle: (Int) -> Unit,
-    onSelectAudio: (Int) -> Unit,
+    onSelectSubtitle: (Int, String) -> Unit,
+    onSelectAudio: (Int, String) -> Unit,
     onSelectSpeed: (Float) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
@@ -665,15 +924,15 @@ private fun SeriesInPlayerSettingsPopup(
                         SeriesMenuOptionItem(
                             label = "Subtitles Off",
                             isSelected = currentSubtitleId == -1,
-                            onClick = { onSelectSubtitle(-1) }
+                            onClick = { onSelectSubtitle(-1, "Off") }
                         )
 
-                        val spuTracks = player.mediaPlayer.subpictures().trackDescriptions() ?: emptyList()
-                        spuTracks.filter { it.id() != -1 }.forEach { track ->
+                        val spuTracks = player.getSubtitleTracks()
+                        spuTracks.filter { it.first != -1 }.forEach { (trackId, trackDesc) ->
                             SeriesMenuOptionItem(
-                                label = track.description(),
-                                isSelected = track.id() == currentSubtitleId,
-                                onClick = { onSelectSubtitle(track.id()) }
+                                label = trackDesc,
+                                isSelected = trackId == currentSubtitleId,
+                                onClick = { onSelectSubtitle(trackId, trackDesc) }
                             )
                         }
                     }
@@ -688,7 +947,7 @@ private fun SeriesInPlayerSettingsPopup(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
                         )
 
-                        val audioTracks = player.mediaPlayer.audio().trackDescriptions() ?: emptyList()
+                        val audioTracks = player.getAudioTracks()
                         if (audioTracks.isEmpty()) {
                             SeriesMenuOptionItem(
                                 label = "Default Audio",
@@ -696,11 +955,11 @@ private fun SeriesInPlayerSettingsPopup(
                                 onClick = onDismiss
                             )
                         } else {
-                            audioTracks.forEach { track ->
+                            audioTracks.forEach { (trackId, trackDesc) ->
                                 SeriesMenuOptionItem(
-                                    label = track.description(),
-                                    isSelected = track.id() == currentAudioId,
-                                    onClick = { onSelectAudio(track.id()) }
+                                    label = trackDesc,
+                                    isSelected = trackId == currentAudioId,
+                                    onClick = { onSelectAudio(trackId, trackDesc) }
                                 )
                             }
                         }
@@ -797,25 +1056,28 @@ private fun SeriesBottomTransportBar(
                     .fillMaxWidth()
                     .height(26.dp)
                     .pointerHoverIcon(PointerIcon.Hand)
-                    .pointerInput(containerWidthPx) {
+                    .pointerInput(Unit) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
-                            val downFrac = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                            onScrubStart(downFrac)
-                            var lastFrac = downFrac
                             down.consume()
+                            val width = size.width.toFloat()
+                            if (width <= 0f) return@awaitEachGesture
 
+                            var lastFrac = (down.position.x / width).coerceIn(0f, 1f)
+                            onScrubStart(lastFrac)
+
+                            val pointerId = down.id
                             while (true) {
                                 val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (change.pressed) {
-                                    lastFrac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    change.consume()
-                                    onScrubbing(lastFrac)
-                                } else {
+                                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                if (!change.pressed) {
                                     change.consume()
                                     onScrubEnd(lastFrac)
                                     break
+                                } else {
+                                    change.consume()
+                                    lastFrac = (change.position.x / width).coerceIn(0f, 1f)
+                                    onScrubbing(lastFrac)
                                 }
                             }
                         }
@@ -918,13 +1180,18 @@ private fun SeriesBottomTransportBar(
                 ) {
                     IconButton(
                         onClick = {
-                            player.setVolumeLevel(if (player.volume > 0) 0 else 100)
+                            if (player.isMuted || player.volume == 0) {
+                                player.setMuted(false)
+                                if (player.volume == 0) player.setVolumeLevel(100)
+                            } else {
+                                player.setMuted(true)
+                            }
                         },
                         modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             imageVector = when {
-                                player.volume == 0 -> Icons.AutoMirrored.Filled.VolumeMute
+                                player.isMuted || player.volume == 0 -> Icons.AutoMirrored.Filled.VolumeMute
                                 player.volume < 50 -> Icons.AutoMirrored.Filled.VolumeDown
                                 else -> Icons.AutoMirrored.Filled.VolumeUp
                             },
@@ -935,7 +1202,7 @@ private fun SeriesBottomTransportBar(
                     }
 
                     SeriesSlickVolumeSlider(
-                        volume = player.volume,
+                        volume = if (player.isMuted) 0 else player.volume,
                         onVolumeChange = { player.setVolumeLevel(it) }
                     )
                 }
@@ -943,7 +1210,7 @@ private fun SeriesBottomTransportBar(
                 Spacer(modifier = Modifier.width(4.dp))
 
                 Text(
-                    text = "${formatDuration(displayTimeMs)} /${formatDuration(player.totalDurationMs)}",
+                    text = "${formatDuration(displayTimeMs)} / ${formatDuration(player.totalDurationMs)}",
                     color = Color.White.copy(alpha = 0.9f),
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1026,20 +1293,32 @@ private fun SeriesSlickVolumeSlider(
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    val frac = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    onVolumeChange((frac * 100).roundToInt())
                     down.consume()
+                    isDragging = true
+                    val width = size.width.toFloat()
+                    if (width > 0f) {
+                        val frac = (down.position.x / width).coerceIn(0f, 1f)
+                        onVolumeChange((frac * 100).roundToInt())
+                    }
 
+                    val pointerId = down.id
                     while (true) {
                         val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.pressed) {
-                            val currentFrac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                        if (!change.pressed) {
                             change.consume()
-                            onVolumeChange((currentFrac * 100).roundToInt())
+                            if (width > 0f) {
+                                val frac = (change.position.x / width).coerceIn(0f, 1f)
+                                onVolumeChange((frac * 100).roundToInt())
+                            }
+                            isDragging = false
+                            break
                         } else {
                             change.consume()
-                            break
+                            if (width > 0f) {
+                                val frac = (change.position.x / width).coerceIn(0f, 1f)
+                                onVolumeChange((frac * 100).roundToInt())
+                            }
                         }
                     }
                 }

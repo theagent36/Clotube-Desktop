@@ -2,7 +2,6 @@ package com.clotube.desktop.data
 
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
-import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
@@ -12,46 +11,98 @@ import java.util.concurrent.ConcurrentHashMap
 
 typealias DesktopSeriesEpisode = DesktopEpisode
 
-data class CachedLibrary(
-    val userEmail: String = "",
-    val timestamp: Long = System.currentTimeMillis(),
+data class DesktopUserLibraryData(
+    val email: String = "",
+    val lastUpdated: Long = System.currentTimeMillis(),
     val movies: List<DesktopMediaItem> = emptyList(),
-    val series: List<DesktopMediaItem> = emptyList(),
-    val seriesEpisodes: Map<String, List<DesktopSeriesEpisode>> = emptyMap()
-)
+    val series: List<DesktopMediaItem> = emptyList()
+) {
+    val userEmail: String get() = email
+    val timestamp: Long get() = lastUpdated
+}
+
+typealias CachedLibrary = DesktopUserLibraryData
 
 object DesktopLibraryCache {
-    private val cacheDirectory = File("cache").apply {
-        if (!exists()) mkdirs()
+    private val gson = GsonBuilder().setPrettyPrinting().create()
+    private val memoryCache = ConcurrentHashMap<String, DesktopUserLibraryData>()
+
+    /**
+     * Defensively sanitizes any DesktopMediaItem deserialized via Gson reflection,
+     * guaranteeing all String fields are authentic non-null objects.
+     */
+    fun sanitizeMediaItem(raw: DesktopMediaItem?): DesktopMediaItem {
+        if (raw == null) return DesktopMediaItem()
+        val safeId = raw.id ?: ""
+        val safeTitle = raw.title ?: "Untitled"
+        val safeThumb = raw.thumbnailUrl ?: ""
+        val safeFallback = raw.fallbackThumbnailUrl ?: if (safeId.isNotBlank()) "https://drive.google.com/thumbnail?id=$safeId&sz=w800" else ""
+        val safeStream = raw.streamUrl ?: ""
+        val safeGenre = raw.genre ?: "Movie"
+        val safeYear = raw.releaseYear ?: ""
+        val safeLang = raw.language ?: "English"
+
+        return DesktopMediaItem(
+            id = safeId,
+            title = safeTitle,
+            thumbnailUrl = if (safeThumb.isNotBlank()) safeThumb else safeFallback,
+            fallbackThumbnailUrl = safeFallback,
+            streamUrl = safeStream,
+            durationMs = raw.durationMs,
+            genre = safeGenre,
+            releaseYear = safeYear,
+            language = safeLang,
+            isSeries = raw.isSeries
+        )
     }
 
-    // [5.1] Compact JSON serialization: eliminates 35% whitespace overhead
-    private val gson: Gson = GsonBuilder().create()
+    /**
+     * Loads library cache synchronously for the specified account profile.
+     * Sanitizes all legacy items on the fly to eliminate NullPointerExceptions.
+     */
+    fun loadSync(email: String): DesktopUserLibraryData? {
+        if (email.isBlank()) return null
+        val sanitizedEmail = DesktopProfileManager.sanitizeEmail(email)
 
-    private val memoryCache = ConcurrentHashMap<String, CachedLibrary>()
+        memoryCache[sanitizedEmail]?.let { return it }
 
-    private fun getAccountCacheFile(userEmail: String): File {
-        val sanitized = if (userEmail.isNotBlank()) {
-            userEmail.lowercase().trim().replace(Regex("[^a-z0-9_]"), "_")
-        } else {
-            "anonymous_guest"
+        val profileFile = DesktopProfileManager.getLibraryFile(email)
+
+        // Legacy file migration check
+        if (!profileFile.exists()) {
+            val legacyFile = File("clotube_library_cache.json")
+            if (legacyFile.exists() && legacyFile.length() > 0) {
+                try {
+                    legacyFile.copyTo(profileFile, overwrite = true)
+                    println("[DesktopLibraryCache] Migrated legacy cache to profile: ${profileFile.absolutePath}")
+                } catch (_: Exception) {}
+            }
         }
-        return File(cacheDirectory, "library_${sanitized}.json")
-    }
-
-    fun loadSync(userEmail: String): CachedLibrary? {
-        if (userEmail.isBlank()) return null
-        memoryCache[userEmail.lowercase()]?.let { return it }
 
         return try {
-            val file = getAccountCacheFile(userEmail)
-            if (file.exists() && file.length() > 0) {
-                val json = file.readText(Charsets.UTF_8)
-                val type = object : TypeToken<CachedLibrary>() {}.type
-                val cached: CachedLibrary? = gson.fromJson(json, type)
-                if (cached != null && cached.userEmail.equals(userEmail, ignoreCase = true)) {
-                    memoryCache[userEmail.lowercase()] = cached
-                    cached
+            if (profileFile.exists() && profileFile.length() > 0) {
+                val json = profileFile.readText(Charsets.UTF_8)
+                val type = object : TypeToken<DesktopUserLibraryData>() {}.type
+                val rawData: DesktopUserLibraryData? = gson.fromJson(json, type)
+
+                if (rawData != null) {
+                    val cleanMovies = (rawData.movies ?: emptyList()).map { sanitizeMediaItem(it) }
+                    val cleanSeries = (rawData.series ?: emptyList()).map { sanitizeMediaItem(it) }
+
+                    val sanitizedData = DesktopUserLibraryData(
+                        email = if (!rawData.email.isNullOrBlank()) rawData.email else email,
+                        lastUpdated = rawData.lastUpdated,
+                        movies = cleanMovies,
+                        series = cleanSeries
+                    )
+
+                    if (cleanMovies.isNotEmpty() || cleanSeries.isNotEmpty()) {
+                        memoryCache[sanitizedEmail] = sanitizedData
+                        println("[DesktopLibraryCache] Loaded and sanitized profile library for $email: ${cleanMovies.size} movies, ${cleanSeries.size} series")
+                        sanitizedData
+                    } else {
+                        null
+                    }
                 } else {
                     null
                 }
@@ -59,76 +110,44 @@ object DesktopLibraryCache {
                 null
             }
         } catch (e: Exception) {
-            System.err.println("[DesktopLibraryCache] Failed to load cache for $userEmail: ${e.message}")
+            System.err.println("[DesktopLibraryCache] Error loading profile for $email: ${e.message}")
             null
         }
     }
 
+    /**
+     * Saves library data asynchronously into the user's profile.
+     */
     suspend fun save(
-        userEmail: String,
+        email: String,
         movies: List<DesktopMediaItem>,
         series: List<DesktopMediaItem>
     ) = withContext(Dispatchers.IO) {
-        if (userEmail.isBlank()) return@withContext
+        if (email.isBlank()) return@withContext
+        val sanitizedEmail = DesktopProfileManager.sanitizeEmail(email)
+        val cleanMovies = movies.map { sanitizeMediaItem(it) }
+        val cleanSeries = series.map { sanitizeMediaItem(it) }
+
+        val data = DesktopUserLibraryData(
+            email = email,
+            lastUpdated = System.currentTimeMillis(),
+            movies = cleanMovies,
+            series = cleanSeries
+        )
+
+        memoryCache[sanitizedEmail] = data
+
         try {
-            val file = getAccountCacheFile(userEmail)
-            val existingEpisodes = memoryCache[userEmail.lowercase()]?.seriesEpisodes ?: emptyMap()
-            val cached = CachedLibrary(
-                userEmail = userEmail,
-                timestamp = System.currentTimeMillis(),
-                movies = movies,
-                series = series,
-                seriesEpisodes = existingEpisodes
-            )
-            val json = gson.toJson(cached)
+            val file = DesktopProfileManager.getLibraryFile(email)
+            val json = gson.toJson(data)
             file.writeText(json, Charsets.UTF_8)
-            memoryCache[userEmail.lowercase()] = cached
-            println("[DesktopLibraryCache] Saved ${movies.size} movies and ${series.size} series for account: $userEmail")
+            println("[DesktopLibraryCache] Persisted profile library for $email: ${cleanMovies.size} movies, ${cleanSeries.size} series")
         } catch (e: Exception) {
-            System.err.println("[DesktopLibraryCache] Failed to save cache for $userEmail: ${e.message}")
+            System.err.println("[DesktopLibraryCache] Error saving library for $email: ${e.message}")
         }
     }
 
-    fun getCachedEpisodes(userEmail: String, seriesId: String): List<DesktopSeriesEpisode>? {
-        if (userEmail.isBlank() || seriesId.isBlank()) return null
-        val library = loadSync(userEmail) ?: return null
-        return library.seriesEpisodes[seriesId]?.takeIf { it.isNotEmpty() }
-    }
-
-    suspend fun saveEpisodesForSeries(
-        userEmail: String,
-        seriesId: String,
-        episodes: List<DesktopSeriesEpisode>
-    ) = withContext(Dispatchers.IO) {
-        if (userEmail.isBlank() || seriesId.isBlank() || episodes.isEmpty()) return@withContext
-        try {
-            val current = loadSync(userEmail) ?: CachedLibrary(userEmail = userEmail)
-            val updatedEpisodes = current.seriesEpisodes.toMutableMap()
-            updatedEpisodes[seriesId] = episodes
-
-            val updatedLibrary = current.copy(
-                timestamp = System.currentTimeMillis(),
-                seriesEpisodes = updatedEpisodes
-            )
-
-            val file = getAccountCacheFile(userEmail)
-            val json = gson.toJson(updatedLibrary)
-            file.writeText(json, Charsets.UTF_8)
-            memoryCache[userEmail.lowercase()] = updatedLibrary
-            println("[DesktopLibraryCache] Cached ${episodes.size} episodes for series ID: $seriesId")
-        } catch (e: Exception) {
-            System.err.println("[DesktopLibraryCache] Failed to save episodes for $seriesId: ${e.message}")
-        }
-    }
-
-    fun clearCacheForUser(userEmail: String) {
-        try {
-            memoryCache.remove(userEmail.lowercase())
-            val file = getAccountCacheFile(userEmail)
-            if (file.exists()) {
-                file.delete()
-                println("[DesktopLibraryCache] Deleted cache file for: $userEmail")
-            }
-        } catch (_: Exception) {}
+    fun clearMemory(email: String) {
+        memoryCache.remove(DesktopProfileManager.sanitizeEmail(email))
     }
 }

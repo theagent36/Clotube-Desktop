@@ -113,8 +113,10 @@ fun DesktopInlinePlayerPanel(
                         if (!isReleased.get()) {
                             player.media().play(
                                 streamUrl,
-                                ":network-caching=2500",
-                                ":file-caching=1500"
+                                ":network-caching=2000",
+                                ":file-caching=1500",
+                                ":clock-jitter=0",
+                                ":clock-synchro=0"
                             )
                         }
                     } catch (t: Throwable) {

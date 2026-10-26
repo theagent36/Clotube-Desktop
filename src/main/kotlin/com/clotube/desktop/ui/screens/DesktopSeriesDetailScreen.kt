@@ -1,5 +1,6 @@
 package com.clotube.desktop.ui.screens
 
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -20,14 +21,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clotube.desktop.data.DesktopDriveScanner
+import com.clotube.desktop.data.DesktopSeriesCache
+import com.clotube.desktop.data.DesktopWatchHistoryManager
+import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
@@ -35,31 +41,122 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import kotlinx.coroutines.launch
 
 @Composable
 fun DesktopSeriesDetailScreen(
     seriesItem: DesktopMediaItem,
     accessToken: String,
+    userEmail: String,
+    initialEpisodeId: String? = null,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var seriesDetails by remember { mutableStateOf<DesktopSeries?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-    var selectedSeasonNumber by remember { mutableIntStateOf(1) }
-    var activeEpisode by remember { mutableStateOf<DesktopEpisode?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
-    LaunchedEffect(seriesItem.id) {
-        val scanner = DesktopDriveScanner(accessToken)
-        val loaded = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
-        seriesDetails = loaded
-        val initialSeason = loaded.seasons.firstOrNull()
-        if (initialSeason != null) {
-            selectedSeasonNumber = initialSeason.seasonNumber
-            activeEpisode = initialSeason.episodes.firstOrNull()
+    // 1. Frame-1 Cache Read
+    val cachedSeries = remember(seriesItem.id, userEmail) { 
+        DesktopSeriesCache.get(userEmail, seriesItem.id) 
+    }
+    var seriesDetails by remember(seriesItem.id, userEmail) { mutableStateOf<DesktopSeries?>(cachedSeries) }
+    var isLoading by remember(seriesItem.id, userEmail) { mutableStateOf(cachedSeries == null) }
+
+    // Resolve targeted episode if passed from Global Search or Series Resume Pointer
+    val allCachedEpisodes = remember(cachedSeries) {
+        cachedSeries?.seasons?.flatMap { it.episodes } ?: emptyList()
+    }
+    val targetedCachedEp = remember(allCachedEpisodes, initialEpisodeId, userEmail) {
+        if (!initialEpisodeId.isNullOrBlank()) {
+            allCachedEpisodes.find { it.id == initialEpisodeId }
+        } else {
+            val resumeState = DesktopWatchHistoryManager.getSeriesResumeState(userEmail, seriesItem.id)
+            if (resumeState != null) {
+                allCachedEpisodes.find { it.id == resumeState.lastEpisodeId }
+            } else null
         }
-        isLoading = false
+    }
+
+    var playingEpisode by remember(seriesItem.id, userEmail, initialEpisodeId) {
+        mutableStateOf<DesktopEpisode?>(
+            targetedCachedEp ?: cachedSeries?.seasons?.firstOrNull()?.episodes?.firstOrNull()
+        )
+    }
+
+    var browsingSeasonNumber by remember(seriesItem.id, userEmail, initialEpisodeId) {
+        mutableIntStateOf(
+            targetedCachedEp?.seasonNumber ?: cachedSeries?.seasons?.firstOrNull()?.seasonNumber ?: 1
+        )
+    }
+
+    var seasonDropdownExpanded by remember { mutableStateOf(false) }
+
+    // Watched episode IDs for this user
+    var watchedEpisodeIds by remember(userEmail) {
+        mutableStateOf(DesktopWatchHistoryManager.getWatchedEpisodeIds(userEmail))
+    }
+
+    // 2. Stale-While-Revalidate Ingestion
+    LaunchedEffect(seriesItem.id, userEmail, initialEpisodeId) {
+        if (seriesDetails == null) {
+            isLoading = true
+            val scanner = DesktopDriveScanner(accessToken)
+            val loaded = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
+            DesktopSeriesCache.save(userEmail, loaded)
+            seriesDetails = loaded
+
+            val allFreshEpisodes = loaded.seasons.flatMap { it.episodes }
+            // Validate initialEpisodeId: ensure it actually belongs to this series
+            val targetedFreshEp = if (!initialEpisodeId.isNullOrBlank()) {
+                allFreshEpisodes.find { it.id == initialEpisodeId }
+            } else {
+                val resumeState = DesktopWatchHistoryManager.getSeriesResumeState(userEmail, seriesItem.id)
+                if (resumeState != null) {
+                    allFreshEpisodes.find { it.id == resumeState.lastEpisodeId }
+                } else null
+            }
+
+            if (targetedFreshEp != null) {
+                browsingSeasonNumber = targetedFreshEp.seasonNumber
+                playingEpisode = targetedFreshEp
+            } else {
+                val initialSeason = loaded.seasons.firstOrNull()
+                if (initialSeason != null) {
+                    browsingSeasonNumber = initialSeason.seasonNumber
+                    playingEpisode = initialSeason.episodes.firstOrNull()
+                }
+            }
+            isLoading = false
+        } else {
+            try {
+                val scanner = DesktopDriveScanner(accessToken)
+                val fresh = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
+                if (fresh.seasons.isNotEmpty()) {
+                    DesktopSeriesCache.save(userEmail, fresh)
+                    seriesDetails = fresh
+                    val allFreshEpisodes = fresh.seasons.flatMap { it.episodes }
+                    if (playingEpisode == null || allFreshEpisodes.none { it.id == playingEpisode?.id }) {
+                        val targetedFreshEp = if (!initialEpisodeId.isNullOrBlank()) {
+                            allFreshEpisodes.find { it.id == initialEpisodeId }
+                        } else null
+
+                        if (targetedFreshEp != null) {
+                            browsingSeasonNumber = targetedFreshEp.seasonNumber
+                            playingEpisode = targetedFreshEp
+                        } else {
+                            val initialSeason = fresh.seasons.firstOrNull()
+                            if (initialSeason != null) {
+                                browsingSeasonNumber = initialSeason.seasonNumber
+                                playingEpisode = initialSeason.episodes.firstOrNull()
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                System.err.println("[DesktopSeriesDetailScreen] Background refresh failed for ${seriesItem.title}: ${e.message}")
+            }
+        }
     }
 
     if (isLoading || seriesDetails == null) {
@@ -67,23 +164,36 @@ fun DesktopSeriesDetailScreen(
             modifier = modifier.fillMaxSize().background(Color(0xFF07090E)),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(color = Color(0xFF00E5FF))
+            CircularProgressIndicator(
+                color = Color(0xFF00E5FF),
+                strokeWidth = 3.5.dp,
+                modifier = Modifier.size(46.dp)
+            )
         }
         return
     }
 
     val series = seriesDetails!!
-    val currentSeason = series.seasons.find { it.seasonNumber == selectedSeasonNumber }
-        ?: series.seasons.firstOrNull() ?: DesktopSeason(1, "Season 1", emptyList())
-    val episodes = currentSeason.episodes
 
-    val activeStreamUrl = remember(activeEpisode?.id, accessToken) {
-        activeEpisode?.let { ep ->
+    val currentSeason = series.seasons.find { it.seasonNumber == browsingSeasonNumber }
+        ?: series.seasons.firstOrNull() ?: DesktopSeason(1, "Season 1", emptyList())
+    val seasonEpisodes = currentSeason.episodes
+
+    val allEpisodes = remember(series.seasons) {
+        series.seasons.flatMap { it.episodes }
+    }
+    val globalEpIndex = allEpisodes.indexOfFirst { it.id == playingEpisode?.id }
+    val hasPrevGlobal = globalEpIndex > 0
+    val hasNextGlobal = globalEpIndex in 0 until (allEpisodes.size - 1)
+    val nextEpisode = if (hasNextGlobal) allEpisodes[globalEpIndex + 1] else null
+    val prevEpisode = if (hasPrevGlobal) allEpisodes[globalEpIndex - 1] else null
+
+    val activeStreamUrl = remember(playingEpisode?.id, accessToken) {
+        playingEpisode?.let { ep ->
             LocalStreamServer.getStreamUrl(ep.id, accessToken)
         } ?: ""
     }
 
-    // Persist player instance across fullscreen toggles!
     val player = remember(activeStreamUrl) {
         if (activeStreamUrl.isNotBlank()) DirectMemoryVideoPlayer(activeStreamUrl) else null
     }
@@ -94,31 +204,118 @@ fun DesktopSeriesDetailScreen(
         }
     }
 
-    val currentEpIndex = episodes.indexOfFirst { it.id == activeEpisode?.id }
-    val hasPrev = currentEpIndex > 0
-    val hasNext = currentEpIndex in 0 until (episodes.size - 1)
+    // Track which episode has already consumed its initial seek so fullscreen toggles never re-seek
+    var resumedEpisodeId by remember(seriesItem.id) { mutableStateOf<String?>(null) }
 
-    // True Cinema Fullscreen Mode: Reuses the exact same active player without interruption
+    val savedPos = remember(playingEpisode?.id, userEmail) {
+        playingEpisode?.let { ep ->
+            DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
+        } ?: 0L
+    }
+
+    // Only supply savedPos on the very first mount of this episode
+    val effectiveInitialSeekMs = if (playingEpisode != null && resumedEpisodeId != playingEpisode?.id) {
+        savedPos
+    } else {
+        0L
+    }
+
+    // Reset latch when episode changes so the next episode can resume
+    LaunchedEffect(playingEpisode?.id) {
+        if (resumedEpisodeId != playingEpisode?.id) {
+            // Keep until first seek applied
+        }
+    }
+
+    // Fullscreen Cinema Overlay
     if (isFullscreen && player != null) {
         DesktopSeriesPlayerScreen(
             player = player,
             seriesTitle = series.title,
-            episodeTitle = activeEpisode?.title ?: "",
-            seasonNumber = activeEpisode?.seasonNumber ?: 1,
-            episodeNumber = activeEpisode?.episodeNumber ?: 1,
+            episodeTitle = playingEpisode?.title ?: "",
+            seasonNumber = playingEpisode?.seasonNumber ?: 1,
+            episodeNumber = playingEpisode?.episodeNumber ?: 1,
+            nextEpisodeTitle = nextEpisode?.title ?: "",
+            nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
+            nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
+            initialSeekMs = effectiveInitialSeekMs,
+            onInitialSeekApplied = {
+                resumedEpisodeId = playingEpisode?.id
+            },
+            onProgressUpdate = { currentPos ->
+                playingEpisode?.let { ep ->
+                    coroutineScope.launch {
+                        DesktopWatchHistoryManager.recordPlaybackProgress(
+                            email = userEmail,
+                            fileId = ep.id,
+                            title = ep.title,
+                            positionMs = currentPos,
+                            durationMs = ep.durationMs,
+                            isSeries = true,
+                            seriesId = series.id,
+                            seasonNumber = ep.seasonNumber,
+                            episodeNumber = ep.episodeNumber
+                        )
+                        // Quiet background sync to Drive
+                        DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                    }
+                }
+            },
             isFullscreen = true,
             onToggleFullscreen = onToggleFullscreen,
             onNavigateBack = { onToggleFullscreen() },
-            onNextEpisode = if (hasNext) { { activeEpisode = episodes[currentEpIndex + 1] } } else null,
-            onPreviousEpisode = if (hasPrev) { { activeEpisode = episodes[currentEpIndex - 1] } } else null,
-            hasNextEpisode = hasNext,
-            hasPreviousEpisode = hasPrev,
+            onNextEpisode = if (hasNextGlobal && nextEpisode != null) {
+                {
+                    playingEpisode?.let { currentEp ->
+                        watchedEpisodeIds = watchedEpisodeIds + currentEp.id
+                        coroutineScope.launch {
+                            DesktopWatchHistoryManager.setEpisodeWatched(
+                                email = userEmail,
+                                fileId = currentEp.id,
+                                isWatched = true,
+                                seriesId = series.id,
+                                seasonNumber = currentEp.seasonNumber,
+                                episodeNumber = currentEp.episodeNumber,
+                                title = currentEp.title,
+                                durationMs = currentEp.durationMs
+                            )
+                            // Advance series resume pointer to next episode
+                            DesktopWatchHistoryManager.recordPlaybackProgress(
+                                email = userEmail,
+                                fileId = nextEpisode.id,
+                                title = nextEpisode.title,
+                                positionMs = 0L,
+                                durationMs = nextEpisode.durationMs,
+                                isSeries = true,
+                                seriesId = series.id,
+                                seasonNumber = nextEpisode.seasonNumber,
+                                episodeNumber = nextEpisode.episodeNumber
+                            )
+                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                        }
+                    }
+                    resumedEpisodeId = null // Allow next episode to resume
+                    playingEpisode = nextEpisode
+                    if (browsingSeasonNumber != nextEpisode.seasonNumber) {
+                        browsingSeasonNumber = nextEpisode.seasonNumber
+                    }
+                }
+            } else null,
+            onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
+                {
+                    resumedEpisodeId = null // Allow prev episode to resume
+                    playingEpisode = prevEpisode
+                    if (browsingSeasonNumber != prevEpisode.seasonNumber) {
+                        browsingSeasonNumber = prevEpisode.seasonNumber
+                    }
+                }
+            } else null,
+            hasNextEpisode = hasNextGlobal,
+            hasPreviousEpisode = hasPrevGlobal,
             modifier = Modifier.fillMaxSize()
         )
         return
     }
-
-    var seasonDropdownExpanded by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = modifier
@@ -127,6 +324,7 @@ fun DesktopSeriesDetailScreen(
         contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 12.dp, bottom = 48.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
+        // 1. Breadcrumb Action
         item(key = "breadcrumb") {
             Row(
                 modifier = Modifier
@@ -144,7 +342,7 @@ fun DesktopSeriesDetailScreen(
                     modifier = Modifier.size(15.dp)
                 )
                 Text(
-                    text = "Back to TV Series",
+                    text = "Back to Series",
                     color = Color(0xFF94A3B8),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
@@ -152,6 +350,7 @@ fun DesktopSeriesDetailScreen(
             }
         }
 
+        // 2. Series Header Block
         item(key = "series_header_block") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -160,7 +359,7 @@ fun DesktopSeriesDetailScreen(
             ) {
                 Column {
                     Text(
-                        text = "CLOTUBE ORIGINAL SERIES",
+                        text = "SERIES",
                         color = Color(0xFF38BDF8),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
@@ -175,8 +374,17 @@ fun DesktopSeriesDetailScreen(
                         letterSpacing = (-0.5).sp
                     )
                     Spacer(modifier = Modifier.height(6.dp))
+
+                    val seasonsCountText = "${series.seasons.size} ${if (series.seasons.size == 1) "Season" else "Seasons"}"
+                    val metaTokens = listOf(
+                        series.releaseYear,
+                        series.ageRating,
+                        seasonsCountText,
+                        series.genres
+                    ).filter { it.isNotBlank() }
+
                     Text(
-                        text = "${series.releaseYear}  •  ${series.ageRating}  •  ${currentSeason.title}  •  ${series.genres}",
+                        text = metaTokens.joinToString("  •  "),
                         color = Color(0xFF94A3B8),
                         fontSize = 12.sp
                     )
@@ -235,6 +443,7 @@ fun DesktopSeriesDetailScreen(
             }
         }
 
+        // 3. MAIN SPLIT VIEW
         item(key = "main_split_view") {
             Row(
                 modifier = Modifier
@@ -242,6 +451,7 @@ fun DesktopSeriesDetailScreen(
                     .height(580.dp),
                 horizontalArrangement = Arrangement.spacedBy(22.dp)
             ) {
+                // LEFT COLUMN: Viewport + Active Episode Info
                 Column(
                     modifier = Modifier
                         .weight(0.67f)
@@ -260,26 +470,100 @@ fun DesktopSeriesDetailScreen(
                             DesktopSeriesPlayerScreen(
                                 player = player,
                                 seriesTitle = series.title,
-                                episodeTitle = activeEpisode?.title ?: "",
-                                seasonNumber = activeEpisode?.seasonNumber ?: 1,
-                                episodeNumber = activeEpisode?.episodeNumber ?: 1,
+                                episodeTitle = playingEpisode?.title ?: "",
+                                seasonNumber = playingEpisode?.seasonNumber ?: 1,
+                                episodeNumber = playingEpisode?.episodeNumber ?: 1,
+                                nextEpisodeTitle = nextEpisode?.title ?: "",
+                                nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
+                                nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
+                                initialSeekMs = effectiveInitialSeekMs,
+                                onInitialSeekApplied = {
+                                    resumedEpisodeId = playingEpisode?.id
+                                },
+                                onProgressUpdate = { currentPos ->
+                                    playingEpisode?.let { ep ->
+                                        coroutineScope.launch {
+                                            DesktopWatchHistoryManager.recordPlaybackProgress(
+                                                email = userEmail,
+                                                fileId = ep.id,
+                                                title = ep.title,
+                                                positionMs = currentPos,
+                                                durationMs = ep.durationMs,
+                                                isSeries = true,
+                                                seriesId = series.id,
+                                                seasonNumber = ep.seasonNumber,
+                                                episodeNumber = ep.episodeNumber
+                                            )
+                                            // Quiet background sync to Drive
+                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                                        }
+                                    }
+                                },
                                 isFullscreen = false,
                                 onToggleFullscreen = onToggleFullscreen,
                                 onNavigateBack = onBack,
-                                onNextEpisode = if (hasNext) { { activeEpisode = episodes[currentEpIndex + 1] } } else null,
-                                onPreviousEpisode = if (hasPrev) { { activeEpisode = episodes[currentEpIndex - 1] } } else null,
-                                hasNextEpisode = hasNext,
-                                hasPreviousEpisode = hasPrev,
+                                onNextEpisode = if (hasNextGlobal && nextEpisode != null) {
+                                    {
+                                        playingEpisode?.let { currentEp ->
+                                            watchedEpisodeIds = watchedEpisodeIds + currentEp.id
+                                            coroutineScope.launch {
+                                                DesktopWatchHistoryManager.setEpisodeWatched(
+                                                    email = userEmail,
+                                                    fileId = currentEp.id,
+                                                    isWatched = true,
+                                                    seriesId = series.id,
+                                                    seasonNumber = currentEp.seasonNumber,
+                                                    episodeNumber = currentEp.episodeNumber,
+                                                    title = currentEp.title,
+                                                    durationMs = currentEp.durationMs
+                                                )
+                                                // Advance series resume pointer to next episode
+                                                DesktopWatchHistoryManager.recordPlaybackProgress(
+                                                    email = userEmail,
+                                                    fileId = nextEpisode.id,
+                                                    title = nextEpisode.title,
+                                                    positionMs = 0L,
+                                                    durationMs = nextEpisode.durationMs,
+                                                    isSeries = true,
+                                                    seriesId = series.id,
+                                                    seasonNumber = nextEpisode.seasonNumber,
+                                                    episodeNumber = nextEpisode.episodeNumber
+                                                )
+                                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                            }
+                                        }
+                                        resumedEpisodeId = null
+                                        playingEpisode = nextEpisode
+                                        if (browsingSeasonNumber != nextEpisode.seasonNumber) {
+                                            browsingSeasonNumber = nextEpisode.seasonNumber
+                                        }
+                                    }
+                                } else null,
+                                onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
+                                    {
+                                        resumedEpisodeId = null
+                                        playingEpisode = prevEpisode
+                                        if (browsingSeasonNumber != prevEpisode.seasonNumber) {
+                                            browsingSeasonNumber = prevEpisode.seasonNumber
+                                        }
+                                    }
+                                } else null,
+                                hasNextEpisode = hasNextGlobal,
+                                hasPreviousEpisode = hasPrevGlobal,
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(color = Color(0xFF00E5FF))
+                                CircularProgressIndicator(
+                                    color = Color(0xFF00E5FF),
+                                    strokeWidth = 3.5.dp,
+                                    modifier = Modifier.size(46.dp)
+                                )
                             }
                         }
                     }
 
-                    activeEpisode?.let { ep ->
+                    playingEpisode?.let { ep ->
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
                                 text = "EPISODE ${ep.episodeNumber}",
@@ -297,43 +581,31 @@ fun DesktopSeriesDetailScreen(
                                     text = ep.title,
                                     color = Color.White,
                                     fontSize = 22.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f)
                                 )
+                                Spacer(modifier = Modifier.width(12.dp))
                                 Text(
                                     text = ep.durationFormatted,
                                     color = Color(0xFF94A3B8),
                                     fontSize = 13.sp
                                 )
                             }
-                            Text(
-                                text = ep.synopsis,
-                                color = Color(0xFF94A3B8),
-                                fontSize = 12.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf("4K UHD", "HDR", "Dolby Atmos", "CC").forEach { tag ->
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = Color(0xFF101520),
-                                        border = BorderStroke(1.dp, Color(0xFF1E2838))
-                                    ) {
-                                        Text(
-                                            text = tag,
-                                            color = Color(0xFFCBD5E1),
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                        )
-                                    }
-                                }
+                            if (ep.synopsis.isNotBlank()) {
+                                Text(
+                                    text = ep.synopsis,
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 12.sp,
+                                    lineHeight = 18.sp,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
                 }
 
+                // RIGHT COLUMN: Interactive Episode List
                 Surface(
                     modifier = Modifier
                         .weight(0.33f)
@@ -362,13 +634,14 @@ fun DesktopSeriesDetailScreen(
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = "${episodes.size} episodes",
+                                    text = "${seasonEpisodes.size} episodes",
                                     color = Color.White,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.ExtraBold
                                 )
                             }
 
+                            // Dynamic Season Selector Dropdown
                             Box {
                                 Surface(
                                     modifier = Modifier
@@ -402,21 +675,24 @@ fun DesktopSeriesDetailScreen(
                                 DropdownMenu(
                                     expanded = seasonDropdownExpanded,
                                     onDismissRequest = { seasonDropdownExpanded = false },
-                                    modifier = Modifier.background(Color(0xFF131824))
+                                    modifier = Modifier
+                                        .background(Color(0xFF131824))
+                                        .border(1.dp, Color(0xFF263346), RoundedCornerShape(8.dp))
                                 ) {
                                     series.seasons.forEach { season ->
+                                        val isCurrent = season.seasonNumber == browsingSeasonNumber
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
                                                     text = "${season.title} (${season.episodes.size} eps)",
-                                                    color = if (season.seasonNumber == selectedSeasonNumber) Color(0xFF00E5FF) else Color.White,
-                                                    fontSize = 12.sp
+                                                    color = if (isCurrent) Color(0xFF00E5FF) else Color.White,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
                                                 )
                                             },
                                             onClick = {
-                                                selectedSeasonNumber = season.seasonNumber
+                                                browsingSeasonNumber = season.seasonNumber
                                                 seasonDropdownExpanded = false
-                                                activeEpisode = season.episodes.firstOrNull()
                                             }
                                         )
                                     }
@@ -425,6 +701,10 @@ fun DesktopSeriesDetailScreen(
                         }
 
                         Spacer(modifier = Modifier.height(10.dp))
+
+                        // Subheader with Watched Progress & "Mark All Watched" Toggle
+                        val seasonWatchedCount = seasonEpisodes.count { watchedEpisodeIds.contains(it.id) }
+                        val areAllSeasonEpisodesWatched = seasonEpisodes.isNotEmpty() && seasonWatchedCount == seasonEpisodes.size
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -439,21 +719,44 @@ fun DesktopSeriesDetailScreen(
                                     modifier = Modifier
                                         .size(6.dp)
                                         .clip(CircleShape)
-                                        .background(Color(0xFF00E5FF))
+                                        .background(if (areAllSeasonEpisodesWatched) Color(0xFF00E5FF) else Color(0xFF38BDF8))
                                 )
                                 Text(
-                                    text = "Direct Stream Ready",
+                                    text = if (seasonEpisodes.isEmpty()) {
+                                        "No episodes"
+                                    } else if (seasonWatchedCount > 0) {
+                                        "$seasonWatchedCount of ${seasonEpisodes.size} watched"
+                                    } else {
+                                        "${seasonEpisodes.size} episodes ready"
+                                    },
                                     color = Color(0xFF94A3B8),
                                     fontSize = 11.sp
                                 )
                             }
                             Text(
-                                text = "Mark all watched",
+                                text = if (areAllSeasonEpisodesWatched) "Mark all unwatched" else "Mark all watched",
                                 color = Color(0xFF38BDF8),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier
-                                    .clickable { }
+                                    .clickable {
+                                        val markWatched = !areAllSeasonEpisodesWatched
+                                        val currentSeasonIds = seasonEpisodes.map { it.id }
+                                        watchedEpisodeIds = if (markWatched) {
+                                            watchedEpisodeIds + currentSeasonIds
+                                        } else {
+                                            watchedEpisodeIds - currentSeasonIds.toSet()
+                                        }
+                                        coroutineScope.launch {
+                                            DesktopWatchHistoryManager.setSeasonEpisodesWatched(
+                                                email = userEmail,
+                                                episodes = seasonEpisodes,
+                                                isWatched = markWatched,
+                                                seriesId = series.id
+                                            )
+                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                        }
+                                    }
                                     .pointerHoverIcon(PointerIcon.Hand)
                             )
                         }
@@ -462,115 +765,48 @@ fun DesktopSeriesDetailScreen(
                         HorizontalDivider(color = Color(0xFF18202F), thickness = 1.dp)
                         Spacer(modifier = Modifier.height(12.dp))
 
+                        // Interactive Scrollable List of Episodes
                         LazyColumn(
                             modifier = Modifier.weight(1f),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            items(episodes, key = { it.id }) { ep ->
-                                val isSelected = activeEpisode?.id == ep.id
-                                val thumb = rememberDriveThumbnail(ep.thumbnailUrl, accessToken)
+                            items(seasonEpisodes, key = { it.id }) { ep ->
+                                val isCurrentlyPlaying = playingEpisode?.id == ep.id
+                                val isWatched = watchedEpisodeIds.contains(ep.id)
+                                val thumb = rememberDriveThumbnail(ep.thumbnailUrl, accessToken = accessToken, userEmail = userEmail)
 
-                                Surface(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .clickable { activeEpisode = ep }
-                                        .pointerHoverIcon(PointerIcon.Hand),
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected) Color(0xFF121B2B) else Color(0xFF0F141F),
-                                    border = if (isSelected) BorderStroke(1.dp, Color(0xFF2563EB)) else BorderStroke(1.dp, Color(0xFF18202F))
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .width(96.dp)
-                                                .height(54.dp)
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .background(Color(0xFF161E2E)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (thumb != null) {
-                                                Image(
-                                                    bitmap = thumb,
-                                                    contentDescription = ep.title,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
-                                            }
-
-                                            if (isSelected) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(24.dp)
-                                                        .clip(CircleShape)
-                                                        .background(Color(0xFF2563EB)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.PlayArrow,
-                                                        contentDescription = null,
-                                                        tint = Color.White,
-                                                        modifier = Modifier.size(15.dp)
-                                                    )
-                                                }
-                                            } else {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(22.dp)
-                                                        .clip(CircleShape)
-                                                        .background(Color(0xCC000000)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Text(
-                                                        text = "${ep.episodeNumber}",
-                                                        color = Color(0xFF94A3B8),
-                                                        fontSize = 10.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                }
-                                            }
+                                EpisodeListItemCard(
+                                    episode = ep,
+                                    thumbnail = thumb,
+                                    isCurrentlyPlaying = isCurrentlyPlaying,
+                                    isPlayerPlaying = player?.isPlaying == true,
+                                    isWatched = isWatched,
+                                    onSelectEpisode = {
+                                        resumedEpisodeId = null
+                                        playingEpisode = ep
+                                    },
+                                    onToggleWatched = {
+                                        val markWatched = !isWatched
+                                        watchedEpisodeIds = if (markWatched) {
+                                            watchedEpisodeIds + ep.id
+                                        } else {
+                                            watchedEpisodeIds - ep.id
                                         }
-
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "EPISODE ${ep.episodeNumber}",
-                                                color = Color(0xFF38BDF8),
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold
+                                        coroutineScope.launch {
+                                            DesktopWatchHistoryManager.setEpisodeWatched(
+                                                email = userEmail,
+                                                fileId = ep.id,
+                                                isWatched = markWatched,
+                                                seriesId = series.id,
+                                                seasonNumber = ep.seasonNumber,
+                                                episodeNumber = ep.episodeNumber,
+                                                title = ep.title,
+                                                durationMs = ep.durationMs
                                             )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = ep.title,
-                                                color = Color.White,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = "${ep.durationFormatted} • Direct Stream",
-                                                color = Color(0xFF64748B),
-                                                fontSize = 10.sp
-                                            )
-                                        }
-
-                                        if (isSelected) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.GraphicEq,
-                                                contentDescription = "Playing",
-                                                tint = Color(0xFF00E5FF),
-                                                modifier = Modifier.size(18.dp)
-                                            )
+                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
                                         }
                                     }
-                                }
+                                )
                             }
                         }
 
@@ -586,7 +822,7 @@ fun DesktopSeriesDetailScreen(
                                 modifier = Modifier.size(13.dp)
                             )
                             Text(
-                                text = "Progress synced to cloud",
+                                text = "Progress saved to profile",
                                 color = Color(0xFF64748B),
                                 fontSize = 10.sp
                             )
@@ -596,6 +832,7 @@ fun DesktopSeriesDetailScreen(
             }
         }
 
+        // 4. "ABOUT THE SERIES" SECTION
         item(key = "about_the_series") {
             Spacer(modifier = Modifier.height(10.dp))
             HorizontalDivider(color = Color(0xFF141A26), thickness = 1.dp)
@@ -615,15 +852,19 @@ fun DesktopSeriesDetailScreen(
                         letterSpacing = 1.4.sp
                     )
                     Spacer(modifier = Modifier.height(6.dp))
+
+                    if (series.tagline.isNotBlank()) {
+                        Text(
+                            text = series.tagline,
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
                     Text(
-                        text = series.tagline,
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = series.synopsis,
+                        text = series.synopsis.ifBlank { "No overview available for this series." },
                         color = Color(0xFF94A3B8),
                         fontSize = 13.sp,
                         lineHeight = 20.sp
@@ -634,9 +875,15 @@ fun DesktopSeriesDetailScreen(
                     modifier = Modifier.weight(0.35f),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    MetadataLine(label = "Creators", value = series.creators)
-                    MetadataLine(label = "Cast", value = series.cast)
-                    MetadataLine(label = "Genres", value = series.genres)
+                    if (series.creators.isNotBlank()) {
+                        MetadataLine(label = "Creators", value = series.creators)
+                    }
+                    if (series.cast.isNotBlank()) {
+                        MetadataLine(label = "Cast", value = series.cast)
+                    }
+                    if (series.genres.isNotBlank()) {
+                        MetadataLine(label = "Genres", value = series.genres)
+                    }
                 }
             }
         }
@@ -644,8 +891,267 @@ fun DesktopSeriesDetailScreen(
 }
 
 @Composable
-private fun rememberDriveThumbnail(url: String?, accessToken: String = ""): ImageBitmap? {
-    return rememberThumbnailBitmap(primaryUrl = url, accessToken = accessToken)
+private fun EpisodeListItemCard(
+    episode: DesktopEpisode,
+    thumbnail: ImageBitmap?,
+    isCurrentlyPlaying: Boolean,
+    isPlayerPlaying: Boolean,
+    isWatched: Boolean,
+    onSelectEpisode: () -> Unit,
+    onToggleWatched: () -> Unit
+) {
+    var isHovered by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onSelectEpisode() }
+            .pointerHoverIcon(PointerIcon.Hand)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        when (event.type) {
+                            PointerEventType.Enter -> isHovered = true
+                            PointerEventType.Exit -> isHovered = false
+                        }
+                    }
+                }
+            },
+        shape = RoundedCornerShape(10.dp),
+        color = when {
+            isCurrentlyPlaying -> Color(0xFF121B2B)
+            isHovered -> Color(0xFF151D2A)
+            else -> Color(0xFF0F141F)
+        },
+        border = when {
+            isCurrentlyPlaying -> BorderStroke(1.dp, Color(0xFF2563EB))
+            isHovered -> BorderStroke(1.dp, Color(0xFF2A3B54))
+            else -> BorderStroke(1.dp, Color(0xFF18202F))
+        }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // 16:9 Thumbnail Box
+            Box(
+                modifier = Modifier
+                    .width(96.dp)
+                    .height(54.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF161E2E)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (thumbnail != null) {
+                    Image(
+                        bitmap = thumbnail,
+                        contentDescription = episode.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                when {
+                    isCurrentlyPlaying -> {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF2563EB)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                    }
+                    isHovered -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.45f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF00E5FF).copy(alpha = 0.9f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PlayArrow,
+                                    contentDescription = null,
+                                    tint = Color(0xFF090D14),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                    isWatched -> {
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF0F241F).copy(alpha = 0.95f))
+                                .border(1.dp, Color(0xFF00E5FF).copy(alpha = 0.7f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = "Watched",
+                                tint = Color(0xFF00E5FF),
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
+                    }
+                    else -> {
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xCC000000)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${episode.episodeNumber}",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Episode Title & Runtime
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "EPISODE ${episode.episodeNumber}",
+                    color = Color(0xFF38BDF8),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = episode.title,
+                    color = if (isWatched && !isCurrentlyPlaying) Color(0xFFCBD5E1).copy(alpha = 0.75f) else Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "${episode.durationFormatted} • Direct Stream",
+                    color = Color(0xFF64748B),
+                    fontSize = 10.sp
+                )
+            }
+
+            // Right End: Animated Soundwave or Quick Watched Toggle Button
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (isCurrentlyPlaying) {
+                    AnimatedEqualizerBars(
+                        isPlaying = isPlayerPlaying,
+                        barColor = Color(0xFF00E5FF)
+                    )
+                }
+
+                if (isHovered || isWatched) {
+                    IconButton(
+                        onClick = onToggleWatched,
+                        modifier = Modifier
+                            .size(24.dp)
+                            .pointerHoverIcon(PointerIcon.Hand)
+                    ) {
+                        Icon(
+                            imageVector = if (isWatched) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                            contentDescription = if (isWatched) "Mark Unwatched" else "Mark Watched",
+                            tint = if (isWatched) Color(0xFF00E5FF) else Color(0xFF64748B),
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnimatedEqualizerBars(
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier,
+    barColor: Color = Color(0xFF00E5FF)
+) {
+    val transition = rememberInfiniteTransition()
+
+    val b1 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 420, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+    val b2 by transition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 350, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+    val b3 by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 480, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+    val b4 by transition.animateFloat(
+        initialValue = 0.7f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 390, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+
+    val heights = if (isPlaying) listOf(b1, b2, b3, b4) else listOf(0.25f, 0.25f, 0.25f, 0.25f)
+
+    Row(
+        modifier = modifier.size(width = 16.dp, height = 15.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        heights.forEach { fraction ->
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(fraction.coerceIn(0.15f, 1f))
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(barColor)
+            )
+        }
+    }
+}
+
+@Composable
+private fun rememberDriveThumbnail(url: String?, accessToken: String = "", userEmail: String = ""): ImageBitmap? {
+    return rememberThumbnailBitmap(primaryUrl = url, accessToken = accessToken, userEmail = userEmail)
 }
 
 @Composable
@@ -655,6 +1161,15 @@ private fun MetadataLine(label: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(text = label, color = Color(0xFF64748B), fontSize = 12.sp)
-        Text(text = value, color = Color(0xFFCBD5E1), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Spacer(modifier = Modifier.width(16.dp))
+        Text(
+            text = value,
+            color = Color(0xFFCBD5E1),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f, fill = false),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

@@ -1,11 +1,14 @@
 package com.clotube.desktop.data
 
 import com.clotube.desktop.model.DesktopMediaItem
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
@@ -18,24 +21,38 @@ data class MovieMetadata(
     val language: String = "English"
 )
 
-data class SeriesMetadata(
-    val tvMazeId: Long,
+data class SeriesOnlineMeta(
     val officialTitle: String,
+    val tvMazeId: Long = -1L,
+    val genres: String = "Series",
     val posterUrl: String = "",
-    val genres: String = "TV Series • Drama"
+    val backdropUrl: String = "",
+    val releaseYear: String = "",
+    val ageRating: String = "",
+    val tagline: String = "",
+    val synopsis: String = "",
+    val creators: String = "",
+    val cast: String = ""
 )
 
-data class EpisodeMetadata(
+data class EpisodeOnlineMeta(
     val officialTitle: String,
+    val durationMinutes: Long = 45L,
+    val synopsis: String = "",
     val thumbnailUrl: String = "",
-    val durationMinutes: Long = 0L
+    val seasonNumber: Int = 1,
+    val episodeNumber: Int = 1
 )
+
+typealias SeriesMetadata = SeriesOnlineMeta
+typealias EpisodeMetadata = EpisodeOnlineMeta
 
 object DesktopOnlineMetadataResolver {
 
     private val movieCache = ConcurrentHashMap<String, MovieMetadata>()
-    private val seriesCache = ConcurrentHashMap<String, SeriesMetadata>()
-    private val showEpisodesCache = ConcurrentHashMap<Long, Map<Pair<Int, Int>, EpisodeMetadata>>()
+    private val seriesCache = ConcurrentHashMap<String, SeriesOnlineMeta>()
+    private val episodeCache = ConcurrentHashMap<String, EpisodeOnlineMeta>()
+    private val showEpisodesCache = ConcurrentHashMap<Long, Map<Pair<Int, Int>, EpisodeOnlineMeta>>()
 
     // Curated title, genre, and language registry (posters are fetched dynamically from live APIs)
     private val CURATED_TITLES = mapOf(
@@ -501,7 +518,8 @@ object DesktopOnlineMetadataResolver {
         return (matches.toDouble() / qTokens.size.toDouble()) >= 0.35
     }
 
-    fun isTitleDirty(title: String): Boolean {
+    fun isTitleDirty(title: String?): Boolean {
+        if (title.isNullOrBlank()) return false
         val lower = title.lowercase()
         val dirtyMarkers = listOf(
             "1080p", "720p", "2160p", "480p", "bluray", "imax", "10bit", "8bit",
@@ -513,14 +531,17 @@ object DesktopOnlineMetadataResolver {
         return dirtyMarkers.any { lower.contains(it) } || lower.contains("@")
     }
 
-    fun detectMovieLanguage(item: DesktopMediaItem): String {
-        if (item.language.isNotBlank() && item.language in listOf("Hindi", "Bengali", "English")) {
-            return item.language
+    fun detectMovieLanguage(item: DesktopMediaItem?): String {
+        if (item == null) return "English"
+        val lang = item.language ?: ""
+        if (lang.isNotBlank() && lang in listOf("Hindi", "Bengali", "English")) {
+            return lang
         }
-        return deduceLanguageFromTitle(item.title)
+        return deduceLanguageFromTitle(item.title ?: "")
     }
 
-    fun deduceLanguageFromTitle(title: String): String {
+    fun deduceLanguageFromTitle(title: String?): String {
+        if (title.isNullOrBlank()) return "English"
         val lower = title.lowercase().trim()
 
         if (Regex("[\\u0980-\\u09FF]").containsMatchIn(title)) return "Bengali"
@@ -575,153 +596,322 @@ object DesktopOnlineMetadataResolver {
         return if (matched.isNotEmpty()) matched.take(3).joinToString(" • ") else ""
     }
 
-    suspend fun resolveSeries(rawSeriesName: String): SeriesMetadata = withContext(Dispatchers.IO) {
-        val trimmed = rawSeriesName.trim()
-        seriesCache[trimmed]?.let { return@withContext it }
-
-        val cleanTitle = cleanSeriesTitle(trimmed)
-        var connection: HttpURLConnection? = null
-
-        try {
-            val encoded = URLEncoder.encode(cleanTitle, "UTF-8")
-            val endpoint = "https://api.tvmaze.com/singlesearch/shows?q=$encoded"
-            connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 6000
-                readTimeout = 6000
-                setRequestProperty("User-Agent", "Clotube-Windows/1.0")
-            }
-
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
-                val root = JsonParser.parseString(jsonText).asJsonObject
-
-                val tvMazeId = root.get("id")?.asLong ?: -1L
-                val officialName = root.get("name")?.asString ?: cleanTitle
-                val imageObj = root.getAsJsonObject("image")
-                val posterUrl = imageObj?.get("original")?.asString ?: imageObj?.get("medium")?.asString ?: ""
-
-                val genresArray = root.getAsJsonArray("genres")
-                val genresList = mutableListOf<String>()
-                genresArray?.forEach { genresList.add(it.asString) }
-                val genreString = if (genresList.isNotEmpty()) genresList.joinToString(" • ") else "Drama • Mystery"
-
-                val result = SeriesMetadata(
-                    tvMazeId = tvMazeId,
-                    officialTitle = officialName,
-                    posterUrl = posterUrl,
-                    genres = genreString
-                )
-                seriesCache[trimmed] = result
-                return@withContext result
-            }
-        } catch (_: Exception) {
-        } finally {
-            connection?.disconnect()
-        }
-
-        val fallback = SeriesMetadata(tvMazeId = -1L, officialTitle = cleanTitle, posterUrl = "", genres = "TV Series • Drama")
-        seriesCache[trimmed] = fallback
-        fallback
+    private fun cleanHtml(raw: String): String {
+        if (raw.isBlank()) return ""
+        return raw
+            .replace(Regex("<[^>]*>"), "")
+            .replace("&amp;", "&")
+            .replace("&#39;", "'")
+            .replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&nbsp;", " ")
+            .trim()
     }
 
-    suspend fun resolveEpisode(
-        seriesName: String,
-        tvMazeSeriesId: Long,
-        seasonNumber: Int,
-        episodeNumber: Int,
-        rawFileName: String
-    ): EpisodeMetadata = withContext(Dispatchers.IO) {
-        val targetShowId = if (tvMazeSeriesId > 0L) tvMazeSeriesId else resolveSeries(seriesName).tvMazeId
-
-        if (targetShowId > 0L) {
-            var episodesMap = showEpisodesCache[targetShowId]
-            if (episodesMap == null) {
-                episodesMap = fetchAllEpisodesForShow(targetShowId)
-                showEpisodesCache[targetShowId] = episodesMap
-            }
-            episodesMap[Pair(seasonNumber, episodeNumber)]?.let { return@withContext it }
-        }
-
-        val fallbackTitle = cleanEpisodeTitleFromFileName(rawFileName, seasonNumber, episodeNumber)
-        EpisodeMetadata(officialTitle = fallbackTitle, thumbnailUrl = "", durationMinutes = 0L)
-    }
-
-    private fun fetchAllEpisodesForShow(showId: Long): Map<Pair<Int, Int>, EpisodeMetadata> {
-        val map = mutableMapOf<Pair<Int, Int>, EpisodeMetadata>()
-        var connection: HttpURLConnection? = null
-        try {
-            val endpoint = "https://api.tvmaze.com/shows/$showId/episodes"
-            connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 6000
-                readTimeout = 6000
-                setRequestProperty("User-Agent", "Clotube-Windows/1.0")
-            }
-
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
-                val array = JsonParser.parseString(jsonText).asJsonArray
-
-                for (i in 0 until array.size()) {
-                    val item = array.get(i).asJsonObject
-                    val s = item.get("season")?.asInt ?: -1
-                    val e = item.get("number")?.asInt ?: -1
-                    val name = item.get("name")?.asString?.trim() ?: ""
-                    val runtime = item.get("runtime")?.asLong ?: 0L
-                    val imageObj = item.getAsJsonObject("image")
-                    val thumb = imageObj?.get("original")?.asString ?: imageObj?.get("medium")?.asString ?: ""
-
-                    if (s > 0 && e > 0 && name.isNotBlank()) {
-                        map[Pair(s, e)] = EpisodeMetadata(
-                            officialTitle = name,
-                            thumbnailUrl = thumb,
-                            durationMinutes = runtime
-                        )
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        } finally {
-            connection?.disconnect()
-        }
-        return map
-    }
-
-    fun cleanSeriesTitle(raw: String): String {
-        var text = raw
-        val cleanupTags = listOf(
-            "(?i)\\b(Complete|Series|Season|S\\d+|Pack|1080p|720p|480p|BluRay|WEB-?DL|WEBRip|x264|x265|HEVC)\\b",
-            "(?i)\\[[^\\]]*\\]",
-            "(?i)\\([^\\)]*\\)"
+    private fun cleanSeriesQuery(rawTitle: String): String {
+        var text = rawTitle.substringBeforeLast('.')
+        val noiseTags = listOf(
+            "(?i)\\b(2160p|1080p|720p|480p|4K|UHD|FHD|WEB-?DL|WEBRip|BluRay|BRRip|HDR|DV|IMAX)\\b",
+            "(?i)\\b(x264|x265|HEVC|AVC|10bit|8bit|AAC|AC3|EAC3|DDP?5\\.1|Atmos|DTS)\\b",
+            "(?i)\\b(Hindi|English|Tamil|Telugu|Dual\\s*Audio|Multi\\s*Audio|ESubs?|Sub|Dubbed)\\b",
+            "(?i)\\b(MoviesMod|MoviesVerse|VegaMovies|Pahe|YTS|YIFY|PSA|GalaxyTV|KatmovieHD|MkvCinemas)\\b",
+            "(?i)\\b(s\\d+|season\\s*\\d+|complete)\\b.*",
+            "(?i)\\[[^\\]]*\\]", "(?i)\\([^\\)]*\\)"
         )
-        for (tag in cleanupTags) {
+        for (tag in noiseTags) {
             text = text.replace(Regex(tag), "")
         }
         return text.replace('.', ' ').replace('_', ' ').replace('-', ' ').replace(Regex("\\s+"), " ").trim()
     }
 
-    fun cleanEpisodeTitleFromFileName(rawFileName: String, seasonNumber: Int, episodeNumber: Int): String {
-        var text = rawFileName.substringBeforeLast('.')
-        val sTag = "S" + seasonNumber.toString().padStart(2, '0')
-        val eTag = "E" + episodeNumber.toString().padStart(2, '0')
-        val epCodePattern = "(?i)($sTag$eTag|${seasonNumber}x${episodeNumber}|Episode\\s*0*$episodeNumber)"
+    /**
+     * Resolves TV Series metadata using TVMaze search with smart disambiguation.
+     * Prevents picking old miniseries (e.g. 1990 BBC House of Cards) when the user has modern series (2013 Netflix).
+     */
+    suspend fun resolveSeries(rawTitle: String, episodeCountHint: Int = 0): SeriesOnlineMeta = withContext(Dispatchers.IO) {
+        val cleanQuery = cleanSeriesQuery(rawTitle)
+        if (cleanQuery.isBlank()) return@withContext fallbackSeries(rawTitle)
 
-        text = text.replace(Regex(epCodePattern), " ")
+        seriesCache[cleanQuery.lowercase()]?.let { return@withContext it }
 
-        val cleanupTags = listOf(
-            "(?i)\\b(2160p|1080p|1080i|720p|480p|FHD|UHD|4K|HDTV|WEB-?DL|WEBRip|BluRay|BRRip|DVDRip)\\b",
-            "(?i)\\b(x264|x265|H\\.?264|H\\.?265|HEVC|AVC|10bit|8bit|HDR10?)\\b",
-            "(?i)\\b(AAC|AC3|EAC3|DTS|DDP5\\.1|5\\.1CH|2\\.0CH)\\b",
-            "(?i)\\[[^\\]]*\\]",
-            "(?i)\\([^\\)]*\\)"
-        )
-        for (tag in cleanupTags) {
-            text = text.replace(Regex(tag), "")
+        try {
+            val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+            val endpoint = "https://api.tvmaze.com/search/shows?q=$encoded"
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8000
+                readTimeout = 8000
+                setRequestProperty("User-Agent", "Clotube-Windows/1.0")
+            }
+
+            if (conn.responseCode in 200..299) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val rootArray = JsonParser.parseString(json).asJsonArray
+
+                if (rootArray.size() > 0) {
+                    var bestShowObj: JsonObject? = null
+                    var highestScore = -1000.0
+
+                    for (elem in rootArray) {
+                        val item = elem.asJsonObject
+                        val show = item.getAsJsonObject("show") ?: continue
+                        val showName = show.get("name")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        val weight = show.get("weight")?.takeIf { !it.isJsonNull }?.asDouble ?: 0.0
+                        val premiered = show.get("premiered")?.takeIf { !it.isJsonNull }?.asString ?: ""
+
+                        var score = weight
+
+                        // Exact title match bonus
+                        if (showName.equals(cleanQuery, ignoreCase = true)) {
+                            score += 50.0
+                        }
+
+                        // Check year hint if folder has year (e.g. "House of Cards 2013")
+                        val yearMatcher = Pattern.compile("\\b(19\\d\\d|20\\d\\d)\\b").matcher(rawTitle)
+                        if (yearMatcher.find()) {
+                            val year = yearMatcher.group()
+                            if (premiered.startsWith(year)) {
+                                score += 100.0
+                            }
+                        }
+
+                        // Disambiguation for episode count hint:
+                        // If episodeCountHint > 4 and show premiered in the 1990s without explicit year hint in title,
+                        // penalize older miniseries in favor of modern long-running shows
+                        if (episodeCountHint > 4) {
+                            if (premiered.startsWith("19") && !rawTitle.contains("19")) {
+                                score -= 40.0
+                            }
+                            val webChannel = show.get("webChannel")?.takeIf { !it.isJsonNull }
+                            if (webChannel != null) {
+                                score += 20.0
+                            }
+                        }
+
+                        if (score > highestScore) {
+                            highestScore = score
+                            bestShowObj = show
+                        }
+                    }
+
+                    val chosenShow = bestShowObj ?: rootArray[0].asJsonObject.getAsJsonObject("show")
+                    if (chosenShow != null) {
+                        val id = chosenShow.get("id")?.takeIf { !it.isJsonNull }?.asLong ?: -1L
+                        val title = chosenShow.get("name")?.takeIf { !it.isJsonNull }?.asString ?: cleanQuery
+                        val genresArr = chosenShow.getAsJsonArray("genres")
+                        val genres = if (genresArr != null && genresArr.size() > 0) {
+                            genresArr.joinToString(" • ") { it.asString }
+                        } else "Drama • Thriller"
+
+                        val imageObj = chosenShow.getAsJsonObject("image")
+                        val poster = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString 
+                            ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        val premiered = chosenShow.get("premiered")?.takeIf { !it.isJsonNull }?.asString?.take(4) ?: "2024"
+                        val summaryRaw = chosenShow.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        val synopsis = cleanHtml(summaryRaw)
+
+                        val meta = SeriesOnlineMeta(
+                            officialTitle = title,
+                            tvMazeId = id,
+                            posterUrl = poster,
+                            backdropUrl = poster,
+                            releaseYear = premiered,
+                            genres = genres,
+                            synopsis = synopsis
+                        )
+                        seriesCache[cleanQuery.lowercase()] = meta
+                        return@withContext meta
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            System.err.println("[DesktopOnlineMetadataResolver] Failed to resolve series for $rawTitle: ${e.message}")
         }
-        text = text.replace('.', ' ').replace('_', ' ').replace('-', ' ').replace(Regex("\\s+"), " ").trim()
-        return if (text.isBlank()) "Episode $episodeNumber" else toTitleCase(text)
+
+        val fallback = fallbackSeries(cleanQuery)
+        seriesCache[cleanQuery.lowercase()] = fallback
+        fallback
     }
+
+    suspend fun resolveSeries(rawTitle: String): SeriesOnlineMeta = resolveSeries(rawTitle, 0)
+
+    /**
+     * Downloads the entire episode guide for a series in a single network request.
+     */
+    suspend fun fetchShowEpisodesBulk(tvMazeShowId: Long): Map<Pair<Int, Int>, EpisodeOnlineMeta> = withContext(Dispatchers.IO) {
+        if (tvMazeShowId <= 0L) return@withContext emptyMap()
+        showEpisodesCache[tvMazeShowId]?.let { return@withContext it }
+
+        val map = mutableMapOf<Pair<Int, Int>, EpisodeOnlineMeta>()
+        try {
+            val endpoint = "https://api.tvmaze.com/shows/$tvMazeShowId/episodes?specials=1"
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 10000
+                setRequestProperty("User-Agent", "Clotube-Windows/1.0")
+            }
+
+            if (conn.responseCode in 200..299) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val array = JsonParser.parseString(json).asJsonArray
+
+                for (elem in array) {
+                    val epObj = elem.asJsonObject
+                    val season = epObj.get("season")?.takeIf { !it.isJsonNull }?.asInt ?: 1
+                    val number = epObj.get("number")?.takeIf { !it.isJsonNull }?.asInt ?: 1
+                    val epName = epObj.get("name")?.takeIf { !it.isJsonNull }?.asString ?: "Episode $number"
+                    val runtime = epObj.get("runtime")?.takeIf { !it.isJsonNull }?.asLong ?: 45L
+                    val imgObj = epObj.getAsJsonObject("image")
+                    val thumb = imgObj?.get("original")?.takeIf { !it.isJsonNull }?.asString 
+                        ?: imgObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val summaryRaw = epObj.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val synopsis = cleanHtml(summaryRaw)
+
+                    map[Pair(season, number)] = EpisodeOnlineMeta(
+                        officialTitle = epName,
+                        durationMinutes = runtime,
+                        synopsis = synopsis,
+                        thumbnailUrl = thumb,
+                        seasonNumber = season,
+                        episodeNumber = number
+                    )
+                }
+                println("[DesktopOnlineMetadataResolver] Bulk-indexed ${map.size} official episodes from TVMaze (Show ID: $tvMazeShowId).")
+            }
+        } catch (e: Exception) {
+            System.err.println("[DesktopOnlineMetadataResolver] Failed bulk episode fetch for show $tvMazeShowId: ${e.message}")
+        }
+
+        showEpisodesCache[tvMazeShowId] = map
+        map
+    }
+
+    /**
+     * Aggressively scrubs torrent/scene tags from raw filenames so ugly tags NEVER appear on screen.
+     */
+    fun cleanEpisodeFallbackTitle(rawFileName: String, episodeNumber: Int, seriesTitle: String): String {
+        var text = rawFileName.substringBeforeLast('.')
+
+        val garbagePatterns = listOf(
+            "(?i)\\b(2160p|1080p|720p|480p|4K|UHD|FHD|WEB-?DL|WEBRip|BluRay|BRRip|HDR|DV|IMAX)\\b",
+            "(?i)\\b(x264|x265|HEVC|AVC|10bit|8bit|AAC|AC3|EAC3|DDP?5\\.1|Atmos|DTS)\\b",
+            "(?i)\\b(Hindi|English|Tamil|Telugu|Dual\\s*Audio|Multi\\s*Audio|ESubs?|Sub|Dubbed)\\b",
+            "(?i)\\b(MoviesMod|MoviesVerse|VegaMovies|Pahe|YTS|YIFY|PSA|GalaxyTV|KatmovieHD|MkvCinemas)\\b",
+            "(?i)\\[[^\\]]*\\]", "(?i)\\([^\\)]*\\)",
+            "(?i)\\bS\\d{1,2}\\s*E\\d{1,3}\\b", "(?i)\\b\\d{1,2}x\\d{1,3}\\b", "(?i)\\bEpisode\\s*\\d+\\b", "(?i)\\bEp\\s*\\d+\\b"
+        )
+
+        for (pattern in garbagePatterns) {
+            text = text.replace(Regex(pattern), "")
+        }
+
+        // Remove the series title if repeated in filename
+        if (seriesTitle.isNotBlank()) {
+            text = text.replace(Regex("(?i)" + Pattern.quote(seriesTitle)), "")
+        }
+
+        text = text.replace('.', ' ')
+            .replace('_', ' ')
+            .replace('-', ' ')
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        // If nothing clean is left, return "Episode X"
+        return if (text.isBlank() || text.length <= 1) {
+            "Episode $episodeNumber"
+        } else {
+            text
+        }
+    }
+
+    /**
+     * Resolves authentic episode title, duration, synopsis, and poster artwork from TVMaze.
+     */
+    suspend fun resolveEpisode(
+        seriesTitle: String = "",
+        tvMazeId: Long = -1L,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        rawFileName: String,
+        tvMazeSeriesId: Long = tvMazeId,
+        seriesName: String = seriesTitle
+    ): EpisodeOnlineMeta = withContext(Dispatchers.IO) {
+        val effectiveShowId = if (tvMazeId > 0L) tvMazeId else tvMazeSeriesId
+        val cacheKey = "$effectiveShowId:S${seasonNumber}E${episodeNumber}"
+        episodeCache[cacheKey]?.let { return@withContext it }
+
+        val cleanFallbackTitle = cleanEpisodeFallbackTitle(rawFileName, episodeNumber, seriesTitle.ifBlank { seriesName })
+
+        if (effectiveShowId > 0L) {
+            try {
+                val endpoint = "https://api.tvmaze.com/shows/$effectiveShowId/episodebynumber?season=$seasonNumber&number=$episodeNumber"
+                val conn = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    setRequestProperty("User-Agent", "Clotube-Desktop/1.0")
+                }
+
+                if (conn.responseCode in 200..299) {
+                    val json = conn.inputStream.bufferedReader().use { it.readText() }
+                    val root = JsonParser.parseString(json).asJsonObject
+
+                    val epName = root.get("name")?.takeIf { !it.isJsonNull }?.asString ?: cleanFallbackTitle
+                    val runtime = root.get("runtime")?.takeIf { !it.isJsonNull }?.asLong ?: 45L
+                    val rawSummary = root.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val synopsis = cleanHtml(rawSummary)
+
+                    val imageObj = root.getAsJsonObject("image")
+                    val thumbUrl = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString
+                        ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+
+                    val meta = EpisodeOnlineMeta(
+                        officialTitle = epName,
+                        durationMinutes = runtime,
+                        synopsis = synopsis,
+                        thumbnailUrl = thumbUrl,
+                        seasonNumber = seasonNumber,
+                        episodeNumber = episodeNumber
+                    )
+                    episodeCache[cacheKey] = meta
+                    return@withContext meta
+                }
+            } catch (e: Exception) {
+                System.err.println("[DesktopOnlineMetadataResolver] Failed to resolve episode S${seasonNumber}E${episodeNumber}: ${e.message}")
+            }
+        }
+
+        val fallback = EpisodeOnlineMeta(
+            officialTitle = cleanFallbackTitle,
+            durationMinutes = 45L,
+            synopsis = "",
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber
+        )
+        episodeCache[cacheKey] = fallback
+        fallback
+    }
+
+    private fun cleanEpisodeFileName(fileName: String, episodeNumber: Int): String {
+        return cleanEpisodeFallbackTitle(fileName, episodeNumber, "")
+    }
+
+    fun cleanSeriesTitle(raw: String): String = cleanSeriesQuery(raw)
+
+    fun cleanEpisodeTitleFromFileName(rawFileName: String, seasonNumber: Int, episodeNumber: Int): String {
+        return cleanEpisodeFallbackTitle(rawFileName, episodeNumber, "")
+    }
+
+    private fun fallbackSeries(rawTitle: String) = SeriesOnlineMeta(
+        officialTitle = cleanSeriesQuery(rawTitle).ifBlank { rawTitle },
+        tvMazeId = -1L,
+        posterUrl = "",
+        backdropUrl = "",
+        releaseYear = "2024",
+        genres = "TV Series",
+        synopsis = "Streamed directly from your private Google Drive collection."
+    )
 
     fun parseSeasonAndEpisodeNumbers(fileName: String): Pair<Int, Int>? {
         val pattern = Pattern.compile("(?i)s(\\d{1,2})e(\\d{1,2})")
@@ -739,35 +929,23 @@ object DesktopOnlineMetadataResolver {
 
     /**
      * Extracts the integer season number from a season folder name.
-     * Handles patterns such as: "Season 1", "Season 02", "S1", "S03", "Season - 2", "Series 1".
-     * Returns 1 if no number is found.
+     * Handles patterns: "Season 1", "Season 02", "S1", "S03", "Season - 2", "Series 2", "Specials" (0).
      */
     fun parseSeasonNumberFromFolder(folderName: String): Int {
         val clean = folderName.trim()
-        if (clean.isBlank()) return 1
-
-        // 1. Matches "Season 1", "Season 02", "Series 1", "Season - 2", "Season_02", etc.
-        val seasonKeywordPattern = Regex("(?i)\\b(?:season|series|staffel|saison)\\s*[-_.]*\\s*(\\d{1,3})\\b")
-        seasonKeywordPattern.find(clean)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        if (clean.contains("special", ignoreCase = true) || clean.contains("extra", ignoreCase = true)) {
+            return 0
         }
 
-        // 2. Matches "S1", "S02", "S03", "S-02", "S 2", "s1"
-        val sPattern = Regex("(?i)\\bS\\s*[-_.]*\\s*(\\d{1,3})\\b")
-        sPattern.find(clean)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        val pattern = java.util.regex.Pattern.compile("""(?i)(?:season|series|s)[\s._-]*(\d{1,2})""")
+        val matcher = pattern.matcher(clean)
+        if (matcher.find()) {
+            return matcher.group(1).toIntOrNull() ?: 1
         }
 
-        // 3. Standalone pure number folder: "1", "01", "02"
-        val pureNumberPattern = Regex("^\\s*0*(\\d{1,3})\\s*$")
-        pureNumberPattern.find(clean)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
-        }
-
-        // 4. Any standalone 1-2 digit number that is not a 4-digit year
-        val anyNumberPattern = Regex("(?<!\\d)(?!19\\d{2}|20\\d{2})0*([1-9]\\d?)(?!\\d)")
-        anyNumberPattern.find(clean)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        val standaloneDigits = java.util.regex.Pattern.compile("""\b\d{1,2}\b""").matcher(clean)
+        if (standaloneDigits.find()) {
+            return standaloneDigits.group().toIntOrNull() ?: 1
         }
 
         return 1
@@ -775,80 +953,48 @@ object DesktopOnlineMetadataResolver {
 
     /**
      * Extracts the episode number from an episode video filename.
-     * Context-aware: accepts the inferred [seasonNumber] from the parent folder.
-     * Matches patterns:
-     *   1. S01E05 / s1e5
-     *   2. 1x05 / 01x05
-     *   3. Episode 05 / Ep 5 / Ep.05
-     *   4. Standalone leading or trailing numbers: "01 - Pilot.mkv", "01.mkv", "Pilot - 01.mp4"
-     * Strips codec tags (1080p, x264, HEVC, AAC, etc.) before matching so resolutions are not mistaken for episode numbers.
+     * Handles patterns:
+     * - S01E05 / s1e5
+     * - 1x05 / 01x05
+     * - Episode 05 / Ep 5 / Ep.05
+     * - Leading/trailing numbers: "01 - Pilot.mkv", "01.mkv", "Pilot - 05.mp4"
      */
     fun parseEpisodeNumberFromFileName(fileName: String, seasonNumber: Int = 1): Int {
-        var text = fileName.substringBeforeLast('.').trim()
-
-        // Strip codec tags, resolutions, and typical container audio/video indicators
-        val codecStripPattern = Regex(
-            "(?i)\\b(" +
-            "2160p|1080p|1080i|720p|480p|360p|4k|uhd|fhd|hdtv|hdr\\d*|dovi|dv|" +
-            "bluray|blu-ray|brrip|bdrip|dvdrip|dvd|hdrip|web[-_]?dl|web[-_]?rip|webri|web|" +
-            "imax|remux|untouched|proper|repack|extended|unrated|" +
-            "x264|x265|h\\.?264|h\\.?265|hevc|avc|10bit|8bit|" +
-            "aac\\d*|ddp?\\d*|dd\\d*|ac3|eac3|dts[-_]?hd|dts|truehd|atmos|mp3|flac|opus|" +
-            "5\\.1ch|2\\.0ch|5\\.1|7\\.1|" +
-            "dual[-_\\s]*audio|multi[-_\\s]*audio|esubs?|msubs?|subbed|subs?" +
-            ")\\b"
+        val nameWithoutExt = fileName.substringBeforeLast('.')
+        // Strip out common resolution and codec noise tags
+        val stripped = nameWithoutExt.replace(
+            Regex("""(?i)\b(2160p|1080p|720p|480p|x264|x265|hevc|web-dl|bluray|aac|ac3|dts|remux|h264|hdr|uhd)\b"""),
+            ""
         )
-        text = text.replace(codecStripPattern, " ")
-        text = text.replace(Regex("\\[[^\\]]*\\]"), " ")
 
-        // 1. S01E05 / s1e5 / S1E5
-        val sPattern = Regex("(?i)\\bS\\s*\\d{1,2}\\s*[-_.]*\\s*E\\s*0*(\\d{1,3})\\b")
-        sPattern.find(text)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        // 1. Check for standard SxxExx or s1e01
+        val seMatch = Regex("""(?i)s\d{1,2}[\s._-]*e(\d{1,3})""").find(stripped)
+        if (seMatch != null) {
+            return seMatch.groupValues[1].toIntOrNull() ?: 1
         }
 
-        // 2. 1x05 / 01x05
-        val xPattern = Regex("(?i)\\b\\d{1,2}\\s*x\\s*0*(\\d{1,3})\\b")
-        xPattern.find(text)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        // 2. Check for 1x05 or 01x05
+        val crossMatch = Regex("""(?i)\b\d{1,2}x(\d{1,3})\b""").find(stripped)
+        if (crossMatch != null) {
+            return crossMatch.groupValues[1].toIntOrNull() ?: 1
         }
 
-        // 3. Episode 05 / Ep 5 / Ep.05 / Ep_05 / E05
-        val epPattern = Regex("(?i)\\b(?:episode|ep|e)\\s*[-_.:#]?\\s*0*(\\d{1,3})\\b")
-        epPattern.find(text)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        // 3. Check for "Episode 05", "Ep 05", "EP.05"
+        val epWordMatch = Regex("""(?i)\b(?:episode|ep|e)[\s._-]*(\d{1,3})\b""").find(stripped)
+        if (epWordMatch != null) {
+            return epWordMatch.groupValues[1].toIntOrNull() ?: 1
         }
 
-        // Context-aware: If seasonNumber is provided, strip explicit references to that season (e.g., S01, Season 1)
-        // so that the season number itself is not mistaken for a standalone episode number
-        var contextText = text
-        if (seasonNumber > 0) {
-            val seasonPattern = Regex("(?i)\\b(?:season|series|s)\\s*[-_.]*\\s*0*$seasonNumber\\b")
-            contextText = contextText.replace(seasonPattern, " ")
-
-            // Handle [Season]-[Episode] or [Season].[Episode] like "1-05" or "01 - 05 - Pilot"
-            val seasonEpPrefix = Regex("(?i)(?:^|[-_\\s])0*$seasonNumber\\s*[-_.]\\s*0*(\\d{1,3})(?:[-_\\s]|$)")
-            seasonEpPrefix.find(text)?.let { match ->
-                match.groupValues[1].toIntOrNull()?.let { return it }
-            }
+        // 4. Check for leading track/episode number like "01 - Pilot" or "01. Pilot"
+        val leadingMatch = Regex("""^\s*(\d{1,3})\s*[-._\s]""").find(stripped)
+        if (leadingMatch != null) {
+            return leadingMatch.groupValues[1].toIntOrNull() ?: 1
         }
 
-        // 4a. Standalone leading numbers: "01 - Pilot.mkv", "01.mkv", "05 - Title"
-        val leadingNumPattern = Regex("^\\s*0*(\\d{1,3})(?:\\s*[-–—._\\s]+|$)")
-        leadingNumPattern.find(contextText)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
-        }
-
-        // 4b. Standalone trailing numbers: "Pilot - 01.mp4", "Pilot 01"
-        val trailingNumPattern = Regex("(?:[-–—._\\s]+|^)0*(\\d{1,3})\\s*$")
-        trailingNumPattern.find(contextText)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
-        }
-
-        // 4c. Number delimited by separators (e.g. "Series Name - 05 - Pilot") excluding 4-digit years
-        val delimitedNumPattern = Regex("(?<!\\d)(?!19\\d{2}|20\\d{2})0*([1-9]\\d{0,2})(?!\\d)")
-        delimitedNumPattern.find(contextText)?.let { match ->
-            match.groupValues[1].toIntOrNull()?.let { return it }
+        // 5. Check for trailing episode number like "Pilot - 01"
+        val trailingMatch = Regex("""[-._\s](\d{1,3})\s*$""").find(stripped)
+        if (trailingMatch != null) {
+            return trailingMatch.groupValues[1].toIntOrNull() ?: 1
         }
 
         return 1

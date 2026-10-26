@@ -46,7 +46,7 @@ object DesktopAuthManager {
     private val gson = Gson()
 
     private val SCOPES = listOf(
-        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive",
         "openid",
         "email",
         "profile"
