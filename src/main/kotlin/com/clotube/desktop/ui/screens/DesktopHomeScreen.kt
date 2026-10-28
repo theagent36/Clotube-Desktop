@@ -1306,8 +1306,9 @@ private fun FigmaHomeContent(
 ) {
     val scrollState = rememberScrollState()
 
+    // Keyed on watchHistoryRevision so returning from player immediately reflects new progress!
     val continueWatchingItems = remember(userEmail, movies, series, watchHistoryRevision) {
-        DesktopWatchHistoryManager.getContinueWatching(userEmail, movies, series).take(5)
+        com.clotube.desktop.data.DesktopWatchHistoryManager.getContinueWatching(userEmail, movies, series)
     }
 
     // Combine all indexed movies and series for the hero billboard slideshow pool

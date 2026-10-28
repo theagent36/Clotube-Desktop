@@ -443,6 +443,7 @@ fun DesktopMoviePlayerScreen(
                                 modifier = Modifier
                                     .size(38.dp)
                                     .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                    .pointerHoverIcon(PointerIcon.Hand)
                             ) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Exit Fullscreen", tint = Color.White)
                             }
@@ -539,6 +540,7 @@ fun DesktopMoviePlayerScreen(
                                 onBack()
                             }
                         )
+                        .pointerHoverIcon(PointerIcon.Hand)
                         .padding(bottom = 16.dp)
                 ) {
                     Icon(
@@ -793,6 +795,7 @@ fun DesktopMoviePlayerScreen(
                                                 currentPlayingMovie = movie
                                             }
                                         }
+                                        .pointerHoverIcon(PointerIcon.Hand)
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(10.dp),
@@ -1074,6 +1077,7 @@ private fun MenuOptionItem(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
+            .pointerHoverIcon(PointerIcon.Hand)
             .background(if (isSelected) Color(0xFF132238) else Color.Transparent)
             .padding(horizontal = 16.dp, vertical = 9.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1115,6 +1119,7 @@ fun SlickVolumeSlider(
         modifier = modifier
             .width(80.dp)
             .height(26.dp)
+            .pointerHoverIcon(PointerIcon.Hand)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -1303,7 +1308,9 @@ private fun BottomTransportBar(
             ) {
                 IconButton(
                     onClick = { player.togglePlayPause() },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .size(32.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -1326,7 +1333,9 @@ private fun BottomTransportBar(
                                 player.setMuted(true)
                             }
                         },
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier
+                            .size(28.dp)
+                            .pointerHoverIcon(PointerIcon.Hand)
                     ) {
                         Icon(
                             imageVector = when {
@@ -1366,7 +1375,9 @@ private fun BottomTransportBar(
                 // 1. Caption / Subtitles Button
                 IconButton(
                     onClick = { onTogglePopup(PlayerPopupType.SUBTITLES) },
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier
+                        .size(30.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ClosedCaption,
@@ -1379,7 +1390,9 @@ private fun BottomTransportBar(
                 // 2. Audio Track Button
                 IconButton(
                     onClick = { onTogglePopup(PlayerPopupType.AUDIO) },
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier
+                        .size(30.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Audiotrack,
@@ -1395,6 +1408,7 @@ private fun BottomTransportBar(
                     color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
                     modifier = Modifier
                         .clickable { onTogglePopup(PlayerPopupType.SPEED) }
+                        .pointerHoverIcon(PointerIcon.Hand)
                         .padding(horizontal = 2.dp)
                 ) {
                     Text(
@@ -1409,7 +1423,9 @@ private fun BottomTransportBar(
                 // 4. Fullscreen Toggle
                 IconButton(
                     onClick = onToggleFullscreen,
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier
+                        .size(30.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,

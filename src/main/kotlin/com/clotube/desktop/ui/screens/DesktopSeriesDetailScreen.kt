@@ -41,13 +41,16 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 @Composable
 fun DesktopSeriesDetailScreen(
     seriesItem: DesktopMediaItem,
     accessToken: String,
-    userEmail: String,
+    userEmail: String = "",
     initialEpisodeId: String? = null,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
@@ -198,8 +201,52 @@ fun DesktopSeriesDetailScreen(
         if (activeStreamUrl.isNotBlank()) DirectMemoryVideoPlayer(activeStreamUrl) else null
     }
 
+    val activeEpisode = playingEpisode
+
+    val saveActiveEpisodeProgress = {
+        val ep = activeEpisode
+        val p = player
+        if (ep != null && p != null && userEmail.isNotBlank()) {
+            val curPos = p.currentTimeMs
+            val totalDur = if (ep.durationMs > 0L) ep.durationMs else p.totalDurationMs
+            if (curPos > 0L) {
+                coroutineScope.launch(Dispatchers.IO) {
+                    com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
+                        email = userEmail,
+                        fileId = ep.id,
+                        title = ep.title,
+                        positionMs = curPos,
+                        durationMs = totalDur,
+                        isSeries = true,
+                        seriesId = seriesItem.id,
+                        seasonNumber = ep.seasonNumber,
+                        episodeNumber = ep.episodeNumber
+                    )
+                    com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                }
+            }
+        }
+    }
+
+    // Periodic Progress Recorder (Records every 5 seconds during active series playback)
+    LaunchedEffect(player?.isPlaying, activeEpisode?.id, userEmail) {
+        if (player?.isPlaying == true && activeEpisode != null && userEmail.isNotBlank()) {
+            while (isActive) {
+                delay(5000L)
+                saveActiveEpisodeProgress()
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            saveActiveEpisodeProgress()
+        }
+    }
+
     DisposableEffect(player) {
         onDispose {
+            saveActiveEpisodeProgress()
             player?.release()
         }
     }
@@ -263,9 +310,13 @@ fun DesktopSeriesDetailScreen(
             },
             isFullscreen = true,
             onToggleFullscreen = onToggleFullscreen,
-            onNavigateBack = { onToggleFullscreen() },
+            onNavigateBack = {
+                saveActiveEpisodeProgress()
+                onToggleFullscreen()
+            },
             onNextEpisode = if (hasNextGlobal && nextEpisode != null) {
                 {
+                    saveActiveEpisodeProgress()
                     playingEpisode?.let { currentEp ->
                         watchedEpisodeIds = watchedEpisodeIds + currentEp.id
                         coroutineScope.launch {
@@ -303,6 +354,7 @@ fun DesktopSeriesDetailScreen(
             } else null,
             onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
                 {
+                    saveActiveEpisodeProgress()
                     resumedEpisodeId = null // Allow prev episode to resume
                     playingEpisode = prevEpisode
                     if (browsingSeasonNumber != prevEpisode.seasonNumber) {
@@ -329,7 +381,10 @@ fun DesktopSeriesDetailScreen(
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
-                    .clickable { onBack() }
+                    .clickable {
+                        saveActiveEpisodeProgress()
+                        onBack()
+                    }
                     .pointerHoverIcon(PointerIcon.Hand)
                     .padding(vertical = 4.dp, horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -501,9 +556,13 @@ fun DesktopSeriesDetailScreen(
                                 },
                                 isFullscreen = false,
                                 onToggleFullscreen = onToggleFullscreen,
-                                onNavigateBack = onBack,
+                                onNavigateBack = {
+                                    saveActiveEpisodeProgress()
+                                    onBack()
+                                },
                                 onNextEpisode = if (hasNextGlobal && nextEpisode != null) {
                                     {
+                                        saveActiveEpisodeProgress()
                                         playingEpisode?.let { currentEp ->
                                             watchedEpisodeIds = watchedEpisodeIds + currentEp.id
                                             coroutineScope.launch {
@@ -541,6 +600,7 @@ fun DesktopSeriesDetailScreen(
                                 } else null,
                                 onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
                                     {
+                                        saveActiveEpisodeProgress()
                                         resumedEpisodeId = null
                                         playingEpisode = prevEpisode
                                         if (browsingSeasonNumber != prevEpisode.seasonNumber) {
@@ -782,8 +842,11 @@ fun DesktopSeriesDetailScreen(
                                     isPlayerPlaying = player?.isPlaying == true,
                                     isWatched = isWatched,
                                     onSelectEpisode = {
-                                        resumedEpisodeId = null
-                                        playingEpisode = ep
+                                        if (activeEpisode?.id != ep.id) {
+                                            saveActiveEpisodeProgress()
+                                            resumedEpisodeId = null
+                                            playingEpisode = ep
+                                        }
                                     },
                                     onToggleWatched = {
                                         val markWatched = !isWatched

@@ -458,23 +458,29 @@ object DesktopWatchHistoryManager {
 
             val epTitle = targetEp?.title ?: local["${epId}_title"]?.value as? String ?: "Episode $eNum"
             val epThumb = targetEp?.thumbnailUrl ?: s.thumbnailUrl
-            val effectiveDur = if (dur > 0L) dur else targetEp?.durationMs ?: 0L
-            val fraction = if (effectiveDur > 0L) (pos.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f) else 0f
+            // Resilient duration calculation: prevent 0L division from dropping items
+            val effectiveDur = when {
+                dur > 0L -> dur
+                (targetEp?.durationMs ?: 0L) > 0L -> targetEp!!.durationMs
+                else -> 45L * 60000L // 45 minute standard fallback
+            }
+            val fraction = (pos.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f)
 
             val code = "S${sNum}E${eNum}"
             val subtitle = if (epTitle.isNotBlank()) "$code • $epTitle" else code
 
-            if (ts > 0L && (fraction in 0.01f..0.95f || (pos == 0L && fraction == 0f))) {
+            // Surface any watched episode with positive timestamp that hasn't finished (>95%)
+            if (ts > 0L && (fraction in 0.005f..0.95f || pos >= 5000L)) {
                 items.add(
                     DesktopContinueWatchingItem(
                         mediaId = epId,
                         title = s.title,
                         subtitle = subtitle,
-                        thumbnailUrl = epThumb?.ifBlank { s.thumbnailUrl } ?: s.thumbnailUrl ?: "",
+                        thumbnailUrl = (epThumb?.ifBlank { s.thumbnailUrl } ?: s.thumbnailUrl).orEmpty(),
                         fallbackThumbnailUrl = s.fallbackThumbnailUrl ?: "",
                         positionMs = pos,
                         durationMs = effectiveDur,
-                        progressFraction = if (pos > 0L) fraction.coerceIn(0.04f, 1f) else 0.02f,
+                        progressFraction = fraction.coerceIn(0.04f, 1f),
                         isSeries = true,
                         seriesId = s.id,
                         seasonNumber = sNum,

@@ -23,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeMute
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -566,50 +567,156 @@ private fun DesktopSeriesPlayerContent(
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 54.dp)
         )
 
-        // Settings Popup Overlay
-        SeriesInPlayerSettingsPopup(
-            activePopup = activePopup,
-            player = player,
-            currentSubtitleId = currentSubtitleId,
-            currentAudioId = currentAudioId,
-            currentSpeed = currentSpeed,
-            onSelectSubtitle = { trackId, trackTitle ->
-                val isOff = trackId == -1 || trackTitle.equals("Off", ignoreCase = true)
-                player.setSubtitleTrack(trackId, trackTitle, isOff)
-                currentSubtitleId = trackId
-                activePopup = SeriesPlayerPopupType.NONE
-            },
-            onSelectAudio = { trackId, trackTitle ->
-                player.setAudioTrack(trackId, trackTitle)
-                currentAudioId = trackId
-                activePopup = SeriesPlayerPopupType.NONE
-            },
-            onSelectSpeed = { speed ->
-                currentSpeed = speed
-                player.mediaPlayer.controls().setRate(speed)
-                activePopup = SeriesPlayerPopupType.NONE
-            },
-            onDismiss = { activePopup = SeriesPlayerPopupType.NONE },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(bottom = 74.dp, end = 24.dp)
-        )
+        // ========================================================
+        // LAYER 2: CINEMATIC VIGNETTE SCRIM (BEHIND CONTROLS & POPUPS)
+        // ========================================================
+        AnimatedVisibility(
+            visible = controlsVisible || isScrubbing,
+            enter = fadeIn(tween(250)),
+            exit = fadeOut(tween(250)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colorStops = arrayOf(
+                                0.0f to Color.Black.copy(alpha = 0.80f),
+                                0.15f to Color.Black.copy(alpha = 0.45f),
+                                0.30f to Color.Transparent,
+                                0.65f to Color.Transparent,
+                                0.82f to Color.Black.copy(alpha = 0.55f),
+                                1.0f to Color.Black.copy(alpha = 0.90f)
+                            )
+                        )
+                    )
+            )
+        }
 
-        // Floating "Up Next" Auto-Play Countdown Card
+        // ========================================================
+        // LAYER 3: CONTROLS HUD (TOP BAR & BOTTOM TRANSPORT BAR)
+        // ========================================================
+        AnimatedVisibility(
+            visible = controlsVisible || isScrubbing,
+            enter = fadeIn(tween(200)),
+            exit = fadeOut(tween(200)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                // Top Cinema Header (Back Arrow & Title)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 20.dp)
+                        .align(Alignment.TopCenter),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = {
+                            if (isFullscreen) onToggleFullscreen() else onNavigateBack()
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .pointerHoverIcon(PointerIcon.Hand)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(
+                            text = seriesTitle,
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val epNumberText = "S%02dE%02d".format(seasonNumber, episodeNumber)
+                        val subline = if (episodeTitle.isNotBlank()) "$epNumberText • $episodeTitle" else epNumberText
+                        Text(
+                            text = subline,
+                            color = Color(0xFF42A5F5),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                // Bottom Transport HUD
+                SeriesBottomTransportBar(
+                    player = player,
+                    activeFraction = activeFraction,
+                    displayTimeMs = displayTimeMs,
+                    isScrubbing = isScrubbing,
+                    isFullscreen = isFullscreen,
+                    currentSpeed = currentSpeed,
+                    activePopup = activePopup,
+                    onPreviousEpisode = onPreviousEpisode,
+                    onNextEpisode = onNextEpisode,
+                    hasPreviousEpisode = hasPreviousEpisode,
+                    hasNextEpisode = hasNextEpisode,
+                    onTogglePopup = { popup ->
+                        if (activePopup != popup && popup != SeriesPlayerPopupType.NONE) {
+                            currentSubtitleId = player.getActiveSubtitleTrackId()
+                            currentAudioId = player.getActiveAudioTrackId()
+                        }
+                        activePopup = if (activePopup == popup) SeriesPlayerPopupType.NONE else popup
+                    },
+                    onScrubStart = { frac ->
+                        isScrubbing = true
+                        scrubFraction = frac
+                    },
+                    onScrubbing = { frac ->
+                        scrubFraction = frac
+                    },
+                    onScrubEnd = { frac ->
+                        val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                        val target = (frac * totalDur).toLong()
+                        optimisticSeekMs = target
+                        player.seekToTime(target)
+                        isScrubbing = false
+                        if (target > 0L) {
+                            onProgressUpdate?.invoke(target)
+                        }
+                    },
+                    onToggleFullscreen = onToggleFullscreen,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 16.dp)
+                        .align(Alignment.BottomCenter)
+                )
+            }
+        }
+
+        // ========================================================
+        // LAYER 4: FLOATING NEXT EPISODE PROMPT (ABOVE VIGNETTE)
+        // ========================================================
         AnimatedVisibility(
             visible = shouldShowAutoPlayPrompt,
             enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
             exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(bottom = 84.dp, end = 24.dp)
+                .padding(bottom = 76.dp, end = 24.dp)
         ) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
-                color = Color(0xF20F1522),
-                border = BorderStroke(1.dp, Color(0xFF263346)),
+                color = Color(0xFF121B2B), // Solid, fully opaque
+                border = BorderStroke(1.dp, Color(0xFF2563EB)),
                 elevation = 16.dp,
-                modifier = Modifier.widthIn(min = 280.dp, max = 320.dp)
+                modifier = Modifier
+                    .shadow(16.dp, RoundedCornerShape(12.dp))
+                    .widthIn(min = 280.dp, max = 320.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     // Header: Status + Dismiss 'X'
@@ -696,118 +803,49 @@ private fun DesktopSeriesPlayerContent(
             }
         }
 
-        // HUD Transport Overlay
-        AnimatedVisibility(
-            visible = controlsVisible || isScrubbing,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.fillMaxSize()
-        ) {
+        // ========================================================
+        // LAYER 5: POPUPS OVERLAY (HIGHEST Z-INDEX — NEVER DARKENED)
+        // ========================================================
+        if (activePopup != SeriesPlayerPopupType.NONE) {
+            // Invisible touch barrier to dismiss popup when clicking outside
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(
-                                Color.Black.copy(alpha = 0.75f),
-                                Color.Transparent,
-                                Color.Transparent,
-                                Color.Black.copy(alpha = 0.88f)
-                            )
-                        )
-                    )
-            ) {
-                // Top Header Bar
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 20.dp)
-                        .align(Alignment.TopCenter),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = {
-                            if (isFullscreen) onToggleFullscreen() else onNavigateBack()
-                        },
-                        modifier = Modifier
-                            .size(38.dp)
-                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(14.dp))
-                    Column {
-                        Text(
-                            text = seriesTitle,
-                            color = Color.White,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val epNumberText = "S%02dE%02d".format(seasonNumber, episodeNumber)
-                        val subline = if (episodeTitle.isNotBlank()) "$epNumberText • $episodeTitle" else epNumberText
-                        Text(
-                            text = subline,
-                            color = Color(0xFF42A5F5),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                // Bottom Transport HUD
-                SeriesBottomTransportBar(
-                    player = player,
-                    activeFraction = activeFraction,
-                    displayTimeMs = displayTimeMs,
-                    isScrubbing = isScrubbing,
-                    isFullscreen = isFullscreen,
-                    currentSpeed = currentSpeed,
-                    activePopup = activePopup,
-                    onPreviousEpisode = onPreviousEpisode,
-                    onNextEpisode = onNextEpisode,
-                    hasPreviousEpisode = hasPreviousEpisode,
-                    hasNextEpisode = hasNextEpisode,
-                    onTogglePopup = { popup ->
-                        if (activePopup != popup && popup != SeriesPlayerPopupType.NONE) {
-                            currentSubtitleId = player.getActiveSubtitleTrackId()
-                            currentAudioId = player.getActiveAudioTrackId()
-                        }
-                        activePopup = if (activePopup == popup) SeriesPlayerPopupType.NONE else popup
-                    },
-                    onScrubStart = { frac ->
-                        isScrubbing = true
-                        scrubFraction = frac
-                    },
-                    onScrubbing = { frac ->
-                        scrubFraction = frac
-                    },
-                    onScrubEnd = { frac ->
-                        val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                        val target = (frac * totalDur).toLong()
-                        optimisticSeekMs = target
-                        player.seekToTime(target)
-                        isScrubbing = false
-                        if (target > 0L) {
-                            onProgressUpdate?.invoke(target)
-                        }
-                    },
-                    onToggleFullscreen = onToggleFullscreen,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 16.dp)
-                        .align(Alignment.BottomCenter)
-                )
-            }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { activePopup = SeriesPlayerPopupType.NONE }
+            )
         }
+
+        // Settings Popup Overlay
+        SeriesInPlayerSettingsPopup(
+            activePopup = activePopup,
+            player = player,
+            currentSubtitleId = currentSubtitleId,
+            currentAudioId = currentAudioId,
+            currentSpeed = currentSpeed,
+            onSelectSubtitle = { trackId, trackTitle ->
+                val isOff = trackId == -1 || trackTitle.equals("Off", ignoreCase = true)
+                player.setSubtitleTrack(trackId, trackTitle, isOff)
+                currentSubtitleId = trackId
+                activePopup = SeriesPlayerPopupType.NONE
+            },
+            onSelectAudio = { trackId, trackTitle ->
+                player.setAudioTrack(trackId, trackTitle)
+                currentAudioId = trackId
+                activePopup = SeriesPlayerPopupType.NONE
+            },
+            onSelectSpeed = { speed ->
+                currentSpeed = speed
+                player.mediaPlayer.controls().setRate(speed)
+                activePopup = SeriesPlayerPopupType.NONE
+            },
+            onDismiss = { activePopup = SeriesPlayerPopupType.NONE },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(bottom = 74.dp, end = 20.dp)
+        )
     }
 }
 
@@ -897,13 +935,14 @@ private fun SeriesInPlayerSettingsPopup(
         ) + fadeOut(animationSpec = tween(durationMillis = 150)),
         modifier = modifier
     ) {
-        Card(
+        Surface(
             shape = RoundedCornerShape(12.dp),
-            backgroundColor = Color(0xF20F1420),
-            border = BorderStroke(1.dp, Color(0xFF263248)),
+            color = Color(0xFF0F1624),
+            border = BorderStroke(1.dp, Color(0xFF26354D)),
             elevation = 16.dp,
             modifier = Modifier
-                .widthIn(min = 220.dp, max = 290.dp)
+                .widthIn(min = 220.dp, max = 320.dp)
+                .shadow(24.dp, RoundedCornerShape(12.dp))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
@@ -914,11 +953,16 @@ private fun SeriesInPlayerSettingsPopup(
                     SeriesPlayerPopupType.SUBTITLES -> {
                         Text(
                             text = "SUBTITLES",
-                            color = Color(0xFF64748B),
-                            fontSize = 10.sp,
+                            color = Color(0xFF38BDF8),
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
+                            letterSpacing = 1.2.sp,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                        Divider(
+                            color = Color(0xFF1E2838),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
 
                         SeriesMenuOptionItem(
@@ -940,11 +984,16 @@ private fun SeriesInPlayerSettingsPopup(
                     SeriesPlayerPopupType.AUDIO -> {
                         Text(
                             text = "AUDIO TRACK",
-                            color = Color(0xFF64748B),
-                            fontSize = 10.sp,
+                            color = Color(0xFF38BDF8),
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
+                            letterSpacing = 1.2.sp,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                        Divider(
+                            color = Color(0xFF1E2838),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
 
                         val audioTracks = player.getAudioTracks()
@@ -968,11 +1017,16 @@ private fun SeriesInPlayerSettingsPopup(
                     SeriesPlayerPopupType.SPEED -> {
                         Text(
                             text = "PLAYBACK SPEED",
-                            color = Color(0xFF64748B),
-                            fontSize = 10.sp,
+                            color = Color(0xFF38BDF8),
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
+                            letterSpacing = 1.2.sp,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                        Divider(
+                            color = Color(0xFF1E2838),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
 
                         listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
@@ -997,31 +1051,56 @@ private fun SeriesMenuOptionItem(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
-    Row(
+    var isHovered by remember { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = when {
+            isSelected -> Color(0xFF162032)
+            isHovered -> Color(0xFF1A2333)
+            else -> Color.Transparent
+        },
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val e = awaitPointerEvent()
+                        when (e.type) {
+                            PointerEventType.Enter -> isHovered = true
+                            PointerEventType.Exit -> isHovered = false
+                        }
+                    }
+                }
+            }
+            .pointerHoverIcon(PointerIcon.Hand)
             .clickable(onClick = onClick)
-            .background(if (isSelected) Color(0xFF132238) else Color.Transparent)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = label,
-            color = if (isSelected) Color(0xFF42A5F5) else Color.White,
-            fontSize = 13.sp,
-            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-            modifier = Modifier.weight(1f)
-        )
-        if (isSelected) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
-                text = "✓",
-                color = Color(0xFF42A5F5),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 8.dp)
+                text = label,
+                color = if (isSelected) Color.White else Color(0xFFCBD5E1),
+                fontSize = 13.sp,
+                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
+            if (isSelected) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = "Selected",
+                    tint = Color(0xFF00E5FF),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
     }
 }
@@ -1139,7 +1218,9 @@ private fun SeriesBottomTransportBar(
                 IconButton(
                     onClick = { onPreviousEpisode?.invoke() },
                     enabled = hasPreviousEpisode && onPreviousEpisode != null,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .size(32.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Default.SkipPrevious,
@@ -1151,7 +1232,9 @@ private fun SeriesBottomTransportBar(
 
                 IconButton(
                     onClick = { player.togglePlayPause() },
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier
+                        .size(34.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -1164,7 +1247,9 @@ private fun SeriesBottomTransportBar(
                 IconButton(
                     onClick = { onNextEpisode?.invoke() },
                     enabled = hasNextEpisode && onNextEpisode != null,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .size(32.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Default.SkipNext,
@@ -1187,7 +1272,9 @@ private fun SeriesBottomTransportBar(
                                 player.setMuted(true)
                             }
                         },
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier
+                            .size(28.dp)
+                            .pointerHoverIcon(PointerIcon.Hand)
                     ) {
                         Icon(
                             imageVector = when {
@@ -1224,7 +1311,9 @@ private fun SeriesBottomTransportBar(
             ) {
                 IconButton(
                     onClick = { onTogglePopup(SeriesPlayerPopupType.SUBTITLES) },
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier
+                        .size(30.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ClosedCaption,
@@ -1236,7 +1325,9 @@ private fun SeriesBottomTransportBar(
 
                 IconButton(
                     onClick = { onTogglePopup(SeriesPlayerPopupType.AUDIO) },
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier
+                        .size(30.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Audiotrack,
@@ -1251,6 +1342,7 @@ private fun SeriesBottomTransportBar(
                     color = if (activePopup == SeriesPlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
                     modifier = Modifier
                         .clickable { onTogglePopup(SeriesPlayerPopupType.SPEED) }
+                        .pointerHoverIcon(PointerIcon.Hand)
                         .padding(horizontal = 2.dp)
                 ) {
                     Text(
@@ -1264,7 +1356,9 @@ private fun SeriesBottomTransportBar(
 
                 IconButton(
                     onClick = onToggleFullscreen,
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier
+                        .size(30.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
@@ -1290,6 +1384,7 @@ private fun SeriesSlickVolumeSlider(
         modifier = Modifier
             .width(76.dp)
             .height(24.dp)
+            .pointerHoverIcon(PointerIcon.Hand)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
