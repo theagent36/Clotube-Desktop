@@ -41,24 +41,42 @@ compose.desktop {
     application {
         mainClass = "com.clotube.desktop.MainKt"
 
+        // Production JVM optimization flags for Direct3D 11 & low-latency GC
+        jvmArgs += listOf(
+            "-Xms256m",
+            "-Xmx2048m",
+            "-XX:+UseG1GC",
+            "-XX:MaxGCPauseMillis=20",
+            "-Dskiko.renderApi=DIRECT3D",
+            "-Djava.net.preferIPv4Stack=true",
+            "-Dsun.awt.noerasebackground=true"
+        )
+
         nativeDistributions {
             targetFormats(
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             packageName = "Clotube"
             packageVersion = "1.0.0"
             description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"
+            includeAllModules = true
 
             windows {
                 menuGroup = "Clotube"
-                upgradeUuid = "68c2d159-86cf-44f2-9cb7-285223ab49e0"
-                perUserInstall = true
-                dirChooser = true
-                // Embeds the multi-resolution .ico into the native .exe and installer shortcuts
-                iconFile.set(project.file("src/main/resources/app_icon.ico"))
+                perUserInstall = true             // Clean install into AppData without requiring UAC admin elevation
+                dirChooser = true                 // Permits custom destination directory selection
+                shortcut = true                   // Generates Start Menu and Desktop shortcuts
+                upgradeUuid = "a6873bc0-9c17-4f62-b924-f7b5878d65a2" // Pinned GUID for seamless atomic upgrades
+
+                // Prioritize app_icon.ico if present, falling back to ic_clotube.ico
+                val iconFileObj = if (project.file("src/main/resources/app_icon.ico").exists()) {
+                    project.file("src/main/resources/app_icon.ico")
+                } else {
+                    project.file("src/main/resources/ic_clotube.ico")
+                }
+                iconFile.set(iconFileObj)
             }
         }
     }

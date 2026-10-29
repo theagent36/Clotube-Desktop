@@ -62,7 +62,7 @@ class DirectMemoryVideoPlayer(
     var currentTimeMs by mutableLongStateOf(0L)
     var totalDurationMs by mutableLongStateOf(0L)
     var positionFraction by mutableFloatStateOf(0f)
-    var volume by mutableIntStateOf(100)
+    var volume by mutableIntStateOf(DesktopTrackPreferences.stickyVolume)
 
     var frameTick by mutableIntStateOf(0)
         private set
@@ -273,6 +273,7 @@ class DirectMemoryVideoPlayer(
     fun setVolumeLevel(vol: Int) {
         if (isReleased.get()) return
         volume = vol.coerceIn(0, 100)
+        DesktopTrackPreferences.saveVolume(volume)
         try {
             mediaPlayer.audio().setVolume(volume)
             if (volume > 0) {
