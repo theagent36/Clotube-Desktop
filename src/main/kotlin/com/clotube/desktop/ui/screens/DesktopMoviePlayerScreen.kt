@@ -48,6 +48,7 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import com.clotube.desktop.ui.components.PacedBufferingSpinner
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -387,9 +388,10 @@ fun DesktopMoviePlayerScreen(
                 }
 
                 if (!player.isFirstFrameRendered || player.isBuffering) {
-                    CircularProgressIndicator(
-                        color = Color(0xFF42A5F5),
-                        modifier = Modifier.size(52.dp).align(Alignment.Center)
+                    PacedBufferingSpinner(
+                        color = Color(0xFF00E5FF),
+                        size = 46.dp,
+                        modifier = Modifier.align(Alignment.Center)
                     )
                 }
 
@@ -613,9 +615,10 @@ fun DesktopMoviePlayerScreen(
                                 }
 
                                 if (!player.isFirstFrameRendered || player.isBuffering) {
-                                    CircularProgressIndicator(
-                                        color = Color(0xFF42A5F5),
-                                        modifier = Modifier.size(46.dp).align(Alignment.Center)
+                                    PacedBufferingSpinner(
+                                        color = Color(0xFF00E5FF),
+                                        size = 46.dp,
+                                        modifier = Modifier.align(Alignment.Center)
                                     )
                                 }
 

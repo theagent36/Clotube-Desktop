@@ -15,6 +15,7 @@ import com.sun.jna.platform.win32.WinDef.HWND
 import com.sun.jna.platform.win32.WinDef.RECT
 import com.sun.jna.platform.win32.WinUser
 import java.awt.Color as AwtColor
+import java.awt.GraphicsEnvironment
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
 
@@ -35,6 +36,20 @@ private const val SW_RESTORE = 9
 private fun User32.IsZoomed(hwnd: HWND): Boolean {
     val currentStyle = GetWindowLong(hwnd, GWL_STYLE)
     return (currentStyle and WS_MAXIMIZE) != 0
+}
+
+/**
+ * Probes the active monitor's physical refresh rate in Hz (e.g. 60, 120, 144, 165).
+ * Automatically reflects changes if the user switches to battery (60 Hz) or plugs into AC (144/165 Hz).
+ */
+fun getActiveDisplayRefreshRate(): Int {
+    return try {
+        val ge = GraphicsEnvironment.getLocalGraphicsEnvironment()
+        val rate = ge.defaultScreenDevice.displayMode.refreshRate
+        if (rate in 30..360) rate else 60
+    } catch (_: Throwable) {
+        60
+    }
 }
 
 fun main() = application {
@@ -61,11 +76,16 @@ fun main() = application {
 
     LocalStreamServer.start()
 
-    val windowState = rememberWindowState(placement = WindowPlacement.Maximized, width = 1280.dp, height = 820.dp)
+    val windowState = rememberWindowState(
+        placement = WindowPlacement.Maximized,
+        width = 1280.dp,
+        height = 820.dp
+    )
     var isFullscreenActive by remember { mutableStateOf(false) }
 
     var wasMaximizedBeforeFullscreen by remember { mutableStateOf(true) }
     var hasEverEnteredFullscreen by remember { mutableStateOf(false) }
+
     val savedFloatingRect = remember { RECT() }
 
     Window(
@@ -86,7 +106,7 @@ fun main() = application {
             window.rootPane.background = AwtColor.BLACK
         }
 
-        // Win32 Borderless Fullscreen Engine (Preserves Maximized State & Prevents Window Shrinking)
+        // Win32 Borderless Fullscreen Engine (Keeps native Direct3D swapchain alive & preserves Maximized state)
         LaunchedEffect(isFullscreenActive) {
             if (!isFullscreenActive && !hasEverEnteredFullscreen) {
                 return@LaunchedEffect

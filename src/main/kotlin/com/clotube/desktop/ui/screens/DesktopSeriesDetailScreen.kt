@@ -41,6 +41,7 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.ui.components.PacedBufferingSpinner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -167,10 +168,9 @@ fun DesktopSeriesDetailScreen(
             modifier = modifier.fillMaxSize().background(Color(0xFF07090E)),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(
+            PacedBufferingSpinner(
                 color = Color(0xFF00E5FF),
-                strokeWidth = 3.5.dp,
-                modifier = Modifier.size(46.dp)
+                size = 46.dp
             )
         }
         return
@@ -614,10 +614,9 @@ fun DesktopSeriesDetailScreen(
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(
+                                PacedBufferingSpinner(
                                     color = Color(0xFF00E5FF),
-                                    strokeWidth = 3.5.dp,
-                                    modifier = Modifier.size(46.dp)
+                                    size = 46.dp
                                 )
                             }
                         }

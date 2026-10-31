@@ -29,6 +29,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -216,7 +218,7 @@ fun DesktopHomeScreen(
     }
 
     val isAnyPlayerActive = selectedMovieForPlayer != null || selectedSeriesForDetail != null
-    val hideNavigation = effectiveFullscreen && isAnyPlayerActive
+    val hideNavigation = effectiveFullscreen
 
     Row(
         modifier = modifier
@@ -2807,71 +2809,306 @@ private fun RecentHistoryItemCard(
     }
 }
 
-@OptIn(ExperimentalAnimationApi::class)
 @Composable
-private fun FigmaHeroSlideshowBanner(
-    items: List<DesktopMediaItem>,
+private fun HeroSlideCardContent(
+    item: DesktopMediaItem,
     seriesList: List<DesktopMediaItem>,
-    userEmail: String = "",
-    accessToken: String = "",
     onMovieClick: (DesktopMediaItem) -> Unit,
     onSeriesClick: (DesktopMediaItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    userEmail: String = "",
+    accessToken: String = ""
+) {
+    val isSeries = remember(item.id, seriesList) {
+        seriesList.any { it.id == item.id }
+    }
+    val backdrop = rememberThumbnailBitmap(
+        primaryUrl = item.thumbnailUrl,
+        fallbackUrl = item.fallbackThumbnailUrl,
+        accessToken = accessToken,
+        userEmail = userEmail,
+        size = ThumbnailSize.HERO
+    )
+
+    Box(modifier = modifier) {
+        // Poster Artwork
+        if (backdrop != null) {
+            Image(
+                bitmap = backdrop,
+                contentDescription = item.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF161E2E), Color(0xFF090D14))
+                        )
+                    )
+            )
+        }
+
+        // Cinema Vignette Gradients
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            Color(0xF8080B11),
+                            Color(0xEE080B11),
+                            Color(0xB3080B11),
+                            Color(0x4D080B11),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color(0x66080B11),
+                            Color(0xE607090E)
+                        )
+                    )
+                )
+        )
+
+        // Metadata Details Column
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(horizontal = 36.dp, vertical = 28.dp)
+                .widthIn(max = 620.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(12.dp)
+                        .background(Color(0xFF42A5F5))
+                )
+                Text(
+                    text = if (isSeries) "FEATURED SERIES IN YOUR DRIVE" else "FEATURED IN YOUR DRIVE",
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.5.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = item.title.uppercase(),
+                color = Color.White,
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 0.5.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (item.durationMs > 0L) {
+                    Text(
+                        text = formatDuration(item.durationMs),
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(text = "•", color = Color(0xFF64748B), fontSize = 13.sp)
+                }
+
+                Text(
+                    text = item.genre.ifBlank { if (isSeries) "TV Series • Drama" else "Action • Drama" },
+                    color = Color(0xFF42A5F5),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val genreTokens = remember(item.genre) {
+                item.genre.split("•", ",")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() && !it.equals("Movie", ignoreCase = true) }
+            }
+
+            if (genreTokens.isNotEmpty()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    genreTokens.take(4).forEach { genreTag ->
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0x99131D2D),
+                            border = BorderStroke(1.dp, Color(0x661E3A5F))
+                        ) {
+                            Text(
+                                text = genreTag,
+                                color = Color(0xFFE2E8F0),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(20.dp))
+            } else {
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // Action Buttons
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = {
+                        if (isSeries) onSeriesClick(item)
+                        else onMovieClick(item)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .height(42.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (isSeries) "View series" else "Resume watching",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { }
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0x991E2636),
+                    border = BorderStroke(1.dp, Color(0xFF334155))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "My list",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FigmaHeroSlideshowBanner(
+    items: List<DesktopMediaItem>,
+    seriesList: List<DesktopMediaItem>,
+    onMovieClick: (DesktopMediaItem) -> Unit,
+    onSeriesClick: (DesktopMediaItem) -> Unit,
+    modifier: Modifier = Modifier,
+    userEmail: String = "",
+    accessToken: String = ""
 ) {
     if (items.isEmpty()) return
 
-    // 1. Maintain isolated, per-account shuffled items
-    val shuffledItems = remember(userEmail) { mutableStateListOf<DesktopMediaItem>() }
-    var currentIndex by remember(userEmail) { mutableIntStateOf(0) }
-    var previousIndex by remember(userEmail) { mutableIntStateOf(0) }
+    val shuffledItems = remember(items) { items.shuffled() }
+    var currentIndex by remember(shuffledItems) { mutableIntStateOf(0) }
+    var outgoingIndex by remember(shuffledItems) { mutableIntStateOf(-1) }
+    var isMovingForward by remember { mutableStateOf(true) }
 
-    LaunchedEffect(items, userEmail) {
-        if (items.isEmpty()) {
-            shuffledItems.clear()
-            return@LaunchedEffect
-        }
-        val existingIds = shuffledItems.map { it.id }.toSet()
-        val newItems = items.filterNot { existingIds.contains(it.id) }
+    var timerProgressFraction by remember { mutableFloatStateOf(0f) }
+    var slideTransitionFraction by remember { mutableFloatStateOf(1f) }
+    val isTransitioning = slideTransitionFraction < 1f
 
-        // If shuffledItems is empty OR contains completely different IDs (account switch), purge and reseed
-        val isDifferentAccount = existingIds.isNotEmpty() && !items.any { existingIds.contains(it.id) }
+    var manualTriggerKey by remember { mutableIntStateOf(0) }
 
-        if (shuffledItems.isEmpty() || isDifferentAccount) {
-            shuffledItems.clear()
-            shuffledItems.addAll(items.shuffled())
-            currentIndex = 0
-            previousIndex = 0
-        } else if (newItems.isNotEmpty()) {
-            shuffledItems.addAll(newItems)
-        }
-    }
-
-    // 5-second progress timer
-    val timerProgress = remember { Animatable(0f) }
-
-    // Continuous auto-advance loop (Never paused by mouse hover)
-    LaunchedEffect(currentIndex, shuffledItems) {
+    LaunchedEffect(currentIndex, shuffledItems, manualTriggerKey) {
         if (shuffledItems.size <= 1) return@LaunchedEffect
 
-        timerProgress.snapTo(0f)
-        try {
-            timerProgress.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 5000, easing = LinearEasing)
-            )
-            previousIndex = currentIndex
-            currentIndex = (currentIndex + 1) % shuffledItems.size
-        } catch (_: CancellationException) {
-            // Cancelled only if user manually clicks a chevron or dot indicator
-        }
-    }
+        val displayHz = com.clotube.desktop.getActiveDisplayRefreshRate()
+        val frameIntervalMs = (1000L / displayHz.toLong()).coerceIn(4L, 33L)
 
-    val isMovingForward = if (previousIndex == 0 && currentIndex == shuffledItems.lastIndex) {
-        false
-    } else if (previousIndex == shuffledItems.lastIndex && currentIndex == 0) {
-        true
-    } else {
-        currentIndex >= previousIndex
+        // 1. PHASE A: SLIDE TRANSITION (Paced at monitor refresh rate, no 258 FPS spikes)
+        if (outgoingIndex != -1) {
+            val slideDurationMs = 500L
+            val slideStartTime = System.currentTimeMillis()
+
+            while (true) {
+                val elapsed = System.currentTimeMillis() - slideStartTime
+                if (elapsed >= slideDurationMs) {
+                    slideTransitionFraction = 1f
+                    outgoingIndex = -1
+                    break
+                }
+                val rawFrac = (elapsed.toFloat() / slideDurationMs.toFloat()).coerceIn(0f, 1f)
+                slideTransitionFraction = androidx.compose.animation.core.FastOutSlowInEasing.transform(rawFrac)
+                kotlinx.coroutines.delay(frameIntervalMs)
+            }
+        } else {
+            slideTransitionFraction = 1f
+        }
+
+        // 2. PHASE B: COUNTDOWN TIMER (5000ms display phase)
+        timerProgressFraction = 0f
+        val countdownDurationMs = 5000L
+        val countdownStartTime = System.currentTimeMillis()
+
+        while (true) {
+            val elapsed = System.currentTimeMillis() - countdownStartTime
+            if (elapsed >= countdownDurationMs) {
+                timerProgressFraction = 1f
+                break
+            }
+            timerProgressFraction = (elapsed.toFloat() / countdownDurationMs.toFloat()).coerceIn(0f, 1f)
+            kotlinx.coroutines.delay(frameIntervalMs)
+        }
+
+        isMovingForward = true
+        outgoingIndex = currentIndex
+        currentIndex = (currentIndex + 1) % shuffledItems.size
     }
 
     Box(
@@ -2882,289 +3119,73 @@ private fun FigmaHeroSlideshowBanner(
             .background(Color(0xFF101520))
             .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
     ) {
-        // ========================================================
-        // 1. HORIZONTAL SLIDE TRANSITION CONTENT
-        // ========================================================
-        AnimatedContent(
-            targetState = currentIndex,
-            transitionSpec = {
-                if (isMovingForward) {
-                    (slideInHorizontally(
-                        initialOffsetX = { fullWidth -> fullWidth },
-                        animationSpec = tween(550, easing = FastOutSlowInEasing)
-                    ) + fadeIn(tween(400))).togetherWith(
-                        slideOutHorizontally(
-                            targetOffsetX = { fullWidth -> -fullWidth },
-                            animationSpec = tween(550, easing = FastOutSlowInEasing)
-                        ) + fadeOut(tween(350))
-                    )
-                } else {
-                    (slideInHorizontally(
-                        initialOffsetX = { fullWidth -> -fullWidth },
-                        animationSpec = tween(550, easing = FastOutSlowInEasing)
-                    ) + fadeIn(tween(400))).togetherWith(
-                        slideOutHorizontally(
-                            targetOffsetX = { fullWidth -> fullWidth },
-                            animationSpec = tween(550, easing = FastOutSlowInEasing)
-                        ) + fadeOut(tween(350))
-                    )
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        ) { targetIdx ->
-            val safeIndex = if (shuffledItems.isNotEmpty()) targetIdx.coerceIn(0, shuffledItems.lastIndex) else 0
-            val item = shuffledItems.getOrNull(safeIndex) ?: return@AnimatedContent
-            val isSeries = remember(item.id, seriesList) {
-                seriesList.any { it.id == item.id }
+        val currentItem = shuffledItems[currentIndex.coerceIn(0, shuffledItems.lastIndex)]
+        val outgoingItem = if (outgoingIndex in shuffledItems.indices) shuffledItems[outgoingIndex] else null
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (isTransitioning && outgoingItem != null) {
+                HeroSlideCardContent(
+                    item = outgoingItem,
+                    seriesList = seriesList,
+                    onMovieClick = onMovieClick,
+                    onSeriesClick = onSeriesClick,
+                    userEmail = userEmail,
+                    accessToken = accessToken,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            translationX = (if (isMovingForward) -slideTransitionFraction else slideTransitionFraction) * size.width
+                            alpha = (1f - slideTransitionFraction).coerceIn(0f, 1f)
+                        }
+                )
             }
-            val backdrop = rememberThumbnailBitmap(
-                primaryUrl = item.thumbnailUrl,
-                fallbackUrl = item.fallbackThumbnailUrl,
-                accessToken = accessToken,
+
+            HeroSlideCardContent(
+                item = currentItem,
+                seriesList = seriesList,
+                onMovieClick = onMovieClick,
+                onSeriesClick = onSeriesClick,
                 userEmail = userEmail,
-                size = ThumbnailSize.HERO
+                accessToken = accessToken,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        if (isTransitioning) {
+                            translationX = (if (isMovingForward) (1f - slideTransitionFraction) else -(1f - slideTransitionFraction)) * size.width
+                            alpha = slideTransitionFraction.coerceIn(0f, 1f)
+                        } else {
+                            translationX = 0f
+                            alpha = 1f
+                        }
+                    }
             )
-
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Poster Artwork
-                if (backdrop != null) {
-                    Image(
-                        bitmap = backdrop,
-                        contentDescription = item.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(Color(0xFF161E2E), Color(0xFF090D14))
-                                )
-                            )
-                    )
-                }
-
-                // Cinema Vignette Gradients
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.horizontalGradient(
-                                colors = listOf(
-                                    Color(0xF8080B11),
-                                    Color(0xEE080B11),
-                                    Color(0xB3080B11),
-                                    Color(0x4D080B11),
-                                    Color.Transparent
-                                )
-                            )
-                        )
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color(0x66080B11),
-                                    Color(0xE607090E)
-                                )
-                            )
-                        )
-                )
-
-                // Metadata Details Column
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(horizontal = 36.dp, vertical = 28.dp)
-                        .widthIn(max = 620.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(3.dp)
-                                .height(12.dp)
-                                .background(Color(0xFF42A5F5))
-                        )
-                        Text(
-                            text = if (isSeries) "FEATURED SERIES IN YOUR DRIVE" else "FEATURED IN YOUR DRIVE",
-                            color = Color(0xFFCBD5E1),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.5.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Text(
-                        text = item.title.uppercase(),
-                        color = Color.White,
-                        fontSize = 40.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 0.5.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (item.durationMs > 0L) {
-                            Text(
-                                text = formatDuration(item.durationMs),
-                                color = Color(0xFFCBD5E1),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(text = "•", color = Color(0xFF64748B), fontSize = 13.sp)
-                        }
-
-                        Text(
-                            text = item.genre.ifBlank { if (isSeries) "TV Series • Drama" else "Action • Drama" },
-                            color = Color(0xFF42A5F5),
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    val genreTokens = remember(item.genre) {
-                        item.genre.split("•", ",")
-                            .map { it.trim() }
-                            .filter { it.isNotBlank() && !it.equals("Movie", ignoreCase = true) }
-                    }
-
-                    if (genreTokens.isNotEmpty()) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            genreTokens.take(4).forEach { genreTag ->
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0x99131D2D),
-                                    border = BorderStroke(1.dp, Color(0x661E3A5F))
-                                ) {
-                                    Text(
-                                        text = genreTag,
-                                        color = Color(0xFFE2E8F0),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(20.dp))
-                    } else {
-                        Spacer(modifier = Modifier.height(16.dp))
-                    }
-
-                    // Action Buttons
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Button(
-                            onClick = {
-                                if (isSeries) onSeriesClick(item)
-                                else onMovieClick(item)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .height(42.dp)
-                                .pointerHoverIcon(PointerIcon.Hand)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.PlayArrow,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isSeries) "View series" else "Resume watching",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Surface(
-                            modifier = Modifier
-                                .height(42.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { }
-                                .pointerHoverIcon(PointerIcon.Hand),
-                            shape = RoundedCornerShape(10.dp),
-                            color = Color(0x991E2636),
-                            border = BorderStroke(1.dp, Color(0xFF334155))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Add,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = "My list",
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
-                }
-            }
         }
 
-        // ========================================================
-        // 2. ROYAL BLUE GRADIENT COUNTDOWN TIMER BAR
-        // ========================================================
+        // Progress Bar
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
                 .height(3.5.dp)
                 .background(Color(0x26FFFFFF))
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(timerProgress.value)
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                Color(0xFF0D47A1), // Deep Royal Blue
-                                Color(0xFF42A5F5)  // Light Royal Blue
+                .drawWithContent {
+                    drawContent()
+                    val progress = timerProgressFraction
+                    if (progress > 0f) {
+                        drawRect(
+                            brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
+                                colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                            ),
+                            size = androidx.compose.ui.geometry.Size(
+                                width = size.width * progress.coerceIn(0f, 1f),
+                                height = size.height
                             )
                         )
-                    )
-            )
-        }
+                    }
+                }
+        )
 
-        // ========================================================
-        // 3. SLIDE CONTROLS & INDICATOR DOTS (BOTTOM RIGHT)
-        // ========================================================
+        // Chevron Controls & Indicator Dots
         if (shuffledItems.size > 1) {
             Row(
                 modifier = Modifier
@@ -3173,16 +3194,16 @@ private fun FigmaHeroSlideshowBanner(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Previous Chevron
                 IconButton(
                     onClick = {
-                        previousIndex = currentIndex
-                        currentIndex = if (currentIndex > 0) currentIndex - 1 else shuffledItems.lastIndex
+                        if (!isTransitioning) {
+                            isMovingForward = false
+                            outgoingIndex = currentIndex
+                            currentIndex = if (currentIndex > 0) currentIndex - 1 else shuffledItems.lastIndex
+                            manualTriggerKey++
+                        }
                     },
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(Color(0x800C111A))
+                    modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(0x800C111A))
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.ChevronLeft,
@@ -3192,7 +3213,6 @@ private fun FigmaHeroSlideshowBanner(
                     )
                 }
 
-                // Dots
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -3206,23 +3226,27 @@ private fun FigmaHeroSlideshowBanner(
                                 .clip(RoundedCornerShape(3.dp))
                                 .background(if (isSelected) Color(0xFF42A5F5) else Color(0x66FFFFFF))
                                 .clickable {
-                                    previousIndex = currentIndex
-                                    currentIndex = index
+                                    if (!isTransitioning && currentIndex != index) {
+                                        isMovingForward = index > currentIndex
+                                        outgoingIndex = currentIndex
+                                        currentIndex = index
+                                        manualTriggerKey++
+                                    }
                                 }
                         )
                     }
                 }
 
-                // Next Chevron
                 IconButton(
                     onClick = {
-                        previousIndex = currentIndex
-                        currentIndex = (currentIndex + 1) % shuffledItems.size
+                        if (!isTransitioning) {
+                            isMovingForward = true
+                            outgoingIndex = currentIndex
+                            currentIndex = (currentIndex + 1) % shuffledItems.size
+                            manualTriggerKey++
+                        }
                     },
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(Color(0x800C111A))
+                    modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(0x800C111A))
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.ChevronRight,
