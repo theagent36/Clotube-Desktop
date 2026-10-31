@@ -45,10 +45,15 @@ compose.desktop {
         jvmArgs += listOf(
             "-XX:+UseG1GC",
             "-Xms256m",
-            "-Xmx1024m",
-            "-XX:MaxGCPauseMillis=20",
+            "-Xmx1024m",                            // Clamps heap under 1 GB
+            "-XX:MaxGCPauseMillis=15",
+            "-XX:InitiatingHeapOccupancyPercent=40", // Smooth continuous garbage collection
+            "-XX:G1ReservePercent=15",
+            "-XX:G1PeriodicGCInterval=3000",        // Uncommits idle memory back to Windows
             "-Dskiko.renderApi=DIRECT3D",
-            "-Dcompose.interop.blending=false",
+            "-Dskiko.vsync.enabled=true",           // Enforces VSync in Direct3D presentation
+            "-Dskiko.direct3d.waitVsync=true",      // Forces Present() to wait for monitor refresh
+            "-Dskiko.fps=60",                       // Fallback FPS ceiling
             "-Djava.net.preferIPv4Stack=true",
             "-Dsun.awt.noerasebackground=true"
         )
