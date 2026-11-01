@@ -1,14 +1,20 @@
 package com.clotube.desktop.ui.screens
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -19,8 +25,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -30,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopSeriesCache
 import com.clotube.desktop.data.DesktopWatchHistoryManager
@@ -89,7 +98,7 @@ fun DesktopSeriesDetailScreen(
         )
     }
 
-    var browsingSeasonNumber by remember(seriesItem.id, userEmail, initialEpisodeId) {
+    var selectedSeasonNumber by remember(seriesItem.id, userEmail, initialEpisodeId) {
         mutableIntStateOf(
             targetedCachedEp?.seasonNumber ?: cachedSeries?.seasons?.firstOrNull()?.seasonNumber ?: 1
         )
@@ -123,12 +132,12 @@ fun DesktopSeriesDetailScreen(
             }
 
             if (targetedFreshEp != null) {
-                browsingSeasonNumber = targetedFreshEp.seasonNumber
+                selectedSeasonNumber = targetedFreshEp.seasonNumber
                 playingEpisode = targetedFreshEp
             } else {
                 val initialSeason = loaded.seasons.firstOrNull()
                 if (initialSeason != null) {
-                    browsingSeasonNumber = initialSeason.seasonNumber
+                    selectedSeasonNumber = initialSeason.seasonNumber
                     playingEpisode = initialSeason.episodes.firstOrNull()
                 }
             }
@@ -147,12 +156,12 @@ fun DesktopSeriesDetailScreen(
                         } else null
 
                         if (targetedFreshEp != null) {
-                            browsingSeasonNumber = targetedFreshEp.seasonNumber
+                            selectedSeasonNumber = targetedFreshEp.seasonNumber
                             playingEpisode = targetedFreshEp
                         } else {
                             val initialSeason = fresh.seasons.firstOrNull()
                             if (initialSeason != null) {
-                                browsingSeasonNumber = initialSeason.seasonNumber
+                                selectedSeasonNumber = initialSeason.seasonNumber
                                 playingEpisode = initialSeason.episodes.firstOrNull()
                             }
                         }
@@ -180,9 +189,45 @@ fun DesktopSeriesDetailScreen(
 
     val series = seriesDetails!!
 
-    val currentSeason = series.seasons.find { it.seasonNumber == browsingSeasonNumber }
+    val currentSeason = series.seasons.find { it.seasonNumber == selectedSeasonNumber }
         ?: series.seasons.firstOrNull() ?: DesktopSeason(1, "Season 1", emptyList())
-    val seasonEpisodes = currentSeason.episodes
+    val displayedEpisodes = currentSeason.episodes
+    val seasonEpisodes = displayedEpisodes
+
+    val activeEpisodeIndex = displayedEpisodes.indexOfFirst { it.id == playingEpisode?.id }.coerceAtLeast(0)
+    val currentEpisode = playingEpisode ?: displayedEpisodes.firstOrNull() ?: DesktopEpisode(
+        id = "",
+        seriesId = series.id,
+        seriesTitle = series.title,
+        seasonNumber = 1,
+        episodeNumber = 1,
+        title = ""
+    )
+
+    // Remember scroll state for the episode playlist LazyColumn
+    val episodeListState = rememberLazyListState()
+
+    // Locate index of currently playing episode inside the displayed list
+    val targetScrollIndex = remember(displayedEpisodes, currentEpisode.id) {
+        displayedEpisodes.indexOfFirst { it.id == currentEpisode.id }.coerceAtLeast(0)
+    }
+
+    // Synchronize season dropdown if filtered by season
+    LaunchedEffect(currentEpisode.seasonNumber) {
+        if (selectedSeasonNumber != currentEpisode.seasonNumber) {
+            selectedSeasonNumber = currentEpisode.seasonNumber
+        }
+    }
+
+    // Smoothly scroll down so the active episode sits anchored flush at the top
+    LaunchedEffect(currentEpisode.id, displayedEpisodes) {
+        if (displayedEpisodes.isNotEmpty() && targetScrollIndex in displayedEpisodes.indices) {
+            episodeListState.animateScrollToItem(
+                index = targetScrollIndex,
+                scrollOffset = 0
+            )
+        }
+    }
 
     val allEpisodes = remember(series.seasons) {
         series.seasons.flatMap { it.episodes }
@@ -256,10 +301,15 @@ fun DesktopSeriesDetailScreen(
     // Track which episode has already consumed its initial seek so fullscreen toggles never re-seek
     var resumedEpisodeId by remember(seriesItem.id) { mutableStateOf<String?>(null) }
 
-    val savedPos = remember(playingEpisode?.id, userEmail) {
-        playingEpisode?.let { ep ->
-            DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
-        } ?: 0L
+    val shouldResume = DesktopAppSettings.state.resumePlayback
+    val savedPos = remember(playingEpisode?.id, userEmail, shouldResume) {
+        if (shouldResume) {
+            playingEpisode?.let { ep ->
+                DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
+            } ?: 0L
+        } else {
+            0L
+        }
     }
 
     // Only supply savedPos on the very first mount of this episode
@@ -349,8 +399,8 @@ fun DesktopSeriesDetailScreen(
                     }
                     resumedEpisodeId = null // Allow next episode to resume
                     playingEpisode = nextEpisode
-                    if (browsingSeasonNumber != nextEpisode.seasonNumber) {
-                        browsingSeasonNumber = nextEpisode.seasonNumber
+                    if (selectedSeasonNumber != nextEpisode.seasonNumber) {
+                        selectedSeasonNumber = nextEpisode.seasonNumber
                     }
                 }
             } else null,
@@ -359,8 +409,8 @@ fun DesktopSeriesDetailScreen(
                     saveActiveEpisodeProgress()
                     resumedEpisodeId = null // Allow prev episode to resume
                     playingEpisode = prevEpisode
-                    if (browsingSeasonNumber != prevEpisode.seasonNumber) {
-                        browsingSeasonNumber = prevEpisode.seasonNumber
+                    if (selectedSeasonNumber != prevEpisode.seasonNumber) {
+                        selectedSeasonNumber = prevEpisode.seasonNumber
                     }
                 }
             } else null,
@@ -595,8 +645,8 @@ fun DesktopSeriesDetailScreen(
                                         }
                                         resumedEpisodeId = null
                                         playingEpisode = nextEpisode
-                                        if (browsingSeasonNumber != nextEpisode.seasonNumber) {
-                                            browsingSeasonNumber = nextEpisode.seasonNumber
+                                        if (selectedSeasonNumber != nextEpisode.seasonNumber) {
+                                            selectedSeasonNumber = nextEpisode.seasonNumber
                                         }
                                     }
                                 } else null,
@@ -605,8 +655,8 @@ fun DesktopSeriesDetailScreen(
                                         saveActiveEpisodeProgress()
                                         resumedEpisodeId = null
                                         playingEpisode = prevEpisode
-                                        if (browsingSeasonNumber != prevEpisode.seasonNumber) {
-                                            browsingSeasonNumber = prevEpisode.seasonNumber
+                                        if (selectedSeasonNumber != prevEpisode.seasonNumber) {
+                                            selectedSeasonNumber = prevEpisode.seasonNumber
                                         }
                                     }
                                 } else null,
@@ -742,7 +792,7 @@ fun DesktopSeriesDetailScreen(
                                         .border(1.dp, Color(0xFF263346), RoundedCornerShape(8.dp))
                                 ) {
                                     series.seasons.forEach { season ->
-                                        val isCurrent = season.seasonNumber == browsingSeasonNumber
+                                        val isCurrent = season.seasonNumber == selectedSeasonNumber
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -753,7 +803,7 @@ fun DesktopSeriesDetailScreen(
                                                 )
                                             },
                                             onClick = {
-                                                browsingSeasonNumber = season.seasonNumber
+                                                selectedSeasonNumber = season.seasonNumber
                                                 seasonDropdownExpanded = false
                                             }
                                         )
@@ -829,10 +879,16 @@ fun DesktopSeriesDetailScreen(
 
                         // Interactive Scrollable List of Episodes
                         LazyColumn(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            state = episodeListState,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
                         ) {
-                            items(seasonEpisodes, key = { it.id }) { ep ->
+                            itemsIndexed(
+                                items = displayedEpisodes,
+                                key = { _, ep -> ep.id }
+                            ) { index, ep ->
                                 val isCurrentlyPlaying = playingEpisode?.id == ep.id
                                 val isWatched = watchedEpisodeIds.contains(ep.id)
                                 val thumb = rememberDriveThumbnail(ep.thumbnailUrl, accessToken = accessToken, userEmail = userEmail)
@@ -965,36 +1021,72 @@ private fun EpisodeListItemCard(
     onSelectEpisode: () -> Unit,
     onToggleWatched: () -> Unit
 ) {
-    var isHovered by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coroutineScope = rememberCoroutineScope()
+    val clickFlashAlpha = remember { Animatable(0f) }
 
-    Surface(
+    val cardScale by animateFloatAsState(
+        targetValue = when {
+            isPressed -> 0.98f
+            isHovered -> 1.02f
+            else -> 1.0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "ep_card_scale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isPressed -> Color(0xFF00E5FF)
+            isCurrentlyPlaying -> Color(0xFF2563EB)
+            isHovered -> Color(0xFF38BDF8)
+            else -> Color(0xFF18202F)
+        },
+        animationSpec = tween(200)
+    )
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 12.dp else if (isCurrentlyPlaying) 6.dp else 2.dp,
+                shape = RoundedCornerShape(10.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.35f)
+            )
             .clip(RoundedCornerShape(10.dp))
-            .clickable { onSelectEpisode() }
-            .pointerHoverIcon(PointerIcon.Hand)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        when (event.type) {
-                            PointerEventType.Enter -> isHovered = true
-                            PointerEventType.Exit -> isHovered = false
-                        }
-                    }
+            .background(
+                when {
+                    isCurrentlyPlaying -> Color(0xFF121B2B)
+                    isHovered -> Color(0xFF151D2A)
+                    else -> Color(0xFF0F141F)
                 }
-            },
-        shape = RoundedCornerShape(10.dp),
-        color = when {
-            isCurrentlyPlaying -> Color(0xFF121B2B)
-            isHovered -> Color(0xFF151D2A)
-            else -> Color(0xFF0F141F)
-        },
-        border = when {
-            isCurrentlyPlaying -> BorderStroke(1.dp, Color(0xFF2563EB))
-            isHovered -> BorderStroke(1.dp, Color(0xFF2A3B54))
-            else -> BorderStroke(1.dp, Color(0xFF18202F))
-        }
+            )
+            .border(
+                border = BorderStroke(if (isHovered || isPressed || isCurrentlyPlaying) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = {
+                    coroutineScope.launch {
+                        clickFlashAlpha.snapTo(0.45f)
+                        clickFlashAlpha.animateTo(0f, tween(260))
+                    }
+                    onSelectEpisode()
+                }
+            )
     ) {
         Row(
             modifier = Modifier
@@ -1047,16 +1139,17 @@ private fun EpisodeListItemCard(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(24.dp)
+                                    .size(26.dp)
                                     .clip(CircleShape)
-                                    .background(Color(0xFF00E5FF).copy(alpha = 0.9f)),
+                                    .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
+                                    .shadow(8.dp, CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.PlayArrow,
                                     contentDescription = null,
                                     tint = Color(0xFF090D14),
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
                             }
                         }
@@ -1150,6 +1243,15 @@ private fun EpisodeListItemCard(
                     }
                 }
             }
+        }
+
+        // Flash Ripple Layer Triggered on Click
+        if (clickFlashAlpha.value > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+            )
         }
     }
 }

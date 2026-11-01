@@ -1,5 +1,6 @@
 package com.clotube.desktop.media
 
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopProfileManager
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.TrackDescription
@@ -39,16 +40,24 @@ object DesktopTrackPreferences {
                 preferredAudioLanguage = props.getProperty("preferredAudioLanguage")
                 preferredSubtitleLanguage = props.getProperty("preferredSubtitleLanguage")
                 isSubtitleExplicitlyDisabled = props.getProperty("isSubtitleExplicitlyDisabled", "false").toBoolean()
-
-                println("[DesktopTrackPreferences] Loaded preferences: volume=$stickyVolume, audio=$preferredAudioLanguage, sub=$preferredSubtitleLanguage")
             }
-        } catch (e: Exception) {
-            System.err.println("[DesktopTrackPreferences] Error loading preferences: ${e.message}")
+        } catch (_: Exception) {}
+
+        // Fall back to general settings if user has not set specific track overrides
+        val settings = DesktopAppSettings.state
+        if (preferredAudioLanguage == null && settings.preferredAudioLanguage != "Original") {
+            preferredAudioLanguage = settings.preferredAudioLanguage
+        }
+        if (preferredSubtitleLanguage == null && !isSubtitleExplicitlyDisabled) {
+            when (settings.defaultSubtitleState) {
+                "Off" -> isSubtitleExplicitlyDisabled = true
+                "English" -> preferredSubtitleLanguage = "English"
+                else -> isSubtitleExplicitlyDisabled = false
+            }
         }
     }
 
     private fun savePreferencesAsync() {
-        // Run on background thread to guarantee 0ms latency during slider dragging
         ioExecutor.submit {
             try {
                 val props = Properties()
@@ -64,7 +73,9 @@ object DesktopTrackPreferences {
 
     fun saveVolume(vol: Int) {
         stickyVolume = vol.coerceIn(0, 100)
-        savePreferencesAsync()
+        if (DesktopAppSettings.state.rememberVolume) {
+            savePreferencesAsync()
+        }
     }
 
     private fun extractLanguageToken(raw: String): String {
@@ -120,34 +131,37 @@ object DesktopTrackPreferences {
 
     fun applyStickyPreferences(mediaPlayer: MediaPlayer) {
         try {
-            // 1. Enforce remembered volume
-            mediaPlayer.audio().setVolume(stickyVolume)
+            // Apply volume
+            val settings = DesktopAppSettings.state
+            val targetVolume = if (settings.rememberVolume) stickyVolume else 100
+            mediaPlayer.audio().setVolume(targetVolume)
 
-            // 2. Enforce subtitle preference
-            if (isSubtitleExplicitlyDisabled) {
+            // Subtitle state check
+            val shouldDisableSubtitles = isSubtitleExplicitlyDisabled || settings.defaultSubtitleState == "Off"
+            if (shouldDisableSubtitles) {
                 if (mediaPlayer.subtitles().track() != -1) {
                     mediaPlayer.subtitles().setTrack(-1)
                 }
-            } else if (!preferredSubtitleLanguage.isNullOrBlank()) {
-                val subTracks: List<TrackDescription> = mediaPlayer.subtitles().trackDescriptions() ?: emptyList()
-                val targetLang = preferredSubtitleLanguage!!.lowercase()
-                val matched = subTracks.firstOrNull { it.id() != -1 && it.description().lowercase().contains(targetLang) }
-                if (matched != null && mediaPlayer.subtitles().track() != matched.id()) {
-                    mediaPlayer.subtitles().setTrack(matched.id())
+            } else {
+                val targetSub = preferredSubtitleLanguage ?: if (settings.defaultSubtitleState != "Auto-Detect") settings.defaultSubtitleState else null
+                if (!targetSub.isNullOrBlank()) {
+                    val subTracks: List<TrackDescription> = mediaPlayer.subtitles().trackDescriptions() ?: emptyList()
+                    val matched = subTracks.firstOrNull { it.id() != -1 && it.description().lowercase().contains(targetSub.lowercase()) }
+                    if (matched != null && mediaPlayer.subtitles().track() != matched.id()) {
+                        mediaPlayer.subtitles().setTrack(matched.id())
+                    }
                 }
             }
 
-            // 3. Enforce audio track preference
-            if (!preferredAudioLanguage.isNullOrBlank()) {
+            // Audio track preference check
+            val targetAudio = preferredAudioLanguage ?: if (settings.preferredAudioLanguage != "Original") settings.preferredAudioLanguage else null
+            if (!targetAudio.isNullOrBlank()) {
                 val audioTracks: List<TrackDescription> = mediaPlayer.audio().trackDescriptions() ?: emptyList()
-                val targetAudio = preferredAudioLanguage!!.lowercase()
-                val matched = audioTracks.firstOrNull { it.id() != -1 && it.description().lowercase().contains(targetAudio) }
+                val matched = audioTracks.firstOrNull { it.id() != -1 && it.description().lowercase().contains(targetAudio.lowercase()) }
                 if (matched != null && mediaPlayer.audio().track() != matched.id()) {
                     mediaPlayer.audio().setTrack(matched.id())
                 }
             }
-        } catch (e: Exception) {
-            System.err.println("[DesktopTrackPreferences] Error applying sticky preferences: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 }

@@ -1,6 +1,18 @@
 package com.clotube.desktop
 
-import androidx.compose.runtime.*
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -9,6 +21,7 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
+import com.clotube.desktop.ui.screens.DesktopBootScreen
 import com.sun.jna.Native
 import com.sun.jna.NativeLibrary
 import com.sun.jna.Pointer
@@ -89,7 +102,6 @@ fun setupLibVlcEnvironment() {
 fun main() {
     setupLibVlcEnvironment()
 
-    // 1. Must be configured before Compose/AWT subsystems initialize
     System.setProperty("java.net.preferIPv4Stack", "true")
     System.setProperty("java.net.preferIPv6Addresses", "false")
     System.setProperty("sun.awt.noerasebackground", "true")
@@ -113,7 +125,6 @@ fun main() {
 
     LocalStreamServer.start()
 
-    // 2. Launch the desktop application
     application {
         val windowState = rememberWindowState(
             placement = WindowPlacement.Maximized,
@@ -121,10 +132,10 @@ fun main() {
             height = 820.dp
         )
         var isFullscreenActive by remember { mutableStateOf(false) }
+        var isBooting by remember { mutableStateOf(true) }
 
         var wasMaximizedBeforeFullscreen by remember { mutableStateOf(true) }
         var hasEverEnteredFullscreen by remember { mutableStateOf(false) }
-
         val savedFloatingRect = remember { RECT() }
 
         Window(
@@ -139,7 +150,6 @@ fun main() {
             title = "Clotube",
             icon = painterResource("ic_clotube.png")
         ) {
-            // Attach OS-level window focus and minimize monitor
             LaunchedEffect(window) {
                 AppLifecycleManager.attachToWindow(window)
             }
@@ -150,11 +160,8 @@ fun main() {
                 window.rootPane.background = AwtColor.BLACK
             }
 
-            // Win32 Borderless Fullscreen Engine (Keeps native Direct3D swapchain alive & preserves Maximized state)
             LaunchedEffect(isFullscreenActive) {
-                if (!isFullscreenActive && !hasEverEnteredFullscreen) {
-                    return@LaunchedEffect
-                }
+                if (!isFullscreenActive && !hasEverEnteredFullscreen) return@LaunchedEffect
 
                 try {
                     val hwndPtr = Native.getWindowPointer(window)
@@ -169,8 +176,9 @@ fun main() {
                                 user32.GetWindowRect(hwnd, savedFloatingRect)
                             }
 
+                            // Strip caption, borders, and MAXIMIZE bit so DWM handles raw full screen
                             val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
-                            val borderlessStyle = currentStyle and (WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX).inv()
+                            val borderlessStyle = currentStyle and (WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX or WS_MAXIMIZE).inv()
                             user32.SetWindowLong(hwnd, GWL_STYLE, borderlessStyle)
 
                             val monitor = user32.MonitorFromWindow(hwnd, WinUser.MONITOR_DEFAULTTONEAREST)
@@ -178,31 +186,34 @@ fun main() {
                             user32.GetMonitorInfo(monitor, monitorInfo)
                             val monitorRect: RECT = monitorInfo.rcMonitor
 
-                            val width = monitorRect.right - monitorRect.left
-                            val height = monitorRect.bottom - monitorRect.top
-
                             user32.SetWindowPos(
                                 hwnd,
                                 null,
                                 monitorRect.left,
                                 monitorRect.top,
-                                width,
-                                height,
+                                monitorRect.right - monitorRect.left,
+                                monitorRect.bottom - monitorRect.top,
                                 SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
                             )
                         } else {
+                            // 1. Restore standard window styles (clearing any stale MAXIMIZE bit)
                             val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
-                            val standardStyle = currentStyle or WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX
+                            val standardStyle = (currentStyle and WS_MAXIMIZE.inv()) or WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX
                             user32.SetWindowLong(hwnd, GWL_STYLE, standardStyle)
 
+                            // 2. Notify DWM that the frame decorations have changed BEFORE sizing
+                            user32.SetWindowPos(
+                                hwnd,
+                                null,
+                                0, 0, 0, 0,
+                                SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_FRAMECHANGED
+                            )
+
+                            // 3. Size properly to work area
                             if (wasMaximizedBeforeFullscreen) {
+                                // Restore to floating then maximize: forces Windows to query rcWork above the taskbar
+                                user32.ShowWindow(hwnd, SW_RESTORE)
                                 user32.ShowWindow(hwnd, SW_MAXIMIZE)
-                                user32.SetWindowPos(
-                                    hwnd,
-                                    null,
-                                    0, 0, 0, 0,
-                                    SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
-                                )
                             } else {
                                 user32.ShowWindow(hwnd, SW_RESTORE)
                                 val w = (savedFloatingRect.right - savedFloatingRect.left).coerceAtLeast(1024)
@@ -219,7 +230,7 @@ fun main() {
                             }
 
                             SwingUtilities.invokeLater {
-                                window.validate()
+                                window.revalidate()
                                 window.repaint()
                             }
                         }
@@ -229,10 +240,27 @@ fun main() {
                 }
             }
 
-            App(
-                isFullscreen = isFullscreenActive,
-                onToggleFullscreen = { isFullscreenActive = !isFullscreenActive }
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
+                Crossfade(
+                    targetState = isBooting,
+                    animationSpec = tween(durationMillis = 350)
+                ) { booting ->
+                    if (booting) {
+                        DesktopBootScreen(
+                            onBootComplete = { isBooting = false }
+                        )
+                    } else {
+                        App(
+                            isFullscreen = isFullscreenActive,
+                            onToggleFullscreen = { isFullscreenActive = !isFullscreenActive }
+                        )
+                    }
+                }
+            }
         }
     }
 }

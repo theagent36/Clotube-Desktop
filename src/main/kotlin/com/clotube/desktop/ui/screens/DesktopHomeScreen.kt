@@ -1,15 +1,23 @@
 package com.clotube.desktop.ui.screens
 
 import androidx.compose.animation.*
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -30,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -56,6 +65,7 @@ import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.ui.components.DesktopFramePacer
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -74,8 +84,19 @@ private data class SearchEpisodeMatch(
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
     MOVIES("Movies", Icons.Rounded.Movie),
-    SERIES("Series", Icons.Rounded.Tv),
-    RECENTS("Recents", Icons.Rounded.History)
+    TV_SERIES("TV Series", Icons.Rounded.Tv),
+    RECENTS("Recents", Icons.Rounded.History),
+    SETTINGS("Settings", Icons.Rounded.Settings);
+
+    companion object {
+        val SERIES get() = TV_SERIES
+    }
+}
+
+private sealed interface DesktopActiveView {
+    data class Series(val series: DesktopMediaItem, val episodeId: String?) : DesktopActiveView
+    data class Movie(val movie: DesktopMediaItem) : DesktopActiveView
+    data class Library(val section: DesktopNavSection) : DesktopActiveView
 }
 
 // [4.7] Hoisted immutable graphics tokens to prevent 60fps GC allocation churn
@@ -259,7 +280,8 @@ fun DesktopHomeScreen(
                         userName = userName.ifBlank { userEmail.substringBefore('@').ifBlank { "Clotube User" } },
                         userEmail = userEmail,
                         userAvatarUrl = userAvatarUrl,
-                        onSignOut = onSignOut
+                        onSignOut = onSignOut,
+                        onOpenSettings = { navigateTo(DesktopNavSection.SETTINGS) }
                     )
 
                     // Floating Global Search Overlay
@@ -307,40 +329,27 @@ fun DesktopHomeScreen(
 
                                         items(matchedSeries, key = { "search_series_${it.id}" }) { s ->
                                             val thumb = rememberThumbnailBitmap(s.thumbnailUrl, s.fallbackThumbnailUrl, accessToken, userEmail, ThumbnailSize.CARD)
-                                            Surface(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable {
-                                                        searchQuery = ""
-                                                        targetedEpisodeId = null
-                                                        selectedSeriesForDetail = s
-                                                    }
-                                                    .pointerHoverIcon(PointerIcon.Hand),
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = Color(0xFF131824),
-                                                border = BorderStroke(1.dp, Color(0xFF1E2838))
+                                            SearchResultRowCard(
+                                                onClick = {
+                                                    searchQuery = ""
+                                                    targetedEpisodeId = null
+                                                    selectedSeriesForDetail = s
+                                                }
                                             ) {
-                                                Row(
-                                                    modifier = Modifier.padding(8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                Box(
+                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    Box(
-                                                        modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        if (thumb != null) {
-                                                            Image(bitmap = thumb, contentDescription = s.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                                        }
+                                                    if (thumb != null) {
+                                                        Image(bitmap = thumb, contentDescription = s.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                                                     }
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Text(text = s.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                        Text(text = s.genre.ifBlank { "Series" }, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                    }
-                                                    Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
-                                                        Text(text = "Series", color = Color(0xFF00E5FF), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                                    }
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(text = s.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Text(text = s.genre.ifBlank { "Series" }, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
+                                                }
+                                                Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
+                                                    Text(text = "Series", color = Color(0xFF00E5FF), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                                 }
                                             }
                                         }
@@ -361,42 +370,29 @@ fun DesktopHomeScreen(
 
                                         items(matchedEpisodes, key = { "search_ep_${it.episode.id}" }) { match ->
                                             val thumb = rememberThumbnailBitmap(match.episode.thumbnailUrl, null, accessToken, userEmail, ThumbnailSize.CARD)
-                                            Surface(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable {
-                                                        searchQuery = ""
-                                                        targetedEpisodeId = match.episode.id
-                                                        selectedSeriesForDetail = match.parentSeries
-                                                    }
-                                                    .pointerHoverIcon(PointerIcon.Hand),
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = Color(0xFF131824),
-                                                border = BorderStroke(1.dp, Color(0xFF1E2838))
+                                            SearchResultRowCard(
+                                                onClick = {
+                                                    searchQuery = ""
+                                                    targetedEpisodeId = match.episode.id
+                                                    selectedSeriesForDetail = match.parentSeries
+                                                }
                                             ) {
-                                                Row(
-                                                    modifier = Modifier.padding(8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                Box(
+                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    Box(
-                                                        modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        if (thumb != null) {
-                                                            Image(bitmap = thumb, contentDescription = match.episode.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                                        }
-                                                        Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                                    if (thumb != null) {
+                                                        Image(bitmap = thumb, contentDescription = match.episode.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                                                     }
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        val epCode = "S%02dE%02d".format(match.episode.seasonNumber, match.episode.episodeNumber)
-                                                        Text(text = "$epCode • ${match.episode.title}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                        Text(text = "${match.parentSeries.title} • ${match.episode.durationFormatted}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                    }
-                                                    Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
-                                                        Text(text = "Play Episode", color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                                    }
+                                                    Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    val epCode = "S%02dE%02d".format(match.episode.seasonNumber, match.episode.episodeNumber)
+                                                    Text(text = "$epCode • ${match.episode.title}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Text(text = "${match.parentSeries.title} • ${match.episode.durationFormatted}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
+                                                }
+                                                Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
+                                                    Text(text = "Play Episode", color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                                 }
                                             }
                                         }
@@ -417,39 +413,26 @@ fun DesktopHomeScreen(
 
                                         items(matchedMovies, key = { "search_movie_${it.id}" }) { m ->
                                             val thumb = rememberThumbnailBitmap(m.thumbnailUrl, m.fallbackThumbnailUrl, accessToken, userEmail, ThumbnailSize.CARD)
-                                            Surface(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable {
-                                                        searchQuery = ""
-                                                        selectedMovieForPlayer = m
-                                                    }
-                                                    .pointerHoverIcon(PointerIcon.Hand),
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = Color(0xFF131824),
-                                                border = BorderStroke(1.dp, Color(0xFF1E2838))
+                                            SearchResultRowCard(
+                                                onClick = {
+                                                    searchQuery = ""
+                                                    selectedMovieForPlayer = m
+                                                }
                                             ) {
-                                                Row(
-                                                    modifier = Modifier.padding(8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                Box(
+                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    Box(
-                                                        modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        if (thumb != null) {
-                                                            Image(bitmap = thumb, contentDescription = m.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                                        }
+                                                    if (thumb != null) {
+                                                        Image(bitmap = thumb, contentDescription = m.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                                                     }
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Text(text = m.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                        Text(text = "${m.releaseYear} • ${m.genre}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                    }
-                                                    Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
-                                                        Text(text = "Movie", color = Color(0xFFCBD5E1), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                                    }
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(text = m.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Text(text = "${m.releaseYear} • ${m.genre}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
+                                                }
+                                                Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
+                                                    Text(text = "Movie", color = Color(0xFFCBD5E1), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                                 }
                                             }
                                         }
@@ -466,128 +449,285 @@ fun DesktopHomeScreen(
                     .fillMaxWidth()
                     .weight(1f)
             ) {
-                if (selectedSeriesForDetail != null) {
-                    DesktopSeriesDetailScreen(
-                        seriesItem = selectedSeriesForDetail!!,
-                        accessToken = accessToken,
-                        userEmail = userEmail,
-                        initialEpisodeId = targetedEpisodeId,
-                        isFullscreen = effectiveFullscreen,
-                        onToggleFullscreen = onToggleFullscreen,
-                        onBack = { 
-                            if (effectiveFullscreen) onToggleFullscreen() else {
-                                selectedSeriesForDetail = null
-                                targetedEpisodeId = null
-                                watchHistoryRevision++
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else if (selectedMovieForPlayer != null) {
-                    val movieResumePos = remember(selectedMovieForPlayer?.id, userEmail, watchHistoryRevision) {
-                        selectedMovieForPlayer?.let { movie ->
-                            com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, movie.id)
-                        } ?: 0L
-                    }
+            val activeView: DesktopActiveView = when {
+                selectedSeriesForDetail != null -> DesktopActiveView.Series(selectedSeriesForDetail!!, targetedEpisodeId)
+                selectedMovieForPlayer != null -> DesktopActiveView.Movie(selectedMovieForPlayer!!)
+                else -> DesktopActiveView.Library(currentSection)
+            }
 
-                    DesktopMoviePlayerScreen(
-                        initialMovie = selectedMovieForPlayer!!,
-                        allMovies = filteredMovies,
-                        accessToken = accessToken,
-                        userEmail = userEmail,
-                        initialSeekMs = movieResumePos,
-                        onBack = {
-                            if (effectiveFullscreen) onToggleFullscreen()
-                            selectedMovieForPlayer = null
-                            watchHistoryRevision++
-                        },
-                        isFullscreen = effectiveFullscreen,
-                        onToggleFullscreen = onToggleFullscreen
-                    )
-                } else {
-                    when (currentSection) {
-                        DesktopNavSection.HOME -> {
-                            FigmaHomeContent(
-                                featuredItem = featuredItem ?: filteredMovies.firstOrNull() ?: filteredSeries.firstOrNull(),
-                                continueWatching = continueWatching,
-                                movies = filteredMovies,
-                                series = filteredSeries,
-                                userEmail = userEmail,
-                                accessToken = accessToken,
-                                watchHistoryRevision = watchHistoryRevision,
-                                onMovieClick = { movie ->
-                                    selectedMovieForPlayer = movie
-                                    onMediaClick(movie)
-                                },
-                                onNavigateSection = navigateTo,
-                                onSeriesClick = { seriesItem ->
-                                    selectedSeriesForDetail = seriesItem
-                                },
-                                onContinueWatchingClick = { item ->
-                                    val isMovie = movies.any { it.id == item.mediaId }
-                                    if (item.isSeries && !item.seriesId.isNullOrBlank() && !isMovie) {
-                                        val matchedSeries = series.find { it.id == item.seriesId }
-                                        if (matchedSeries != null) {
-                                            targetedEpisodeId = item.mediaId
-                                            selectedSeriesForDetail = matchedSeries
-                                        }
-                                    } else {
-                                        val matchedMovie = movies.find { it.id == item.mediaId }
-                                        if (matchedMovie != null) {
-                                            selectedMovieForPlayer = matchedMovie
-                                        }
-                                    }
-                                },
-                                onRescan = onRescan
+            AnimatedContent(
+                targetState = activeView,
+                transitionSpec = {
+                    val enteringDetailOrPlayer = (targetState is DesktopActiveView.Movie || targetState is DesktopActiveView.Series) && initialState is DesktopActiveView.Library
+                    val exitingToLibrary = targetState is DesktopActiveView.Library && (initialState is DesktopActiveView.Movie || initialState is DesktopActiveView.Series)
+
+                    if (enteringDetailOrPlayer) {
+                        (scaleIn(
+                            initialScale = 0.90f,
+                            animationSpec = tween(380, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        ) + fadeIn(
+                            animationSpec = tween(280)
+                        )).togetherWith(
+                            scaleOut(
+                                targetScale = 1.05f,
+                                animationSpec = tween(260)
+                            ) + fadeOut(
+                                animationSpec = tween(200)
                             )
-                        }
-                        DesktopNavSection.MOVIES -> {
-                            FigmaMoviesContent(
-                                movies = filteredMovies,
-                                userEmail = userEmail,
-                                accessToken = accessToken,
-                                watchHistoryRevision = watchHistoryRevision,
-                                onMovieClick = { movieItem ->
-                                    selectedMovieForPlayer = movieItem
-                                    onMediaClick(movieItem)
-                                }
+                        )
+                    } else if (exitingToLibrary) {
+                        (scaleIn(
+                            initialScale = 1.04f,
+                            animationSpec = tween(320, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        ) + fadeIn(
+                            animationSpec = tween(240)
+                        )).togetherWith(
+                            scaleOut(
+                                targetScale = 0.92f,
+                                animationSpec = tween(260)
+                            ) + fadeOut(
+                                animationSpec = tween(180)
                             )
-                        }
-                        DesktopNavSection.SERIES -> {
-                            FigmaSeriesContent(
-                                series = filteredSeries,
-                                userEmail = userEmail,
-                                accessToken = accessToken,
-                                watchHistoryRevision = watchHistoryRevision,
-                                onSeriesClick = { seriesItem, epId ->
-                                    targetedEpisodeId = epId
-                                    selectedSeriesForDetail = seriesItem
-                                }
+                        )
+                    } else {
+                        // Section-to-section navigation within library (Home, Movies, Series, Recents)
+                        (fadeIn(
+                            animationSpec = tween(220)
+                        ) + scaleIn(
+                            initialScale = 0.98f,
+                            animationSpec = tween(220, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        )).togetherWith(
+                            fadeOut(
+                                animationSpec = tween(180)
+                            ) + scaleOut(
+                                targetScale = 1.01f,
+                                animationSpec = tween(180)
                             )
-                        }
-                        DesktopNavSection.RECENTS -> {
-                            FigmaRecentsContent(
-                                userEmail = userEmail,
-                                accessToken = accessToken,
-                                movies = movies,
-                                series = series,
-                                watchHistoryRevision = watchHistoryRevision,
-                                onMovieClick = { movieItem ->
-                                    selectedMovieForPlayer = movieItem
-                                    onMediaClick(movieItem)
-                                },
-                                onSeriesEpisodeClick = { seriesItem, episodeId ->
-                                    targetedEpisodeId = episodeId
-                                    selectedSeriesForDetail = seriesItem
-                                },
-                                onHistoryChanged = {
+                        )
+                    }
+                },
+                label = "CinemaScreenTransition"
+            ) { viewState ->
+                when (viewState) {
+                    is DesktopActiveView.Series -> {
+                        DesktopSeriesDetailScreen(
+                            seriesItem = viewState.series,
+                            accessToken = accessToken,
+                            userEmail = userEmail,
+                            initialEpisodeId = viewState.episodeId,
+                            isFullscreen = effectiveFullscreen,
+                            onToggleFullscreen = onToggleFullscreen,
+                            onBack = { 
+                                if (effectiveFullscreen) onToggleFullscreen() else {
+                                    selectedSeriesForDetail = null
+                                    targetedEpisodeId = null
                                     watchHistoryRevision++
                                 }
-                            )
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    is DesktopActiveView.Movie -> {
+                        val movieResumePos = remember(viewState.movie.id, userEmail, watchHistoryRevision) {
+                            com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, viewState.movie.id)
+                        }
+
+                        DesktopMoviePlayerScreen(
+                            initialMovie = viewState.movie,
+                            allMovies = filteredMovies,
+                            accessToken = accessToken,
+                            userEmail = userEmail,
+                            initialSeekMs = movieResumePos,
+                            onBack = {
+                                if (effectiveFullscreen) onToggleFullscreen()
+                                selectedMovieForPlayer = null
+                                watchHistoryRevision++
+                            },
+                            isFullscreen = effectiveFullscreen,
+                            onToggleFullscreen = onToggleFullscreen
+                        )
+                    }
+                    is DesktopActiveView.Library -> {
+                        when (viewState.section) {
+                            DesktopNavSection.HOME -> {
+                                FigmaHomeContent(
+                                    featuredItem = featuredItem ?: filteredMovies.firstOrNull() ?: filteredSeries.firstOrNull(),
+                                    continueWatching = continueWatching,
+                                    movies = filteredMovies,
+                                    series = filteredSeries,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    watchHistoryRevision = watchHistoryRevision,
+                                    onMovieClick = { movie ->
+                                        selectedMovieForPlayer = movie
+                                        onMediaClick(movie)
+                                    },
+                                    onNavigateSection = navigateTo,
+                                    onSeriesClick = { seriesItem ->
+                                        selectedSeriesForDetail = seriesItem
+                                    },
+                                    onContinueWatchingClick = { item ->
+                                        val isMovie = movies.any { it.id == item.mediaId }
+                                        if (item.isSeries && !item.seriesId.isNullOrBlank() && !isMovie) {
+                                            val matchedSeries = series.find { it.id == item.seriesId }
+                                            if (matchedSeries != null) {
+                                                targetedEpisodeId = item.mediaId
+                                                selectedSeriesForDetail = matchedSeries
+                                            }
+                                        } else {
+                                            val matchedMovie = movies.find { it.id == item.mediaId }
+                                            if (matchedMovie != null) {
+                                                selectedMovieForPlayer = matchedMovie
+                                            }
+                                        }
+                                    },
+                                    onRescan = onRescan
+                                )
+                            }
+                            DesktopNavSection.MOVIES -> {
+                                FigmaMoviesContent(
+                                    movies = filteredMovies,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    watchHistoryRevision = watchHistoryRevision,
+                                    onMovieClick = { movieItem ->
+                                        selectedMovieForPlayer = movieItem
+                                        onMediaClick(movieItem)
+                                    }
+                                )
+                            }
+                            DesktopNavSection.TV_SERIES -> {
+                                FigmaSeriesContent(
+                                    series = filteredSeries,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    watchHistoryRevision = watchHistoryRevision,
+                                    onSeriesClick = { seriesItem, epId ->
+                                        targetedEpisodeId = epId
+                                        selectedSeriesForDetail = seriesItem
+                                    }
+                                )
+                            }
+                            DesktopNavSection.RECENTS -> {
+                                FigmaRecentsContent(
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    movies = movies,
+                                    series = series,
+                                    watchHistoryRevision = watchHistoryRevision,
+                                    onMovieClick = { movieItem ->
+                                        selectedMovieForPlayer = movieItem
+                                        onMediaClick(movieItem)
+                                    },
+                                    onSeriesEpisodeClick = { seriesItem, episodeId ->
+                                        targetedEpisodeId = episodeId
+                                        selectedSeriesForDetail = seriesItem
+                                    },
+                                    onHistoryChanged = {
+                                        watchHistoryRevision++
+                                    }
+                                )
+                            }
+                            DesktopNavSection.SETTINGS -> {
+                                DesktopSettingsScreen(
+                                    userEmail = userEmail,
+                                    userName = userName,
+                                    onSignOut = onSignOut,
+                                    onRescanLibrary = onRescan,
+                                    onClearWatchHistory = {
+                                        DesktopWatchHistoryManager.clearLocalHistory(userEmail)
+                                        onClearHistory()
+                                        watchHistoryRevision++
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchResultRowCard(
+    onClick: () -> Unit,
+    content: @Composable RowScope.() -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coroutineScope = rememberCoroutineScope()
+    val clickFlashAlpha = remember { Animatable(0f) }
+
+    val scale by animateFloatAsState(
+        targetValue = when {
+            isPressed -> 0.985f
+            isHovered -> 1.015f
+            else -> 1.0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "SearchRowScale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isHovered -> Color(0xFF38BDF8)
+            else -> Color(0xFF1E2838)
+        },
+        animationSpec = tween(180),
+        label = "SearchRowBorder"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(
+                elevation = if (isHovered) 8.dp else 0.dp,
+                shape = RoundedCornerShape(8.dp),
+                spotColor = Color(0xFF00E5FF).copy(alpha = 0.25f),
+                ambientColor = Color(0xFF38BDF8).copy(alpha = 0.2f)
+            )
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isHovered) Color(0xFF171F30) else Color(0xFF131824))
+            .border(
+                width = if (isHovered) 1.5.dp else 1.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(8.dp)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null
+            ) {
+                coroutineScope.launch {
+                    clickFlashAlpha.snapTo(0.3f)
+                    clickFlashAlpha.animateTo(0f, animationSpec = tween(200))
+                }
+                onClick()
+            }
+            .pointerHoverIcon(PointerIcon.Hand)
+    ) {
+        Row(
+            modifier = Modifier.padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            content = content
+        )
+
+        if (clickFlashAlpha.value > 0f) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+            )
         }
     }
 }
@@ -602,7 +742,7 @@ private fun DesktopFigmaSidebar(
             .width(236.dp)
             .fillMaxHeight()
             .background(Color(0xFF090C12))
-            .padding(horizontal = 16.dp, vertical = 20.dp)
+            .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 24.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -639,7 +779,7 @@ private fun DesktopFigmaSidebar(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        DesktopNavSection.entries.forEach { section ->
+        DesktopNavSection.entries.filter { it != DesktopNavSection.SETTINGS }.forEach { section ->
             val isSelected = activeSection == section
             Surface(
                 modifier = Modifier
@@ -677,11 +817,13 @@ private fun DesktopFigmaSidebar(
 
         Spacer(modifier = Modifier.weight(1f))
 
+        val isSettingsSelected = activeSection == DesktopNavSection.SETTINGS
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .clickable { }
+                .background(if (isSettingsSelected) Color(0xFF101D30) else Color.Transparent)
+                .clickable { onSelectSection(DesktopNavSection.SETTINGS) }
                 .pointerHoverIcon(PointerIcon.Hand)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -690,14 +832,14 @@ private fun DesktopFigmaSidebar(
             Icon(
                 imageVector = Icons.Rounded.Settings,
                 contentDescription = "Settings",
-                tint = Color(0xFF94A3B8),
+                tint = if (isSettingsSelected) Color(0xFF38BDF8) else Color(0xFF94A3B8),
                 modifier = Modifier.size(18.dp)
             )
             Text(
                 text = "Settings",
-                color = Color(0xFF94A3B8),
+                color = if (isSettingsSelected) Color.White else Color(0xFF94A3B8),
                 fontSize = 13.sp,
-                fontWeight = FontWeight.Medium
+                fontWeight = if (isSettingsSelected) FontWeight.Bold else FontWeight.Medium
             )
         }
     }
@@ -711,7 +853,8 @@ private fun DesktopFigmaTopBar(
     userName: String,
     userEmail: String,
     userAvatarUrl: String = "",
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    onOpenSettings: () -> Unit = {}
 ) {
     var showAccountMenu by remember { mutableStateOf(false) }
     val avatarBitmap = rememberThumbnailBitmap(primaryUrl = userAvatarUrl)
@@ -980,6 +1123,34 @@ private fun DesktopFigmaTopBar(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Icon(
+                                    imageVector = Icons.Rounded.Settings,
+                                    contentDescription = "Settings",
+                                    tint = Color(0xFF38BDF8),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Settings",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        },
+                        onClick = {
+                            showAccountMenu = false
+                            onOpenSettings()
+                        }
+                    )
+
+                    HorizontalDivider(color = Color(0xFF1E2838), thickness = 1.dp)
+
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
                                     imageVector = Icons.AutoMirrored.Rounded.Logout,
                                     contentDescription = "Sign Out",
                                     tint = Color(0xFFF87171),
@@ -1077,7 +1248,35 @@ private fun ContinueWatchingCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var isHovered by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coroutineScope = rememberCoroutineScope()
+
+    val clickFlashAlpha = remember { Animatable(0f) }
+
+    val cardScale by animateFloatAsState(
+        targetValue = when {
+            isPressed -> 0.96f
+            isHovered -> 1.035f
+            else -> 1.0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "continue_card_scale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isPressed -> Color(0xFF00E5FF)
+            isHovered -> Color(0xFF38BDF8)
+            else -> Color(0xFF1E2838)
+        },
+        animationSpec = tween(durationMillis = 200),
+        label = "continue_card_border"
+    )
 
     val posterBitmap = rememberThumbnailBitmap(
         primaryUrl = item.thumbnailUrl,
@@ -1114,28 +1313,36 @@ private fun ContinueWatchingCard(
         "MOVIE"
     }
 
-    Surface(
+    Box(
         modifier = modifier
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onClick() }
+            .background(Color(0xFF0F141F))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
             .pointerHoverIcon(PointerIcon.Hand)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        when (event.type) {
-                            PointerEventType.Enter -> isHovered = true
-                            PointerEventType.Exit -> isHovered = false
-                        }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = {
+                    coroutineScope.launch {
+                        clickFlashAlpha.snapTo(0.45f)
+                        clickFlashAlpha.animateTo(0f, tween(260))
                     }
+                    onClick()
                 }
-            },
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFF0F141F),
-        border = BorderStroke(
-            1.dp,
-            if (isHovered) Color(0xFF00E5FF).copy(alpha = 0.8f) else Color(0xFF1E2838)
-        )
+            )
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (posterBitmap != null) {
@@ -1221,24 +1428,19 @@ private fun ContinueWatchingCard(
             if (isHovered) {
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.35f)),
+                        .align(Alignment.Center)
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xCC00E5FF))
+                        .shadow(12.dp, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF00E5FF).copy(alpha = 0.9f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PlayArrow,
-                            contentDescription = null,
-                            tint = Color(0xFF090D14),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Play",
+                        tint = Color.Black,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
 
@@ -1287,6 +1489,15 @@ private fun ContinueWatchingCard(
                             )
                     )
                 }
+            }
+
+            // Flash Ripple Layer Triggered on Click
+            if (clickFlashAlpha.value > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+                )
             }
         }
     }
@@ -1449,7 +1660,7 @@ private fun FigmaHomeContent(
                 actionLabel = "View all",
                 items = series.take(5),
                 accessToken = accessToken,
-                onActionClick = { onNavigateSection(DesktopNavSection.SERIES) },
+                onActionClick = { onNavigateSection(DesktopNavSection.TV_SERIES) },
                 onItemClick = onSeriesClick
             )
         }
@@ -2331,7 +2542,35 @@ private fun DesktopSeriesGridCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var isHovered by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coroutineScope = rememberCoroutineScope()
+
+    val clickFlashAlpha = remember { Animatable(0f) }
+
+    val cardScale by animateFloatAsState(
+        targetValue = when {
+            isPressed -> 0.96f
+            isHovered -> 1.035f
+            else -> 1.0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "series_card_scale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isPressed -> Color(0xFF00E5FF)
+            isHovered -> Color(0xFF38BDF8)
+            else -> Color(0xFF1A2233)
+        },
+        animationSpec = tween(durationMillis = 200),
+        label = "series_card_border"
+    )
 
     val posterBitmap = rememberThumbnailBitmap(
         primaryUrl = seriesItem.thumbnailUrl,
@@ -2347,29 +2586,36 @@ private fun DesktopSeriesGridCard(
     }
     val seasonCount = cachedSeries?.seasons?.size ?: 0
 
-    Surface(
+    Box(
         modifier = modifier
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onClick() }
+            .background(Color(0xFF0F141F))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
             .pointerHoverIcon(PointerIcon.Hand)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        when (event.type) {
-                            PointerEventType.Enter -> isHovered = true
-                            PointerEventType.Exit -> isHovered = false
-                        }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = {
+                    coroutineScope.launch {
+                        clickFlashAlpha.snapTo(0.45f)
+                        clickFlashAlpha.animateTo(0f, tween(260))
                     }
+                    onClick()
                 }
-            },
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFF0F141F),
-        shadowElevation = if (isHovered) 8.dp else 0.dp,
-        border = BorderStroke(
-            1.dp,
-            if (isHovered) Color(0xFF00E5FF).copy(alpha = 0.8f) else Color(0xFF1A2233)
-        )
+            )
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (posterBitmap != null) {
@@ -2430,28 +2676,23 @@ private fun DesktopSeriesGridCard(
                 }
             }
 
-            // Hover Action: Play Button Overlay
+            // Hover Action: Play Button Beacon Overlay
             if (isHovered) {
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.35f)),
+                        .align(Alignment.Center)
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xCC00E5FF))
+                        .shadow(12.dp, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF00E5FF).copy(alpha = 0.9f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PlayArrow,
-                            contentDescription = null,
-                            tint = Color(0xFF090D14),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Browse Series",
+                        tint = Color.Black,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
 
@@ -2476,6 +2717,15 @@ private fun DesktopSeriesGridCard(
                     fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // Flash Ripple Layer Triggered on Click
+            if (clickFlashAlpha.value > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
                 )
             }
         }
@@ -2647,7 +2897,35 @@ private fun RecentHistoryItemCard(
     onClick: () -> Unit,
     onRemove: () -> Unit
 ) {
-    var isHovered by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coroutineScope = rememberCoroutineScope()
+
+    val clickFlashAlpha = remember { Animatable(0f) }
+
+    val cardScale by animateFloatAsState(
+        targetValue = when {
+            isPressed -> 0.985f
+            isHovered -> 1.01f
+            else -> 1.0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "recent_card_scale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isPressed -> Color(0xFF00E5FF)
+            isHovered -> Color(0xFF38BDF8)
+            else -> Color(0xFF18202F)
+        },
+        animationSpec = tween(durationMillis = 200),
+        label = "recent_card_border"
+    )
 
     val posterBitmap = rememberThumbnailBitmap(
         primaryUrl = item.thumbnailUrl,
@@ -2659,26 +2937,37 @@ private fun RecentHistoryItemCard(
 
     val percentWatched = (item.progressFraction * 100).toInt().coerceIn(0, 100)
 
-    Surface(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 12.dp else 2.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.15f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
+            )
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onClick() }
+            .background(if (isHovered) Color(0xFF131824) else Color(0xFF0F141F))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
             .pointerHoverIcon(PointerIcon.Hand)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        when (event.type) {
-                            PointerEventType.Enter -> isHovered = true
-                            PointerEventType.Exit -> isHovered = false
-                        }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = {
+                    coroutineScope.launch {
+                        clickFlashAlpha.snapTo(0.4f)
+                        clickFlashAlpha.animateTo(0f, tween(260))
                     }
+                    onClick()
                 }
-            },
-        shape = RoundedCornerShape(12.dp),
-        color = if (isHovered) Color(0xFF131824) else Color(0xFF0F141F),
-        border = BorderStroke(1.dp, if (isHovered) Color(0xFF263346) else Color(0xFF18202F))
+            )
     ) {
         Row(
             modifier = Modifier
@@ -2709,21 +2998,22 @@ private fun RecentHistoryItemCard(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.4f)),
+                            .background(Color.Black.copy(alpha = 0.35f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(34.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF00E5FF)),
+                                .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
+                                .shadow(8.dp, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.PlayArrow,
                                 contentDescription = null,
                                 tint = Color(0xFF090D14),
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
@@ -2806,6 +3096,15 @@ private fun RecentHistoryItemCard(
                     modifier = Modifier.size(17.dp)
                 )
             }
+        }
+
+        // Flash Ripple Layer Triggered on Click
+        if (clickFlashAlpha.value > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+            )
         }
     }
 }
@@ -3069,29 +3368,26 @@ fun FigmaHeroSlideshowBanner(
     LaunchedEffect(currentIndex, shuffledItems, manualTriggerKey) {
         if (shuffledItems.size <= 1) return@LaunchedEffect
 
-        val displayHz = com.clotube.desktop.getActiveDisplayRefreshRate()
-        val frameIntervalMs = (1000L / displayHz.toLong()).coerceIn(4L, 33L)
-
-        // 1. PHASE A: SLIDE TRANSITION (Paced at monitor refresh rate, no 258 FPS spikes)
+        // 1. PHASE A: SLIDE TRANSITION (Paced at adaptive frame rate, eco-mode suspended)
         if (outgoingIndex != -1) {
             val slideDurationMs = 500L
             var slideElapsedMs = 0L
 
-            while (true) {
-                if (!AppLifecycleManager.isAppActive) {
-                    kotlinx.coroutines.delay(200L)
+            while (slideElapsedMs < slideDurationMs) {
+                // Check Background Eco Mode suspension
+                if (AppLifecycleManager.isEcoSuspended) {
+                    kotlinx.coroutines.delay(250L)
                     continue
                 }
-                slideElapsedMs += frameIntervalMs
-                if (slideElapsedMs >= slideDurationMs) {
-                    slideTransitionFraction = 1f
-                    outgoingIndex = -1
-                    break
-                }
+
+                val step = DesktopFramePacer.targetFrameDelayMs
+                kotlinx.coroutines.delay(step)
+                slideElapsedMs += step
                 val rawFrac = (slideElapsedMs.toFloat() / slideDurationMs.toFloat()).coerceIn(0f, 1f)
                 slideTransitionFraction = androidx.compose.animation.core.FastOutSlowInEasing.transform(rawFrac)
-                kotlinx.coroutines.delay(frameIntervalMs)
             }
+            slideTransitionFraction = 1f
+            outgoingIndex = -1
         } else {
             slideTransitionFraction = 1f
         }
@@ -3101,19 +3397,17 @@ fun FigmaHeroSlideshowBanner(
         val countdownDurationMs = 5000L
         var activeCountdownElapsedMs = 0L
 
-        while (true) {
-            if (!AppLifecycleManager.isAppActive) {
-                kotlinx.coroutines.delay(200L)
+        while (activeCountdownElapsedMs < countdownDurationMs) {
+            // Check Background Eco Mode suspension
+            if (AppLifecycleManager.isEcoSuspended) {
+                kotlinx.coroutines.delay(250L)
                 continue
             }
 
-            activeCountdownElapsedMs += frameIntervalMs
-            if (activeCountdownElapsedMs >= countdownDurationMs) {
-                timerProgressFraction = 1f
-                break
-            }
+            val step = DesktopFramePacer.targetFrameDelayMs
+            kotlinx.coroutines.delay(step)
+            activeCountdownElapsedMs += step
             timerProgressFraction = (activeCountdownElapsedMs.toFloat() / countdownDurationMs.toFloat()).coerceIn(0f, 1f)
-            kotlinx.coroutines.delay(frameIntervalMs)
         }
 
         isMovingForward = true
@@ -3540,137 +3834,6 @@ private fun FigmaCarouselSection(
                     modifier = Modifier
                         .width(248.dp)
                         .height(144.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun DesktopFigmaMediaCard(
-    item: DesktopMediaItem,
-    accessToken: String = "",
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val thumbnailBitmap = rememberThumbnailBitmap(
-        primaryUrl = item.thumbnailUrl,
-        fallbackUrl = item.fallbackThumbnailUrl,
-        accessToken = accessToken,
-        size = ThumbnailSize.CARD
-    )
-
-    Box(
-        modifier = modifier
-            .clip(CardShape)
-            .background(CardSurfaceColor)
-            .border(1.dp, CardBorderColor, CardShape)
-            .clickable(onClick = onClick)
-            .pointerHoverIcon(PointerIcon.Hand)
-    ) {
-        // Poster / Thumbnail Layer
-        if (thumbnailBitmap != null) {
-            Image(
-                bitmap = thumbnailBitmap,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                filterQuality = FilterQuality.Medium,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            // Cinema card fallback using hoisted surface color
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(CardSurfaceColor),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(12.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Movie,
-                        contentDescription = null,
-                        tint = Color(0xFF475569),
-                        modifier = Modifier.size(28.dp)
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = item.title,
-                        color = Color(0xFF94A3B8),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-
-        // Duration Badge (Top Right)
-        if (item.durationMs > 0L) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .background(BadgeBackground, BadgeShape)
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = formatDuration(item.durationMs),
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        // Bottom Scrim using hoisted brush
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomStart)
-                .background(CardBottomScrimBrush)
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            Column {
-                Text(
-                    text = item.title,
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = item.genre,
-                    color = Color(0xFF94A3B8),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-
-        val progressFraction = if (item.progressMs > 0L && item.durationMs > 0L) {
-            (item.progressMs.toFloat() / item.durationMs.toFloat()).coerceIn(0f, 1f)
-        } else 0f
-
-        if (progressFraction > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .align(Alignment.BottomCenter)
-                    .background(CardProgressTrackColor)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(progressFraction)
-                        .fillMaxHeight()
-                        .background(CardProgressFillColor)
                 )
             }
         }

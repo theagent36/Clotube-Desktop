@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
@@ -108,8 +109,11 @@ fun DesktopMoviePlayerScreen(
 ) {
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
 
-    val effectiveInitialSeekMs = remember(currentPlayingMovie.id, userEmail) {
-        if (currentPlayingMovie.id == initialMovie.id) {
+    val shouldResume = DesktopAppSettings.state.resumePlayback
+    val effectiveInitialSeekMs = remember(currentPlayingMovie.id, userEmail, shouldResume) {
+        if (!shouldResume) {
+            0L
+        } else if (currentPlayingMovie.id == initialMovie.id) {
             initialSeekMs
         } else if (userEmail.isNotBlank()) {
             DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)

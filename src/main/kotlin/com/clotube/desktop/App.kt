@@ -1,5 +1,7 @@
 package com.clotube.desktop
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -202,87 +204,93 @@ fun App(
         }
     }
 
-    if (!authState.isSignedIn) {
-        DesktopLoginScreen(
-            isLoading = isAuthenticating,
-            onSignInClick = {
-                isAuthenticating = true
-                coroutineScope.launch {
-                    val newState = DesktopAuthManager.startDesktopOAuthFlow()
-                    clearThumbnailMemoryCache()
-                    authState = newState
-                    isAuthenticating = false
-                }
-            }
-        )
-    } else {
-        if (isInitialLoading && movies.isEmpty() && series.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF07090E)),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(
-                    color = Color(0xFF42A5F5),
-                    strokeWidth = 2.5.dp,
-                    modifier = Modifier.size(36.dp)
-                )
-            }
-        } else {
-            // 3. KEY BY USER EMAIL: Destroys previous account's composition tree immediately on account switch
-            key(userEmail) {
-                DesktopHomeScreen(
-                    userEmail = userEmail,
-                    userName = authState.userName,
-                    accessToken = accessToken,
-                    userAvatarUrl = authState.userPhotoUrl ?: "",
-                    movies = movies,
-                    series = series,
-                    continueWatching = continueWatching,
-                    onMediaClick = { clickedItem ->
-                        val simDuration = if (clickedItem.durationMs > 0L) clickedItem.durationMs else 7200000L
-                        val existing = continueWatching.find { it.id == clickedItem.id }
-                        val updated = existing?.copy(progressMs = (simDuration * 0.5f).toLong())
-                            ?: clickedItem.copy(durationMs = simDuration, progressMs = (simDuration * 0.2f).toLong())
-                        continueWatching = listOf(updated) + continueWatching.filter { it.id != clickedItem.id }
-                    },
-                    onClearHistory = {
-                        continueWatching = emptyList()
-                    },
-                    onRemoveHistoryItem = { item ->
-                        continueWatching = continueWatching.filter { it.id != item.id }
-                    },
-                    isFullscreen = isFullscreen,
-                    onToggleFullscreen = onToggleFullscreen,
-                    isAppFullscreen = isFullscreen,
-                    onFullscreenToggle = { onToggleFullscreen() },
-                    onRescan = {
-                        println("[App] Manual cloud rescan requested.")
-                        isScanningActive.set(false)
-                        rescanTrigger++
-                    },
-                    onSignOut = {
-                        val loggingOutEmail = userEmail
-                        val currentToken = accessToken
-                        println("[App] User signing out from: $loggingOutEmail")
-                        DesktopWatchHistorySync.stopAutoRecoveryWorker()
-                        if (!loggingOutEmail.isNullOrBlank() && !currentToken.isNullOrBlank()) {
-                            @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-                            GlobalScope.launch(Dispatchers.IO) {
-                                DesktopWatchHistorySync.pushLocalHistory(loggingOutEmail, currentToken, force = true)
-                            }
-                        }
+    Crossfade(
+        targetState = authState.isSignedIn,
+        animationSpec = tween(durationMillis = 350),
+        label = "AuthSessionCrossfade"
+    ) { signedIn ->
+        if (!signedIn) {
+            DesktopLoginScreen(
+                isLoading = isAuthenticating,
+                onSignInClick = {
+                    isAuthenticating = true
+                    coroutineScope.launch {
+                        val newState = DesktopAuthManager.startDesktopOAuthFlow()
                         clearThumbnailMemoryCache()
-                        DesktopLibraryCache.clearMemory(loggingOutEmail)
-                        DesktopAuthManager.signOut()
-                        // Instantly flush in-memory media and reset auth state
-                        movies = emptyList()
-                        series = emptyList()
-                        continueWatching = emptyList()
-                        authState = DesktopAuthManager.getSavedAuthState()
+                        authState = newState
+                        isAuthenticating = false
                     }
-                )
+                }
+            )
+        } else {
+            if (isInitialLoading && movies.isEmpty() && series.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF07090E)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF42A5F5),
+                        strokeWidth = 2.5.dp,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+            } else {
+                // 3. KEY BY USER EMAIL: Destroys previous account's composition tree immediately on account switch
+                key(userEmail) {
+                    DesktopHomeScreen(
+                        userEmail = userEmail,
+                        userName = authState.userName,
+                        accessToken = accessToken,
+                        userAvatarUrl = authState.userPhotoUrl ?: "",
+                        movies = movies,
+                        series = series,
+                        continueWatching = continueWatching,
+                        onMediaClick = { clickedItem ->
+                            val simDuration = if (clickedItem.durationMs > 0L) clickedItem.durationMs else 7200000L
+                            val existing = continueWatching.find { it.id == clickedItem.id }
+                            val updated = existing?.copy(progressMs = (simDuration * 0.5f).toLong())
+                                ?: clickedItem.copy(durationMs = simDuration, progressMs = (simDuration * 0.2f).toLong())
+                            continueWatching = listOf(updated) + continueWatching.filter { it.id != clickedItem.id }
+                        },
+                        onClearHistory = {
+                            continueWatching = emptyList()
+                        },
+                        onRemoveHistoryItem = { item ->
+                            continueWatching = continueWatching.filter { it.id != item.id }
+                        },
+                        isFullscreen = isFullscreen,
+                        onToggleFullscreen = onToggleFullscreen,
+                        isAppFullscreen = isFullscreen,
+                        onFullscreenToggle = { onToggleFullscreen() },
+                        onRescan = {
+                            println("[App] Manual cloud rescan requested.")
+                            isScanningActive.set(false)
+                            rescanTrigger++
+                        },
+                        onSignOut = {
+                            val loggingOutEmail = userEmail
+                            val currentToken = accessToken
+                            println("[App] User signing out from: $loggingOutEmail")
+                            DesktopWatchHistorySync.stopAutoRecoveryWorker()
+                            if (!loggingOutEmail.isNullOrBlank() && !currentToken.isNullOrBlank()) {
+                                @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+                                GlobalScope.launch(Dispatchers.IO) {
+                                    DesktopWatchHistorySync.pushLocalHistory(loggingOutEmail, currentToken, force = true)
+                                }
+                            }
+                            clearThumbnailMemoryCache()
+                            DesktopLibraryCache.clearMemory(loggingOutEmail)
+                            DesktopAuthManager.signOut()
+                            // Instantly flush in-memory media and reset auth state
+                            movies = emptyList()
+                            series = emptyList()
+                            continueWatching = emptyList()
+                            authState = DesktopAuthManager.getSavedAuthState()
+                        }
+                    )
+                }
             }
         }
     }

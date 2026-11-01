@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import kotlinx.coroutines.delay
@@ -263,12 +264,14 @@ private fun DesktopSeriesPlayerContent(
         (remainingMs / 1000).toInt().coerceAtLeast(1)
     }
 
+    val shouldAutoPlay = DesktopAppSettings.state.autoPlayNextEpisode
+
     // LibVLC Native Event Hook for finished playback
-    DisposableEffect(player, hasNextEpisode, onNextEpisode) {
+    DisposableEffect(player, hasNextEpisode, onNextEpisode, shouldAutoPlay) {
         val listener = object : MediaPlayerEventAdapter() {
             override fun finished(mediaPlayer: MediaPlayer) {
                 SwingUtilities.invokeLater {
-                    if (hasNextEpisode && onNextEpisode != null && !hasAutoPlayTriggered) {
+                    if (shouldAutoPlay && hasNextEpisode && onNextEpisode != null && !hasAutoPlayTriggered) {
                         hasAutoPlayTriggered = true
                         onNextEpisode()
                     }
@@ -281,16 +284,17 @@ private fun DesktopSeriesPlayerContent(
         }
     }
 
-    // Trigger condition: Last 35 seconds of the episode
-    val shouldShowAutoPlayPrompt = hasNextEpisode && 
+    // Trigger condition: Last 35 seconds of the episode (only when autoPlay is enabled)
+    val shouldShowAutoPlayPrompt = shouldAutoPlay &&
+            hasNextEpisode && 
             !isAutoPlayDismissed && 
             !hasAutoPlayTriggered &&
             player.totalDurationMs > 40000L && 
             remainingMs in 1L..35000L
 
     // Auto-advance to next episode when runtime reaches 0
-    LaunchedEffect(shouldShowAutoPlayPrompt, remainingMs) {
-        if (shouldShowAutoPlayPrompt && remainingMs <= 800L && !hasAutoPlayTriggered && onNextEpisode != null) {
+    LaunchedEffect(shouldShowAutoPlayPrompt, remainingMs, shouldAutoPlay) {
+        if (shouldAutoPlay && shouldShowAutoPlayPrompt && remainingMs <= 800L && !hasAutoPlayTriggered && onNextEpisode != null) {
             hasAutoPlayTriggered = true
             onNextEpisode()
         }

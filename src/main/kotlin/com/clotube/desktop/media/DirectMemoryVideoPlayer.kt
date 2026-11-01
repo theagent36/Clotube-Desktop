@@ -7,40 +7,23 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
+import com.clotube.desktop.data.DesktopAppSettings
+import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
-import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
+import uk.co.caprica.vlcj.player.embedded.EmbeddedMediaPlayer
 import uk.co.caprica.vlcj.player.embedded.videosurface.callback.BufferFormat
 import uk.co.caprica.vlcj.player.embedded.videosurface.callback.BufferFormatCallback
 import uk.co.caprica.vlcj.player.embedded.videosurface.callback.RenderCallback
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-
-/**
- * Shared singleton LibVLC factory.
- * Reusing a single instance ensures core audio/video modules are not prematurely destroyed.
- */
-object SharedVlcFactory {
-    val instance: MediaPlayerFactory by lazy {
-        MediaPlayerFactory(
-            "--no-video-title-show",
-            "--no-sub-autodetect-file",
-            "--no-video-on-top",
-            "--network-caching=3000",
-            "--clock-jitter=0",
-            "--clock-synchro=0",
-            "--drop-late-frames",
-            "--skip-frames",
-            "--quiet"
-        )
-    }
-}
 
 private fun MediaPlayer.subtitles() = this.subpictures()
 
@@ -48,11 +31,27 @@ class DirectMemoryVideoPlayer(
     val mediaUrl: String,
     val onFirstFrame: () -> Unit = {}
 ) {
-    private val isReleased = AtomicBoolean(false)
-    private val releaseExecutor = Executors.newSingleThreadExecutor()
-    private var hasAppliedPreferences = AtomicBoolean(false)
+    private val settings = DesktopAppSettings.state
 
-    val mediaPlayer = SharedVlcFactory.instance.mediaPlayers().newEmbeddedMediaPlayer()
+    private val factory: MediaPlayerFactory by lazy {
+        val isHwEnabled = settings.hardwareAcceleration
+        val hwFlag = if (isHwEnabled) "--avcodec-hw=any" else "--avcodec-hw=none"
+
+        println("[DirectMemoryVideoPlayer] Initializing LibVLC Engine: Hardware Acceleration = $isHwEnabled ($hwFlag)")
+
+        MediaPlayerFactory(
+            "--no-video-title-show",
+            "--no-sub-autodetect-file",
+            "--drop-late-frames",
+            "--skip-frames",
+            "--clock-jitter=0",
+            "--clock-synchro=0",
+            "--quiet",
+            hwFlag
+        )
+    }
+
+    val mediaPlayer: EmbeddedMediaPlayer = factory.mediaPlayers().newEmbeddedMediaPlayer()
 
     var currentFrame by mutableStateOf<ImageBitmap?>(null)
         private set
@@ -62,89 +61,39 @@ class DirectMemoryVideoPlayer(
     var currentTimeMs by mutableLongStateOf(0L)
     var totalDurationMs by mutableLongStateOf(0L)
     var positionFraction by mutableFloatStateOf(0f)
-    var volume by mutableIntStateOf(DesktopTrackPreferences.stickyVolume)
+
+    var volume by mutableIntStateOf(
+        if (settings.rememberVolume) DesktopTrackPreferences.stickyVolume else 100
+    )
+
+    var isMuted by mutableStateOf(false)
 
     var frameTick by mutableIntStateOf(0)
         private set
 
     private val frameLock = Any()
-    private var pixelBuffer: ByteArray? = null
+    private var pixelBufferA: ByteArray? = null
+    private var pixelBufferB: ByteArray? = null
+    private var skiaBitmapA: Bitmap? = null
+    private var skiaBitmapB: Bitmap? = null
+    private var composeBitmapA: ImageBitmap? = null
+    private var composeBitmapB: ImageBitmap? = null
+    private var useBufferA: Boolean = true
     private var imageInfo: ImageInfo? = null
     private var nativePitch: Int = 0
 
-    private val eventListener = object : MediaPlayerEventAdapter() {
-        private fun applyPreferencesDelayed(mp: MediaPlayer) {
-            if (hasAppliedPreferences.compareAndSet(false, true)) {
-                val scheduler = Executors.newSingleThreadScheduledExecutor()
-                scheduler.schedule({
-                    try {
-                        if (!isReleased.get()) {
-                            DesktopTrackPreferences.applyStickyPreferences(mp)
-                        }
-                    } catch (_: Throwable) {
-                    } finally {
-                        scheduler.shutdown()
-                    }
-                }, 450, java.util.concurrent.TimeUnit.MILLISECONDS)
-            }
-        }
-
-        override fun playing(mp: MediaPlayer) {
-            if (isReleased.get()) return
-            isPlaying = true
-            isBuffering = false
-            applyPreferencesDelayed(mp)
-        }
-
-        override fun videoOutput(mp: MediaPlayer, newCount: Int) {
-            if (isReleased.get()) return
-            applyPreferencesDelayed(mp)
-        }
-
-        override fun buffering(mp: MediaPlayer, newCache: Float) {
-            if (isReleased.get()) return
-            isBuffering = newCache < 100.0f
-        }
-
-        override fun paused(mp: MediaPlayer) {
-            if (isReleased.get()) return
-            isPlaying = false
-        }
-
-        override fun stopped(mp: MediaPlayer) {
-            if (isReleased.get()) return
-            isPlaying = false
-        }
-
-        override fun finished(mp: MediaPlayer) {
-            if (isReleased.get()) return
-            isPlaying = false
-        }
-
-        override fun timeChanged(mp: MediaPlayer, newTime: Long) {
-            if (isReleased.get()) return
-            currentTimeMs = newTime
-        }
-
-        override fun lengthChanged(mp: MediaPlayer, newLength: Long) {
-            if (isReleased.get()) return
-            totalDurationMs = newLength
-        }
-
-        override fun positionChanged(mp: MediaPlayer, newPosition: Float) {
-            if (isReleased.get()) return
-            positionFraction = newPosition
-        }
-    }
+    @Volatile
+    private var isDisposed: Boolean = false
+    private val hasAppliedPreferences = AtomicBoolean(false)
 
     init {
-        val callbackSurface = SharedVlcFactory.instance.videoSurfaces().newVideoSurface(
+        val callbackSurface = factory.videoSurfaces().newVideoSurface(
             object : BufferFormatCallback {
                 override fun getBufferFormat(sourceWidth: Int, sourceHeight: Int): BufferFormat {
                     val pitch = sourceWidth * 4
-                    nativePitch = pitch
+                    val byteCount = pitch * sourceHeight
 
-                    imageInfo = ImageInfo(
+                    val info = ImageInfo(
                         width = sourceWidth,
                         height = sourceHeight,
                         colorType = ColorType.BGRA_8888,
@@ -152,7 +101,22 @@ class DirectMemoryVideoPlayer(
                     )
 
                     synchronized(frameLock) {
-                        pixelBuffer = ByteArray(pitch * sourceHeight)
+                        nativePitch = pitch
+                        imageInfo = info
+
+                        pixelBufferA = ByteArray(byteCount)
+                        pixelBufferB = ByteArray(byteCount)
+
+                        skiaBitmapA?.close()
+                        skiaBitmapB?.close()
+
+                        val bmpA = Bitmap().apply { allocPixels(info) }
+                        val bmpB = Bitmap().apply { allocPixels(info) }
+
+                        skiaBitmapA = bmpA
+                        skiaBitmapB = bmpB
+                        composeBitmapA = bmpA.asComposeImageBitmap()
+                        composeBitmapB = bmpB.asComposeImageBitmap()
                     }
 
                     return BufferFormat(
@@ -168,24 +132,27 @@ class DirectMemoryVideoPlayer(
             },
             object : RenderCallback {
                 override fun display(mp: MediaPlayer, nativeBuffers: Array<out ByteBuffer>, bufferFormat: BufferFormat) {
-                    if (isReleased.get()) return
-                    val directBuf = nativeBuffers.firstOrNull() ?: return
-                    val info = imageInfo ?: return
+                    if (isDisposed || nativeBuffers.isEmpty()) return
+                    val directBuf = nativeBuffers[0]
 
                     synchronized(frameLock) {
-                        if (isReleased.get()) return
-                        val bytes = pixelBuffer ?: return
-                        directBuf.rewind()
-                        directBuf.get(bytes)
+                        if (isDisposed) return
+                        val info = imageInfo ?: return
+                        val writeBytes = if (useBufferA) pixelBufferA else pixelBufferB
+                        val writeBmp = if (useBufferA) skiaBitmapA else skiaBitmapB
+                        val targetComposeBmp = if (useBufferA) composeBitmapA else composeBitmapB
 
-                        try {
-                            val skiaImage = Image.makeRaster(info, bytes, nativePitch)
-                            val composeBitmap = skiaImage.toComposeImageBitmap()
-                            skiaImage.close()
-                            currentFrame = composeBitmap
-                        } catch (_: Throwable) {
-                            return
-                        }
+                        if (writeBytes == null || writeBmp == null || targetComposeBmp == null) return
+
+                        directBuf.rewind()
+                        val remaining = directBuf.remaining().coerceAtMost(writeBytes.size)
+                        directBuf.get(writeBytes, 0, remaining)
+
+                        writeBmp.installPixels(info, writeBytes, nativePitch)
+                        writeBmp.notifyPixelsChanged()
+
+                        currentFrame = targetComposeBmp
+                        useBufferA = !useBufferA
                     }
 
                     if (!isFirstFrameRendered) {
@@ -201,27 +168,68 @@ class DirectMemoryVideoPlayer(
         )
 
         mediaPlayer.videoSurface().set(callbackSurface)
-        mediaPlayer.events().addMediaPlayerEventListener(eventListener)
 
-        // Force Windows Volume Mixer session to unmute and sync volume
         try {
             mediaPlayer.audio().setMute(false)
             mediaPlayer.audio().setVolume(volume)
         } catch (_: Throwable) {}
 
+        mediaPlayer.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
+            override fun playing(mp: MediaPlayer) {
+                isPlaying = true
+                isBuffering = false
+                if (hasAppliedPreferences.compareAndSet(false, true)) {
+                    Executors.newSingleThreadScheduledExecutor().schedule({
+                        DesktopTrackPreferences.applyStickyPreferences(mp)
+                    }, 400, TimeUnit.MILLISECONDS)
+                }
+            }
+
+            override fun buffering(mp: MediaPlayer, newCache: Float) {
+                isBuffering = newCache < 100.0f
+            }
+
+            override fun paused(mp: MediaPlayer) {
+                isPlaying = false
+            }
+
+            override fun stopped(mp: MediaPlayer) {
+                isPlaying = false
+            }
+
+            override fun finished(mp: MediaPlayer) {
+                isPlaying = false
+            }
+
+            override fun timeChanged(mp: MediaPlayer, newTime: Long) {
+                if (kotlin.math.abs(newTime - currentTimeMs) >= 250L || newTime == 0L) {
+                    currentTimeMs = newTime
+                }
+            }
+
+            override fun lengthChanged(mp: MediaPlayer, newLength: Long) {
+                totalDurationMs = newLength
+            }
+
+            override fun positionChanged(mp: MediaPlayer, newPosition: Float) {
+                if (kotlin.math.abs(newPosition - positionFraction) >= 0.001f) {
+                    positionFraction = newPosition
+                }
+            }
+        })
+
+        val bufferMs = settings.bufferDepthMs
+        val fileCacheMs = (bufferMs * 0.6).toInt()
         mediaPlayer.media().play(
             mediaUrl,
-            ":network-caching=2000",
-            ":file-caching=1500",
+            ":network-caching=$bufferMs",
+            ":file-caching=$fileCacheMs",
             ":clock-jitter=0",
             ":clock-synchro=0"
         )
     }
 
-    var isMuted by mutableStateOf(false)
-
     fun seekToFraction(fraction: Float) {
-        if (isReleased.get()) return
         val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
         if (totalMs > 0L) {
             val targetMs = (fraction.coerceIn(0f, 1f) * totalMs).toLong()
@@ -231,27 +239,25 @@ class DirectMemoryVideoPlayer(
     }
 
     fun seekToTime(timeMs: Long) {
-        if (isReleased.get()) return
-        val length = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
-        val target = if (length > 0L) timeMs.coerceIn(0L, length) else timeMs.coerceAtLeast(0L)
-        mediaPlayer.controls().setTime(target)
-        currentTimeMs = target
+        val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
+        val clamped = if (totalMs > 0L) timeMs.coerceIn(0L, totalMs) else timeMs.coerceAtLeast(0L)
+        mediaPlayer.controls().setTime(clamped)
+        currentTimeMs = clamped
     }
 
     fun play() {
-        if (isReleased.get()) return
+        if (isDisposed) return
         mediaPlayer.controls().play()
         isPlaying = true
     }
 
     fun pause() {
-        if (isReleased.get()) return
+        if (isDisposed) return
         mediaPlayer.controls().pause()
         isPlaying = false
     }
 
     fun togglePlayPause() {
-        if (isReleased.get()) return
         if (mediaPlayer.status().isPlaying) {
             mediaPlayer.controls().pause()
             isPlaying = false
@@ -263,7 +269,7 @@ class DirectMemoryVideoPlayer(
 
     @JvmName("changeMuted")
     fun setMuted(muted: Boolean) {
-        if (isReleased.get()) return
+        if (isDisposed) return
         isMuted = muted
         try {
             mediaPlayer.audio().setMute(muted)
@@ -271,7 +277,7 @@ class DirectMemoryVideoPlayer(
     }
 
     fun setVolumeLevel(vol: Int) {
-        if (isReleased.get()) return
+        if (isDisposed) return
         volume = vol.coerceIn(0, 100)
         DesktopTrackPreferences.saveVolume(volume)
         try {
@@ -285,7 +291,6 @@ class DirectMemoryVideoPlayer(
         } catch (_: Throwable) {}
     }
 
-    // Add track discovery and selection helpers
     fun getAudioTracks(): List<Pair<Int, String>> {
         return try {
             mediaPlayer.audio().trackDescriptions()?.map { it.id() to it.description() } ?: emptyList()
@@ -308,18 +313,14 @@ class DirectMemoryVideoPlayer(
             if (description.isNotBlank()) {
                 DesktopTrackPreferences.saveAudioTrack(description)
             }
-        } catch (e: Exception) {
-            System.err.println("[DirectMemoryVideoPlayer] Failed to set audio track: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
     fun setSubtitleTrack(trackId: Int, description: String = "", isOff: Boolean = (trackId == -1)) {
         try {
             mediaPlayer.subtitles().setTrack(trackId)
             DesktopTrackPreferences.saveSubtitleTrack(description, isOff)
-        } catch (e: Exception) {
-            System.err.println("[DirectMemoryVideoPlayer] Failed to set subtitle track: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
     fun getActiveAudioTrackId(): Int {
@@ -330,49 +331,27 @@ class DirectMemoryVideoPlayer(
         return try { mediaPlayer.subtitles().track() } catch (_: Exception) { -1 }
     }
 
-    /**
-     * Graceful teardown protocol preventing LibVLC decoder/clock crashes on exit.
-     */
     fun release() {
-        if (isReleased.getAndSet(true)) return
-
-        // 1. Immediately unlink listener so no callbacks reach Compose
+        if (isDisposed) return
+        isDisposed = true
         try {
-            mediaPlayer.events().removeMediaPlayerEventListener(eventListener)
+            mediaPlayer.controls().stop()
+            mediaPlayer.release()
+            factory.release()
         } catch (_: Throwable) {}
 
-        // 2. Clear visual frame
         synchronized(frameLock) {
             currentFrame = null
-        }
-
-        // 3. Dispatch native shutdown to background thread so UI never hangs
-        releaseExecutor.submit {
+            composeBitmapA = null
+            composeBitmapB = null
             try {
-                // Signal LibVLC to stop demuxing
-                mediaPlayer.controls().stop()
-
-                // Allow HEVC/H.264 worker threads a brief moment to exit cleanly
-                var count = 0
-                while (mediaPlayer.status().isPlaying && count < 10) {
-                    Thread.sleep(10)
-                    count++
-                }
-                Thread.sleep(70)
-
-                // Detach video surface and release player instance
-                mediaPlayer.videoSurface().set(null)
-                mediaPlayer.release()
-
-                synchronized(frameLock) {
-                    pixelBuffer = null
-                    imageInfo = null
-                }
-            } catch (_: Throwable) {
-                // Suppress native teardown noise
-            } finally {
-                releaseExecutor.shutdown()
-            }
+                skiaBitmapA?.close()
+                skiaBitmapB?.close()
+            } catch (_: Throwable) {}
+            skiaBitmapA = null
+            skiaBitmapB = null
+            pixelBufferA = null
+            pixelBufferB = null
         }
     }
 }

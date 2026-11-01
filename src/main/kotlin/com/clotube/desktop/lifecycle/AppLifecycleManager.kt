@@ -3,34 +3,42 @@ package com.clotube.desktop.lifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.clotube.desktop.data.DesktopAppSettings
 import java.awt.Frame
 import java.awt.Window
-import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.awt.event.WindowFocusListener
+import java.awt.event.WindowStateListener
 
 object AppLifecycleManager {
-    var isAppActive by mutableStateOf(true)
+    var isWindowFocused by mutableStateOf(true)
         private set
 
+    var isWindowMinimized by mutableStateOf(false)
+        private set
+
+    val isAppActive: Boolean
+        get() = isWindowFocused && !isWindowMinimized
+
+    val isEcoSuspended: Boolean
+        get() = DesktopAppSettings.state.backgroundEcoMode && !isAppActive
+
     fun attachToWindow(window: Window) {
-        val checkState = {
-            val isIconified = if (window is Frame) (window.extendedState and Frame.ICONIFIED) != 0 else false
-            isAppActive = window.isVisible && !isIconified && window.isFocused && window.isActive
-        }
-
         window.addWindowFocusListener(object : WindowFocusListener {
-            override fun windowGainedFocus(e: WindowEvent?) { checkState() }
-            override fun windowLostFocus(e: WindowEvent?) { isAppActive = false }
+            override fun windowGainedFocus(e: WindowEvent?) {
+                isWindowFocused = true
+            }
+
+            override fun windowLostFocus(e: WindowEvent?) {
+                isWindowFocused = false
+            }
         })
 
-        window.addWindowListener(object : WindowAdapter() {
-            override fun windowActivated(e: WindowEvent?) { checkState() }
-            override fun windowDeactivated(e: WindowEvent?) { isAppActive = false }
-            override fun windowIconified(e: WindowEvent?) { isAppActive = false }
-            override fun windowDeiconified(e: WindowEvent?) { checkState() }
+        window.addWindowStateListener(object : WindowStateListener {
+            override fun windowStateChanged(e: WindowEvent?) {
+                val state = e?.newState ?: 0
+                isWindowMinimized = (state and Frame.ICONIFIED) != 0
+            }
         })
-
-        checkState()
     }
 }

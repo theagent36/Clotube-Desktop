@@ -1,11 +1,20 @@
 package com.clotube.desktop.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,9 +30,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -32,11 +43,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import uk.co.caprica.vlcj.player.base.MediaPlayer
@@ -111,10 +124,12 @@ fun DesktopInlinePlayerPanel(
                 SwingUtilities.invokeLater {
                     try {
                         if (!isReleased.get()) {
+                            val bufferMs = DesktopAppSettings.state.bufferDepthMs
+                            val fileCacheMs = (bufferMs * 0.6).toInt()
                             player.media().play(
                                 streamUrl,
-                                ":network-caching=2000",
-                                ":file-caching=1500",
+                                ":network-caching=$bufferMs",
+                                ":file-caching=$fileCacheMs",
                                 ":clock-jitter=0",
                                 ":clock-synchro=0"
                             )
@@ -466,84 +481,11 @@ fun DesktopInlinePlayerPanel(
                         ) {
                             items(seriesEpisodes, key = { it.id }) { ep ->
                                 val isSelected = ep.id == (activeEpisodeId.ifBlank { media.id })
-                                val thumb = rememberThumbnailBitmap(primaryUrl = ep.thumbnailUrl)
-
-                                Surface(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable { onEpisodeSelected(ep) }
-                                        .pointerHoverIcon(PointerIcon.Hand),
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (isSelected) Color(0xFF131E30) else Color(0xFF0F141F),
-                                    border = if (isSelected) BorderStroke(1.dp, Color(0xFF2563EB)) else BorderStroke(1.dp, Color(0xFF161E2E))
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .width(76.dp)
-                                                .height(44.dp)
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(Color(0xFF161E2E)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (thumb != null) {
-                                                Image(
-                                                    bitmap = thumb,
-                                                    contentDescription = ep.title,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
-                                            }
-                                            if (isSelected) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(20.dp)
-                                                        .clip(CircleShape)
-                                                        .background(Color(0xFF2563EB)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(13.dp))
-                                                }
-                                            }
-                                        }
-
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "EPISODE ${ep.episodeNumber}",
-                                                color = Color(0xFF38BDF8),
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                text = ep.title,
-                                                color = Color.White,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = "${ep.durationFormatted} • Direct Stream",
-                                                color = Color(0xFF64748B),
-                                                fontSize = 9.sp
-                                            )
-                                        }
-
-                                        if (isSelected) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.GraphicEq,
-                                                contentDescription = null,
-                                                tint = Color(0xFF00E5FF),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
-                                }
+                                InlineEpisodePlaylistItem(
+                                    episode = ep,
+                                    isSelected = isSelected,
+                                    onSelect = { onEpisodeSelected(ep) }
+                                )
                             }
                         }
                     }
@@ -717,5 +659,155 @@ private fun formatTimecode(ms: Long): String {
         "%02d:%02d:%02d".format(hours, minutes, seconds)
     } else {
         "%02d:%02d".format(minutes, seconds)
+    }
+}
+
+@Composable
+private fun InlineEpisodePlaylistItem(
+    episode: DesktopEpisode,
+    isSelected: Boolean,
+    onSelect: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coroutineScope = rememberCoroutineScope()
+    val clickFlashAlpha = remember { Animatable(0f) }
+
+    val scale by animateFloatAsState(
+        targetValue = when {
+            isPressed -> 0.98f
+            isHovered -> 1.02f
+            else -> 1.0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "InlineEpisodeScale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isSelected -> Color(0xFF00E5FF)
+            isHovered -> Color(0xFF38BDF8)
+            else -> Color(0xFF161E2E)
+        },
+        animationSpec = tween(180),
+        label = "InlineEpisodeBorder"
+    )
+
+    val thumb = rememberThumbnailBitmap(primaryUrl = episode.thumbnailUrl)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(
+                elevation = if (isHovered) 10.dp else if (isSelected) 4.dp else 0.dp,
+                shape = RoundedCornerShape(8.dp),
+                spotColor = if (isHovered) Color(0xFF00E5FF).copy(alpha = 0.35f) else Color.Transparent,
+                ambientColor = if (isSelected) Color(0xFF38BDF8).copy(alpha = 0.25f) else Color.Transparent
+            )
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isSelected) Color(0xFF131E30) else if (isHovered) Color(0xFF141B29) else Color(0xFF0F141F))
+            .border(
+                width = if (isSelected || isHovered) 1.5.dp else 1.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(8.dp)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null
+            ) {
+                coroutineScope.launch {
+                    clickFlashAlpha.snapTo(0.35f)
+                    clickFlashAlpha.animateTo(0f, animationSpec = tween(220))
+                }
+                onSelect()
+            }
+            .pointerHoverIcon(PointerIcon.Hand)
+    ) {
+        Row(
+            modifier = Modifier.padding(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(76.dp)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFF161E2E)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (thumb != null) {
+                    Image(
+                        bitmap = thumb,
+                        contentDescription = episode.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                if (isSelected || isHovered) {
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(if (isSelected) Color(0xFF2563EB) else Color(0xCC0B111A)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = null,
+                            tint = if (isSelected) Color.White else Color(0xFF00E5FF),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "EPISODE ${episode.episodeNumber}",
+                    color = if (isSelected || isHovered) Color(0xFF00E5FF) else Color(0xFF38BDF8),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = episode.title,
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${episode.durationFormatted} • Direct Stream",
+                    color = Color(0xFF64748B),
+                    fontSize = 9.sp
+                )
+            }
+
+            if (isSelected) {
+                Icon(
+                    imageVector = Icons.Rounded.GraphicEq,
+                    contentDescription = null,
+                    tint = Color(0xFF00E5FF),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+
+        if (clickFlashAlpha.value > 0f) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+            )
+        }
     }
 }

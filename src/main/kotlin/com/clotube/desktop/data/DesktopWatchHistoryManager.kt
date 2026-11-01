@@ -746,7 +746,14 @@ object DesktopWatchHistoryManager {
      * Clears all watch history records for the user.
      */
     suspend fun clearAllHistory(email: String) = withContext(Dispatchers.IO) {
-        if (email.isBlank()) return@withContext
+        clearLocalHistory(email)
+    }
+
+    /**
+     * Synchronously clears local watch history cache and disk file for the given user.
+     */
+    fun clearLocalHistory(email: String) {
+        if (email.isBlank()) return
         val local = loadLocalSync(email)
         synchronized(local) {
             local.clear()
