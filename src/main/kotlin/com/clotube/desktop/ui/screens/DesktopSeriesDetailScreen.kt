@@ -41,8 +41,8 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.ui.components.PacedEqualizerBars
 import com.clotube.desktop.ui.components.PacedLoadingSpinner
-import com.clotube.desktop.ui.components.isAppWindowActiveAndVisible
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -1128,7 +1128,7 @@ private fun EpisodeListItemCard(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 if (isCurrentlyPlaying) {
-                    AnimatedEqualizerBars(
+                    PacedEqualizerBars(
                         isPlaying = isPlayerPlaying,
                         barColor = Color(0xFF00E5FF)
                     )
@@ -1160,48 +1160,11 @@ private fun AnimatedEqualizerBars(
     modifier: Modifier = Modifier,
     barColor: Color = Color(0xFF00E5FF)
 ) {
-    var b1 by remember { mutableFloatStateOf(0.25f) }
-    var b2 by remember { mutableFloatStateOf(0.85f) }
-    var b3 by remember { mutableFloatStateOf(0.35f) }
-    var b4 by remember { mutableFloatStateOf(0.70f) }
-
-    LaunchedEffect(isPlaying) {
-        if (!isPlaying) {
-            b1 = 0.25f; b2 = 0.25f; b3 = 0.25f; b4 = 0.25f
-            return@LaunchedEffect
-        }
-        val startTime = System.currentTimeMillis()
-        while (true) {
-            if (!isAppWindowActiveAndVisible()) {
-                delay(250L)
-                continue
-            }
-            val t = System.currentTimeMillis() - startTime
-            b1 = 0.25f + ((kotlin.math.sin(t.toDouble() / 210.0) + 1.0) / 2.0 * 0.75f).toFloat()
-            b2 = 0.20f + ((kotlin.math.sin(t.toDouble() / 175.0 + 1.0) + 1.0) / 2.0 * 0.65f).toFloat()
-            b3 = 0.35f + ((kotlin.math.sin(t.toDouble() / 240.0 + 2.0) + 1.0) / 2.0 * 0.60f).toFloat()
-            b4 = 0.25f + ((kotlin.math.sin(t.toDouble() / 195.0 + 0.5) + 1.0) / 2.0 * 0.70f).toFloat()
-            delay(20L)
-        }
-    }
-
-    val heights = if (isPlaying) listOf(b1, b2, b3, b4) else listOf(0.25f, 0.25f, 0.25f, 0.25f)
-
-    Row(
-        modifier = modifier.size(width = 16.dp, height = 15.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.Bottom
-    ) {
-        heights.forEach { fraction ->
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight(fraction.coerceIn(0.15f, 1f))
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(barColor)
-            )
-        }
-    }
+    PacedEqualizerBars(
+        isPlaying = isPlaying,
+        modifier = modifier,
+        barColor = barColor
+    )
 }
 
 @Composable

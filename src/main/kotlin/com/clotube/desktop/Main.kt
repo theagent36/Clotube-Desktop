@@ -7,15 +7,20 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
 import com.sun.jna.Native
+import com.sun.jna.NativeLibrary
 import com.sun.jna.Pointer
 import com.sun.jna.platform.win32.User32
 import com.sun.jna.platform.win32.WinDef.HWND
 import com.sun.jna.platform.win32.WinDef.RECT
 import com.sun.jna.platform.win32.WinUser
+import uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil
+import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import java.awt.Color as AwtColor
 import java.awt.GraphicsEnvironment
+import java.io.File
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
 
@@ -52,7 +57,39 @@ fun getActiveDisplayRefreshRate(): Int {
     }
 }
 
-fun main() = application {
+fun setupLibVlcEnvironment() {
+    val resourcesDir = System.getProperty("compose.application.resources.dir")
+    val candidateDirs = listOfNotNull(
+        resourcesDir?.let { File(it, "windows/vlc") },
+        resourcesDir?.let { File(it, "vlc") },
+        File("package-resources/windows/vlc"), // Local development fallback
+        File("vlc")
+    )
+
+    val bundledVlc = candidateDirs.firstOrNull { dir ->
+        dir.exists() && File(dir, "libvlc.dll").exists()
+    }
+
+    if (bundledVlc != null) {
+        val vlcPath = bundledVlc.absolutePath
+        val pluginsPath = File(bundledVlc, "plugins").absolutePath
+
+        NativeLibrary.addSearchPath(RuntimeUtil.getLibVlcLibraryName(), vlcPath)
+        NativeLibrary.addSearchPath(RuntimeUtil.getLibVlcCoreLibraryName(), vlcPath)
+
+        System.setProperty("jna.library.path", vlcPath)
+        System.setProperty("VLC_PLUGIN_PATH", pluginsPath)
+        println("[Clotube] Initialized bundled LibVLC from: $vlcPath")
+    } else {
+        println("[Clotube] Bundled VLC not detected; running system NativeDiscovery")
+        NativeDiscovery().discover()
+    }
+}
+
+fun main() {
+    setupLibVlcEnvironment()
+
+    // 1. Must be configured before Compose/AWT subsystems initialize
     System.setProperty("java.net.preferIPv4Stack", "true")
     System.setProperty("java.net.preferIPv6Addresses", "false")
     System.setProperty("sun.awt.noerasebackground", "true")
@@ -76,118 +113,126 @@ fun main() = application {
 
     LocalStreamServer.start()
 
-    val windowState = rememberWindowState(
-        placement = WindowPlacement.Maximized,
-        width = 1280.dp,
-        height = 820.dp
-    )
-    var isFullscreenActive by remember { mutableStateOf(false) }
+    // 2. Launch the desktop application
+    application {
+        val windowState = rememberWindowState(
+            placement = WindowPlacement.Maximized,
+            width = 1280.dp,
+            height = 820.dp
+        )
+        var isFullscreenActive by remember { mutableStateOf(false) }
 
-    var wasMaximizedBeforeFullscreen by remember { mutableStateOf(true) }
-    var hasEverEnteredFullscreen by remember { mutableStateOf(false) }
+        var wasMaximizedBeforeFullscreen by remember { mutableStateOf(true) }
+        var hasEverEnteredFullscreen by remember { mutableStateOf(false) }
 
-    val savedFloatingRect = remember { RECT() }
+        val savedFloatingRect = remember { RECT() }
 
-    Window(
-        onCloseRequest = {
-            try {
-                LocalStreamServer.stop()
-            } catch (_: Throwable) {}
-            exitApplication()
-            kotlin.system.exitProcess(0)
-        },
-        state = windowState,
-        title = "Clotube",
-        icon = painterResource("ic_clotube.png")
-    ) {
-        SideEffect {
-            window.background = AwtColor.BLACK
-            window.contentPane.background = AwtColor.BLACK
-            window.rootPane.background = AwtColor.BLACK
-        }
-
-        // Win32 Borderless Fullscreen Engine (Keeps native Direct3D swapchain alive & preserves Maximized state)
-        LaunchedEffect(isFullscreenActive) {
-            if (!isFullscreenActive && !hasEverEnteredFullscreen) {
-                return@LaunchedEffect
+        Window(
+            onCloseRequest = {
+                try {
+                    LocalStreamServer.stop()
+                } catch (_: Throwable) {}
+                exitApplication()
+                kotlin.system.exitProcess(0)
+            },
+            state = windowState,
+            title = "Clotube",
+            icon = painterResource("ic_clotube.png")
+        ) {
+            // Attach OS-level window focus and minimize monitor
+            LaunchedEffect(window) {
+                AppLifecycleManager.attachToWindow(window)
             }
 
-            try {
-                val hwndPtr = Native.getWindowPointer(window)
-                if (hwndPtr != null && hwndPtr != Pointer.NULL) {
-                    val hwnd = HWND(hwndPtr)
-                    val user32 = User32.INSTANCE
+            SideEffect {
+                window.background = AwtColor.BLACK
+                window.contentPane.background = AwtColor.BLACK
+                window.rootPane.background = AwtColor.BLACK
+            }
 
-                    if (isFullscreenActive) {
-                        hasEverEnteredFullscreen = true
-                        wasMaximizedBeforeFullscreen = user32.IsZoomed(hwnd)
-                        if (!wasMaximizedBeforeFullscreen) {
-                            user32.GetWindowRect(hwnd, savedFloatingRect)
-                        }
+            // Win32 Borderless Fullscreen Engine (Keeps native Direct3D swapchain alive & preserves Maximized state)
+            LaunchedEffect(isFullscreenActive) {
+                if (!isFullscreenActive && !hasEverEnteredFullscreen) {
+                    return@LaunchedEffect
+                }
 
-                        val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
-                        val borderlessStyle = currentStyle and (WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX).inv()
-                        user32.SetWindowLong(hwnd, GWL_STYLE, borderlessStyle)
+                try {
+                    val hwndPtr = Native.getWindowPointer(window)
+                    if (hwndPtr != null && hwndPtr != Pointer.NULL) {
+                        val hwnd = HWND(hwndPtr)
+                        val user32 = User32.INSTANCE
 
-                        val monitor = user32.MonitorFromWindow(hwnd, WinUser.MONITOR_DEFAULTTONEAREST)
-                        val monitorInfo = WinUser.MONITORINFO()
-                        user32.GetMonitorInfo(monitor, monitorInfo)
-                        val monitorRect: RECT = monitorInfo.rcMonitor
+                        if (isFullscreenActive) {
+                            hasEverEnteredFullscreen = true
+                            wasMaximizedBeforeFullscreen = user32.IsZoomed(hwnd)
+                            if (!wasMaximizedBeforeFullscreen) {
+                                user32.GetWindowRect(hwnd, savedFloatingRect)
+                            }
 
-                        val width = monitorRect.right - monitorRect.left
-                        val height = monitorRect.bottom - monitorRect.top
+                            val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
+                            val borderlessStyle = currentStyle and (WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX).inv()
+                            user32.SetWindowLong(hwnd, GWL_STYLE, borderlessStyle)
 
-                        user32.SetWindowPos(
-                            hwnd,
-                            null,
-                            monitorRect.left,
-                            monitorRect.top,
-                            width,
-                            height,
-                            SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
-                        )
-                    } else {
-                        val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
-                        val standardStyle = currentStyle or WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX
-                        user32.SetWindowLong(hwnd, GWL_STYLE, standardStyle)
+                            val monitor = user32.MonitorFromWindow(hwnd, WinUser.MONITOR_DEFAULTTONEAREST)
+                            val monitorInfo = WinUser.MONITORINFO()
+                            user32.GetMonitorInfo(monitor, monitorInfo)
+                            val monitorRect: RECT = monitorInfo.rcMonitor
 
-                        if (wasMaximizedBeforeFullscreen) {
-                            user32.ShowWindow(hwnd, SW_MAXIMIZE)
+                            val width = monitorRect.right - monitorRect.left
+                            val height = monitorRect.bottom - monitorRect.top
+
                             user32.SetWindowPos(
                                 hwnd,
                                 null,
-                                0, 0, 0, 0,
-                                SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
-                            )
-                        } else {
-                            user32.ShowWindow(hwnd, SW_RESTORE)
-                            val w = (savedFloatingRect.right - savedFloatingRect.left).coerceAtLeast(1024)
-                            val h = (savedFloatingRect.bottom - savedFloatingRect.top).coerceAtLeast(700)
-                            user32.SetWindowPos(
-                                hwnd,
-                                null,
-                                savedFloatingRect.left.coerceAtLeast(0),
-                                savedFloatingRect.top.coerceAtLeast(0),
-                                w,
-                                h,
+                                monitorRect.left,
+                                monitorRect.top,
+                                width,
+                                height,
                                 SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
                             )
-                        }
+                        } else {
+                            val currentStyle = user32.GetWindowLong(hwnd, GWL_STYLE)
+                            val standardStyle = currentStyle or WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX
+                            user32.SetWindowLong(hwnd, GWL_STYLE, standardStyle)
 
-                        SwingUtilities.invokeLater {
-                            window.validate()
-                            window.repaint()
+                            if (wasMaximizedBeforeFullscreen) {
+                                user32.ShowWindow(hwnd, SW_MAXIMIZE)
+                                user32.SetWindowPos(
+                                    hwnd,
+                                    null,
+                                    0, 0, 0, 0,
+                                    SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
+                                )
+                            } else {
+                                user32.ShowWindow(hwnd, SW_RESTORE)
+                                val w = (savedFloatingRect.right - savedFloatingRect.left).coerceAtLeast(1024)
+                                val h = (savedFloatingRect.bottom - savedFloatingRect.top).coerceAtLeast(700)
+                                user32.SetWindowPos(
+                                    hwnd,
+                                    null,
+                                    savedFloatingRect.left.coerceAtLeast(0),
+                                    savedFloatingRect.top.coerceAtLeast(0),
+                                    w,
+                                    h,
+                                    SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
+                                )
+                            }
+
+                            SwingUtilities.invokeLater {
+                                window.validate()
+                                window.repaint()
+                            }
                         }
                     }
+                } catch (t: Throwable) {
+                    t.printStackTrace()
                 }
-            } catch (t: Throwable) {
-                t.printStackTrace()
             }
-        }
 
-        App(
-            isFullscreen = isFullscreenActive,
-            onToggleFullscreen = { isFullscreenActive = !isFullscreenActive }
-        )
+            App(
+                isFullscreen = isFullscreenActive,
+                onToggleFullscreen = { isFullscreenActive = !isFullscreenActive }
+            )
+        }
     }
 }

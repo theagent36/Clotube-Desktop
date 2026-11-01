@@ -56,6 +56,7 @@ import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.lifecycle.AppLifecycleManager
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent
@@ -3074,16 +3075,20 @@ fun FigmaHeroSlideshowBanner(
         // 1. PHASE A: SLIDE TRANSITION (Paced at monitor refresh rate, no 258 FPS spikes)
         if (outgoingIndex != -1) {
             val slideDurationMs = 500L
-            val slideStartTime = System.currentTimeMillis()
+            var slideElapsedMs = 0L
 
             while (true) {
-                val elapsed = System.currentTimeMillis() - slideStartTime
-                if (elapsed >= slideDurationMs) {
+                if (!AppLifecycleManager.isAppActive) {
+                    kotlinx.coroutines.delay(200L)
+                    continue
+                }
+                slideElapsedMs += frameIntervalMs
+                if (slideElapsedMs >= slideDurationMs) {
                     slideTransitionFraction = 1f
                     outgoingIndex = -1
                     break
                 }
-                val rawFrac = (elapsed.toFloat() / slideDurationMs.toFloat()).coerceIn(0f, 1f)
+                val rawFrac = (slideElapsedMs.toFloat() / slideDurationMs.toFloat()).coerceIn(0f, 1f)
                 slideTransitionFraction = androidx.compose.animation.core.FastOutSlowInEasing.transform(rawFrac)
                 kotlinx.coroutines.delay(frameIntervalMs)
             }
@@ -3094,15 +3099,20 @@ fun FigmaHeroSlideshowBanner(
         // 2. PHASE B: COUNTDOWN TIMER (5000ms display phase)
         timerProgressFraction = 0f
         val countdownDurationMs = 5000L
-        val countdownStartTime = System.currentTimeMillis()
+        var activeCountdownElapsedMs = 0L
 
         while (true) {
-            val elapsed = System.currentTimeMillis() - countdownStartTime
-            if (elapsed >= countdownDurationMs) {
+            if (!AppLifecycleManager.isAppActive) {
+                kotlinx.coroutines.delay(200L)
+                continue
+            }
+
+            activeCountdownElapsedMs += frameIntervalMs
+            if (activeCountdownElapsedMs >= countdownDurationMs) {
                 timerProgressFraction = 1f
                 break
             }
-            timerProgressFraction = (elapsed.toFloat() / countdownDurationMs.toFloat()).coerceIn(0f, 1f)
+            timerProgressFraction = (activeCountdownElapsedMs.toFloat() / countdownDurationMs.toFloat()).coerceIn(0f, 1f)
             kotlinx.coroutines.delay(frameIntervalMs)
         }
 

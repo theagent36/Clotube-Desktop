@@ -41,19 +41,13 @@ compose.desktop {
     application {
         mainClass = "com.clotube.desktop.MainKt"
 
-        // Production JVM optimization flags for Direct3D 11 & low-latency GC
         jvmArgs += listOf(
             "-XX:+UseG1GC",
             "-Xms256m",
-            "-Xmx1024m",                            // Clamps heap under 1 GB
-            "-XX:MaxGCPauseMillis=15",
-            "-XX:InitiatingHeapOccupancyPercent=40", // Smooth continuous garbage collection
-            "-XX:G1ReservePercent=15",
-            "-XX:G1PeriodicGCInterval=3000",        // Uncommits idle memory back to Windows
+            "-Xmx1024m",
+            "-XX:MaxGCPauseMillis=20",
             "-Dskiko.renderApi=DIRECT3D",
-            "-Dskiko.vsync.enabled=true",           // Enforces VSync in Direct3D presentation
-            "-Dskiko.direct3d.waitVsync=true",      // Forces Present() to wait for monitor refresh
-            "-Dskiko.fps=60",                       // Fallback FPS ceiling
+            "-Dcompose.interop.blending=false",
             "-Djava.net.preferIPv4Stack=true",
             "-Dsun.awt.noerasebackground=true"
         )
@@ -63,20 +57,22 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             packageName = "Clotube"
-            packageVersion = "1.0.2" // Incremented version for Windows in-place upgrade
+            packageVersion = "1.0.3" // Incremented version for bundled VLC update
             description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"
             includeAllModules = true
+
+            // Bundles package-resources into %LOCALAPPDATA%\Clotube\app\resources\
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("package-resources"))
 
             windows {
                 menuGroup = "Clotube"
                 perUserInstall = true             // Clean install into AppData without requiring UAC admin elevation
                 dirChooser = true                 // Permits custom destination directory selection
                 shortcut = true                   // Generates Start Menu and Desktop shortcuts
-                upgradeUuid = "a6873bc0-9c17-4f62-b924-f7b5878d65a2" // DO NOT CHANGE: required for seamless in-place replacement
+                upgradeUuid = "a6873bc0-9c17-4f62-b924-f7b5878d65a2"
 
-                // Prioritize app_icon.ico if present, falling back to ic_clotube.ico
                 val iconFileObj = if (project.file("src/main/resources/app_icon.ico").exists()) {
                     project.file("src/main/resources/app_icon.ico")
                 } else {

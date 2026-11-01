@@ -38,7 +38,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
-import com.clotube.desktop.ui.components.PacedBufferingSpinner
+import com.clotube.desktop.ui.components.PacedLoadingSpinner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -548,9 +548,10 @@ private fun DesktopSeriesPlayerContent(
                     .background(Color.Black.copy(alpha = if (player.isFirstFrameRendered) 0.45f else 1f)),
                 contentAlignment = Alignment.Center
             ) {
-                PacedBufferingSpinner(
+                PacedLoadingSpinner(
                     color = Color(0xFF00E5FF),
-                    size = 46.dp
+                    modifier = Modifier.size(46.dp),
+                    strokeWidth = 3.5.dp
                 )
             }
         }
