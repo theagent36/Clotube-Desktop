@@ -41,7 +41,7 @@ object DesktopTrackPreferences {
                 preferredSubtitleLanguage = props.getProperty("preferredSubtitleLanguage")
                 isSubtitleExplicitlyDisabled = props.getProperty("isSubtitleExplicitlyDisabled", "false").toBoolean()
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
 
         // Fall back to general settings if user has not set specific track overrides
         val settings = DesktopAppSettings.state
@@ -67,7 +67,7 @@ object DesktopTrackPreferences {
                 props.setProperty("isSubtitleExplicitlyDisabled", isSubtitleExplicitlyDisabled.toString())
 
                 prefsFile.outputStream().use { props.store(it, "Clotube Playback Preferences") }
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
     }
 
@@ -167,6 +167,6 @@ object DesktopTrackPreferences {
                     mediaPlayer.audio().setTrack(matched.id())
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 }

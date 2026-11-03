@@ -432,21 +432,27 @@ private fun DesktopSeriesPlayerContent(
 
                 when (e.keyCode) {
                     KeyEvent.VK_LEFT -> {
-                        val newTime = (player.currentTimeMs - seekStepMs).coerceAtLeast(0L)
-                        player.seekToTime(newTime)
-                        optimisticSeekMs = newTime
-                        seekFeedbackDirection = SeriesSeekFeedbackDirection.REWIND
-                        seekFeedbackTrigger++
-                        onProgressUpdate?.invoke(newTime)
+                        val totalMs = player.totalDurationMs
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            val newTime = (player.currentTimeMs - seekStepMs).coerceIn(0L, totalMs)
+                            player.seekToTime(newTime)
+                            optimisticSeekMs = newTime
+                            seekFeedbackDirection = SeriesSeekFeedbackDirection.REWIND
+                            seekFeedbackTrigger++
+                            onProgressUpdate?.invoke(newTime)
+                        }
                         true
                     }
                     KeyEvent.VK_RIGHT -> {
-                        val newTime = (player.currentTimeMs + seekStepMs).coerceAtMost(player.totalDurationMs)
-                        player.seekToTime(newTime)
-                        optimisticSeekMs = newTime
-                        seekFeedbackDirection = SeriesSeekFeedbackDirection.FORWARD
-                        seekFeedbackTrigger++
-                        onProgressUpdate?.invoke(newTime)
+                        val totalMs = player.totalDurationMs
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            val newTime = (player.currentTimeMs + seekStepMs).coerceIn(0L, totalMs)
+                            player.seekToTime(newTime)
+                            optimisticSeekMs = newTime
+                            seekFeedbackDirection = SeriesSeekFeedbackDirection.FORWARD
+                            seekFeedbackTrigger++
+                            onProgressUpdate?.invoke(newTime)
+                        }
                         true
                     }
                     KeyEvent.VK_SPACE -> {
@@ -707,13 +713,13 @@ private fun DesktopSeriesPlayerContent(
                     },
                     onScrubEnd = { frac ->
                         val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                        val target = (frac * totalDur).toLong()
-                        optimisticSeekMs = target
-                        player.seekToTime(target)
-                        isScrubbing = false
-                        if (target > 0L) {
+                        if (totalDur > 0L) {
+                            val target = (frac * totalDur).toLong()
+                            optimisticSeekMs = target
+                            player.seekToTime(target)
                             onProgressUpdate?.invoke(target)
                         }
+                        isScrubbing = false
                     },
                     onToggleFullscreen = onToggleFullscreen,
                     modifier = Modifier
@@ -1205,13 +1211,15 @@ private fun SeriesBottomTransportBar(
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
             val density = LocalDensity.current
             val containerWidthPx = with(density) { maxWidth.toPx() }
+            val isSeekable = player.isFirstFrameRendered && player.totalDurationMs > 0L
 
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(26.dp)
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .pointerInput(Unit) {
+                    .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
+                    .pointerInput(isSeekable) {
+                        if (!isSeekable) return@pointerInput
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
@@ -1312,8 +1320,11 @@ private fun SeriesBottomTransportBar(
                 IconButton(
                     onClick = {
                         val currentMs = player.currentTimeMs
-                        val newTime = (currentMs - stepMs).coerceAtLeast(0L)
-                        player.seekToTime(newTime)
+                        val totalMs = player.totalDurationMs
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            val newTime = (currentMs - stepMs).coerceIn(0L, totalMs)
+                            player.seekToTime(newTime)
+                        }
                     },
                     modifier = Modifier.size(30.dp).pointerHoverIcon(PointerIcon.Hand)
                 ) {
@@ -1348,8 +1359,10 @@ private fun SeriesBottomTransportBar(
                     onClick = {
                         val currentMs = player.currentTimeMs
                         val totalMs = player.totalDurationMs
-                        val newTime = if (totalMs > 0L) (currentMs + stepMs).coerceAtMost(totalMs) else currentMs + stepMs
-                        player.seekToTime(newTime)
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            val newTime = (currentMs + stepMs).coerceIn(0L, totalMs)
+                            player.seekToTime(newTime)
+                        }
                     },
                     modifier = Modifier.size(30.dp).pointerHoverIcon(PointerIcon.Hand)
                 ) {

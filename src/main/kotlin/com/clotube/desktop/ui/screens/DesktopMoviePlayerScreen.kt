@@ -283,17 +283,23 @@ fun DesktopMoviePlayerScreen(
 
                 when (e.keyCode) {
                     KeyEvent.VK_LEFT -> {
-                        val newTime = (player.currentTimeMs - seekStepMs).coerceAtLeast(0L)
-                        player.seekToTime(newTime)
-                        seekFeedbackDirection = SeekFeedbackDirection.REWIND
-                        seekFeedbackTrigger++
+                        val totalMs = player.totalDurationMs
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            val newTime = (player.currentTimeMs - seekStepMs).coerceIn(0L, totalMs)
+                            player.seekToTime(newTime)
+                            seekFeedbackDirection = SeekFeedbackDirection.REWIND
+                            seekFeedbackTrigger++
+                        }
                         true
                     }
                     KeyEvent.VK_RIGHT -> {
-                        val newTime = (player.currentTimeMs + seekStepMs).coerceAtMost(player.totalDurationMs)
-                        player.seekToTime(newTime)
-                        seekFeedbackDirection = SeekFeedbackDirection.FORWARD
-                        seekFeedbackTrigger++
+                        val totalMs = player.totalDurationMs
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            val newTime = (player.currentTimeMs + seekStepMs).coerceIn(0L, totalMs)
+                            player.seekToTime(newTime)
+                            seekFeedbackDirection = SeekFeedbackDirection.FORWARD
+                            seekFeedbackTrigger++
+                        }
                         true
                     }
                     KeyEvent.VK_SPACE -> {
@@ -498,8 +504,10 @@ fun DesktopMoviePlayerScreen(
                             onScrubbing = { scrubFraction = it },
                             onScrubEnd = { frac ->
                                 val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                                val targetMs = (frac * totalDur).toLong()
-                                player.seekToTime(targetMs)
+                                if (totalDur > 0L) {
+                                    val targetMs = (frac * totalDur).toLong()
+                                    player.seekToTime(targetMs)
+                                }
                                 isScrubbing = false
                             },
                             onToggleFullscreen = onToggleFullscreen,
@@ -698,8 +706,10 @@ fun DesktopMoviePlayerScreen(
                                         onScrubbing = { scrubFraction = it },
                                         onScrubEnd = { frac ->
                                             val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                                            val targetMs = (frac * totalDur).toLong()
-                                            player.seekToTime(targetMs)
+                                            if (totalDur > 0L) {
+                                                val targetMs = (frac * totalDur).toLong()
+                                                player.seekToTime(targetMs)
+                                            }
                                             isScrubbing = false
                                         },
                                         onToggleFullscreen = onToggleFullscreen,
@@ -1305,13 +1315,15 @@ private fun BottomTransportBar(
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
             val density = LocalDensity.current
             val containerWidthPx = with(density) { maxWidth.toPx() }
+            val isSeekable = player.isFirstFrameRendered && player.totalDurationMs > 0L
 
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(30.dp)
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .pointerInput(Unit) {
+                    .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
+                    .pointerInput(isSeekable) {
+                        if (!isSeekable) return@pointerInput
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
@@ -1393,8 +1405,11 @@ private fun BottomTransportBar(
                 IconButton(
                     onClick = {
                         val currentMs = player.currentTimeMs
+                        val totalMs = player.totalDurationMs
                         val stepMs = DesktopAppSettings.state.seekStepSeconds * 1000L
-                        player.seekToTime((currentMs - stepMs).coerceAtLeast(0L))
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            player.seekToTime((currentMs - stepMs).coerceIn(0L, totalMs))
+                        }
                     },
                     modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
                 ) {
@@ -1431,7 +1446,9 @@ private fun BottomTransportBar(
                         val currentMs = player.currentTimeMs
                         val totalMs = player.totalDurationMs
                         val stepMs = DesktopAppSettings.state.seekStepSeconds * 1000L
-                        player.seekToTime(if (totalMs > 0L) (currentMs + stepMs).coerceAtMost(totalMs) else currentMs + stepMs)
+                        if (player.isFirstFrameRendered && totalMs > 0L) {
+                            player.seekToTime((currentMs + stepMs).coerceIn(0L, totalMs))
+                        }
                     },
                     modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
                 ) {

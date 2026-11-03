@@ -199,11 +199,11 @@ class DirectMemoryVideoPlayer(
 
                 val startupRate = settings.defaultSpeed
                 playbackSpeed = startupRate
-                if (mp.status().rate() != startupRate) {
-                    try {
+                try {
+                    if (mp.status().rate() != startupRate) {
                         mp.controls().setRate(startupRate)
-                    } catch (_: Throwable) {}
-                }
+                    }
+                } catch (_: Throwable) {}
 
                 if (hasAppliedPreferences.compareAndSet(false, true)) {
                     Executors.newSingleThreadScheduledExecutor().schedule({
@@ -235,7 +235,9 @@ class DirectMemoryVideoPlayer(
             }
 
             override fun lengthChanged(mp: MediaPlayer, newLength: Long) {
-                totalDurationMs = newLength
+                if (newLength > 0L) {
+                    totalDurationMs = newLength
+                }
             }
 
             override fun positionChanged(mp: MediaPlayer, newPosition: Float) {
@@ -256,6 +258,7 @@ class DirectMemoryVideoPlayer(
     }
 
     fun setPlaybackRate(rate: Float) {
+        if (isDisposed) return
         playbackSpeed = rate
         try {
             mediaPlayer.controls().setRate(rate)
@@ -263,41 +266,57 @@ class DirectMemoryVideoPlayer(
     }
 
     fun seekToFraction(fraction: Float) {
-        val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
-        if (totalMs > 0L) {
-            val targetMs = (fraction.coerceIn(0f, 1f) * totalMs).toLong()
-            mediaPlayer.controls().setTime(targetMs)
-            currentTimeMs = targetMs
-        }
+        if (isDisposed || !isFirstFrameRendered) return
+        try {
+            if (!mediaPlayer.status().isPlayable) return
+            val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
+            if (totalMs > 0L) {
+                val targetMs = (fraction.coerceIn(0f, 1f) * totalMs).toLong()
+                mediaPlayer.controls().setTime(targetMs)
+                currentTimeMs = targetMs
+            }
+        } catch (_: Throwable) {}
     }
 
     fun seekToTime(timeMs: Long) {
-        val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
-        val clamped = if (totalMs > 0L) timeMs.coerceIn(0L, totalMs) else timeMs.coerceAtLeast(0L)
-        mediaPlayer.controls().setTime(clamped)
-        currentTimeMs = clamped
+        if (isDisposed || !isFirstFrameRendered) return
+        try {
+            if (!mediaPlayer.status().isPlayable) return
+            val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
+            if (totalMs <= 0L) return
+            val clamped = timeMs.coerceIn(0L, totalMs)
+            mediaPlayer.controls().setTime(clamped)
+            currentTimeMs = clamped
+        } catch (_: Throwable) {}
     }
 
     fun play() {
         if (isDisposed) return
-        mediaPlayer.controls().play()
-        isPlaying = true
+        try {
+            mediaPlayer.controls().play()
+            isPlaying = true
+        } catch (_: Throwable) {}
     }
 
     fun pause() {
         if (isDisposed) return
-        mediaPlayer.controls().pause()
-        isPlaying = false
+        try {
+            mediaPlayer.controls().pause()
+            isPlaying = false
+        } catch (_: Throwable) {}
     }
 
     fun togglePlayPause() {
-        if (mediaPlayer.status().isPlaying) {
-            mediaPlayer.controls().pause()
-            isPlaying = false
-        } else {
-            mediaPlayer.controls().play()
-            isPlaying = true
-        }
+        if (isDisposed) return
+        try {
+            if (mediaPlayer.status().isPlaying) {
+                mediaPlayer.controls().pause()
+                isPlaying = false
+            } else {
+                mediaPlayer.controls().play()
+                isPlaying = true
+            }
+        } catch (_: Throwable) {}
     }
 
     @JvmName("changeMuted")
@@ -319,44 +338,50 @@ class DirectMemoryVideoPlayer(
                 mediaPlayer.audio().setMute(false)
                 isMuted = false
             } else {
+                mediaPlayer.audio().setMute(true)
                 isMuted = true
             }
         } catch (_: Throwable) {}
     }
 
     fun getAudioTracks(): List<Pair<Int, String>> {
+        if (isDisposed) return emptyList()
         return try {
             mediaPlayer.audio().trackDescriptions()?.map { it.id() to it.description() } ?: emptyList()
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             emptyList()
         }
     }
 
     fun getSubtitleTracks(): List<Pair<Int, String>> {
+        if (isDisposed) return emptyList()
         return try {
             mediaPlayer.subtitles().trackDescriptions()?.map { it.id() to it.description() } ?: emptyList()
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             emptyList()
         }
     }
 
     fun setAudioTrack(trackId: Int, description: String = "") {
+        if (isDisposed) return
         try {
             mediaPlayer.audio().setTrack(trackId)
             if (description.isNotBlank()) {
                 DesktopTrackPreferences.saveAudioTrack(description)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun setSubtitleTrack(trackId: Int, description: String = "", isOff: Boolean = (trackId == -1)) {
+        if (isDisposed) return
         try {
             mediaPlayer.subtitles().setTrack(trackId)
             DesktopTrackPreferences.saveSubtitleTrack(description, isOff)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun loadExternalSubtitle(filePath: String): Boolean {
+        if (isDisposed) return false
         return try {
             val file = java.io.File(filePath)
             if (!file.exists()) return false
@@ -366,23 +391,26 @@ class DirectMemoryVideoPlayer(
             externalSubtitleName = file.name
             println("[DirectMemoryVideoPlayer] Loaded external subtitle: ${file.name} (success=$success)")
             true
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             System.err.println("[DirectMemoryVideoPlayer] Failed to load subtitle file: ${e.message}")
             false
         }
     }
 
     fun reactivateExternalSubtitle(): Boolean {
+        if (isDisposed) return false
         val path = externalSubtitlePath ?: return false
         return loadExternalSubtitle(path)
     }
 
     fun getActiveAudioTrackId(): Int {
-        return try { mediaPlayer.audio().track() } catch (_: Exception) { -1 }
+        if (isDisposed) return -1
+        return try { mediaPlayer.audio().track() } catch (_: Throwable) { -1 }
     }
 
     fun getActiveSubtitleTrackId(): Int {
-        return try { mediaPlayer.subtitles().track() } catch (_: Exception) { -1 }
+        if (isDisposed) return -1
+        return try { mediaPlayer.subtitles().track() } catch (_: Throwable) { -1 }
     }
 
     fun release() {
