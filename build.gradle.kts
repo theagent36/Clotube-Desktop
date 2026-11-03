@@ -41,13 +41,14 @@ compose.desktop {
     application {
         mainClass = "com.clotube.desktop.MainKt"
 
+        // Production JVM flags for Direct3D 11 presentation & low-latency GC
         jvmArgs += listOf(
             "-XX:+UseG1GC",
             "-Xms256m",
             "-Xmx1024m",
             "-XX:MaxGCPauseMillis=20",
             "-Dskiko.renderApi=DIRECT3D",
-            "-Dcompose.interop.blending=false",
+            "-Dcompose.interop.blending=true",
             "-Djava.net.preferIPv4Stack=true",
             "-Dsun.awt.noerasebackground=true"
         )
@@ -57,7 +58,7 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             packageName = "Clotube"
-            packageVersion = "1.0.3" // Incremented version for bundled VLC update
+            packageVersion = "1.0.4" // Incremented version for v1.0.4 release
             description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"

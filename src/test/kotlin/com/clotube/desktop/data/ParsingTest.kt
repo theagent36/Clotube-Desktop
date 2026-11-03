@@ -48,4 +48,35 @@ class ParsingTest {
         assertEquals(1, DesktopOnlineMetadataResolver.parseEpisodeNumberFromFileName("Fargo S03 01 (1080p HEVC).mkv", 3))
         assertEquals(2, DesktopOnlineMetadataResolver.parseEpisodeNumberFromFileName("02 - Chapter Two 720p x265.mkv", 1))
     }
+
+    @Test
+    fun testResolveCebrayDune() {
+        val meta = DesktopOnlineMetadataResolver.resolveMovieSync("Cebray-Dune Part One.mkv")
+        assertEquals("Dune: Part One", meta.officialTitle)
+        assertEquals("2021", meta.releaseYear)
+        assertEquals("Sci-Fi • Adventure • Action", meta.genre)
+        assertEquals("English", meta.language)
+        assertEquals("https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg", meta.posterUrl)
+
+        val meta1b = DesktopOnlineMetadataResolver.resolveMovieSync("Cebray - Dune Part One (2021) [1080p].mkv")
+        assertEquals("Dune: Part One", meta1b.officialTitle)
+        assertEquals("2021", meta1b.releaseYear)
+
+        val meta2 = DesktopOnlineMetadataResolver.resolveMovieSync("Cebray-Dune.Part.Two.2024.1080p.mkv")
+        assertEquals("Dune: Part Two", meta2.officialTitle)
+        assertEquals("2024", meta2.releaseYear)
+        assertEquals("Sci-Fi • Adventure • Action", meta2.genre)
+        assertEquals("English", meta2.language)
+        assertEquals("https://m.media-amazon.com/images/M/MV5BNTc0YmQxMjEtODI5MC00NjFiLTlkMWUtOGQ5NjFmYWUyZGJhXkEyXkFqcGc@._V1_.jpg", meta2.posterUrl)
+
+        val meta2b = DesktopOnlineMetadataResolver.resolveMovieSync("Dune.Part.2.2024.UHD.mkv")
+        assertEquals("Dune: Part Two", meta2b.officialTitle)
+        assertEquals("2024", meta2b.releaseYear)
+
+        // Verify isTitleDirty
+        assertEquals(true, DesktopOnlineMetadataResolver.isTitleDirty("Cebray-Dune Part One"))
+        assertEquals(true, DesktopOnlineMetadataResolver.isTitleDirty("Dune Part Two 1080p"))
+        assertEquals(false, DesktopOnlineMetadataResolver.isTitleDirty("Dune: Part One"))
+        assertEquals(false, DesktopOnlineMetadataResolver.isTitleDirty("Dune: Part Two"))
+    }
 }

@@ -27,6 +27,7 @@ data class ClotubeSettings(
 
     // 3. Display & Performance
     val hardwareAcceleration: Boolean = true,
+    val cinemaColorEnhancement: Boolean = true, // Expands limited range to full 0-255 & enriches saturation
     val batterySaver60Fps: Boolean = false,
     val backgroundEcoMode: Boolean = true,
     val launchMaximized: Boolean = true,

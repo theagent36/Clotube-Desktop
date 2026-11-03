@@ -244,8 +244,14 @@ fun DesktopSeriesDetailScreen(
         } ?: ""
     }
 
-    val player = remember(activeStreamUrl) {
-        if (activeStreamUrl.isNotBlank()) DirectMemoryVideoPlayer(activeStreamUrl) else null
+    val subtitleFontSize = DesktopAppSettings.state.subtitleFontSizeSp
+    val cinemaColor = DesktopAppSettings.state.cinemaColorEnhancement
+    val player = remember(activeStreamUrl, subtitleFontSize, cinemaColor) {
+        if (activeStreamUrl.isNotBlank()) {
+            DirectMemoryVideoPlayer(activeStreamUrl)
+        } else {
+            null
+        }
     }
 
     val activeEpisode = playingEpisode

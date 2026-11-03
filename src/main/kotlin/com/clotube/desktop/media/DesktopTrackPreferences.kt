@@ -153,9 +153,14 @@ object DesktopTrackPreferences {
                 }
             }
 
-            // Audio track preference check
-            val targetAudio = preferredAudioLanguage ?: if (settings.preferredAudioLanguage != "Original") settings.preferredAudioLanguage else null
-            if (!targetAudio.isNullOrBlank()) {
+            // 3. Apply Preferred Audio Track
+            val targetAudio = if (settings.preferredAudioLanguage != "Original") {
+                settings.preferredAudioLanguage
+            } else {
+                preferredAudioLanguage
+            }
+
+            if (!targetAudio.isNullOrBlank() && !targetAudio.equals("Original", ignoreCase = true)) {
                 val audioTracks: List<TrackDescription> = mediaPlayer.audio().trackDescriptions() ?: emptyList()
                 val matched = audioTracks.firstOrNull { it.id() != -1 && it.description().lowercase().contains(targetAudio.lowercase()) }
                 if (matched != null && mediaPlayer.audio().track() != matched.id()) {

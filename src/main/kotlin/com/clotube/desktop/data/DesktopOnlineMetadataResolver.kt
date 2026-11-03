@@ -56,6 +56,48 @@ object DesktopOnlineMetadataResolver {
 
     // Curated title, genre, and language registry (posters are fetched dynamically from live APIs)
     private val CURATED_TITLES = mapOf(
+        "dune" to MovieMetadata(
+            officialTitle = "Dune: Part One",
+            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            releaseYear = "2021",
+            genre = "Sci-Fi • Adventure • Action",
+            language = "English"
+        ),
+        "dune part one" to MovieMetadata(
+            officialTitle = "Dune: Part One",
+            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            releaseYear = "2021",
+            genre = "Sci-Fi • Adventure • Action",
+            language = "English"
+        ),
+        "dune part 1" to MovieMetadata(
+            officialTitle = "Dune: Part One",
+            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            releaseYear = "2021",
+            genre = "Sci-Fi • Adventure • Action",
+            language = "English"
+        ),
+        "dune 2021" to MovieMetadata(
+            officialTitle = "Dune: Part One",
+            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            releaseYear = "2021",
+            genre = "Sci-Fi • Adventure • Action",
+            language = "English"
+        ),
+        "dune part two" to MovieMetadata(
+            officialTitle = "Dune: Part Two",
+            posterUrl = "https://m.media-amazon.com/images/M/MV5BNTc0YmQxMjEtODI5MC00NjFiLTlkMWUtOGQ5NjFmYWUyZGJhXkEyXkFqcGc@._V1_.jpg",
+            releaseYear = "2024",
+            genre = "Sci-Fi • Adventure • Action",
+            language = "English"
+        ),
+        "dune part 2" to MovieMetadata(
+            officialTitle = "Dune: Part Two",
+            posterUrl = "https://m.media-amazon.com/images/M/MV5BNTc0YmQxMjEtODI5MC00NjFiLTlkMWUtOGQ5NjFmYWUyZGJhXkEyXkFqcGc@._V1_.jpg",
+            releaseYear = "2024",
+            genre = "Sci-Fi • Adventure • Action",
+            language = "English"
+        ),
         "top gun maverick" to MovieMetadata("Top Gun: Maverick", "", "2022", "Action • Drama", "English"),
         "top gun" to MovieMetadata("Top Gun: Maverick", "", "2022", "Action • Drama", "English"),
         "crime 101" to MovieMetadata("Crime 101", "", "2026", "Crime • Thriller", "English"),
@@ -98,6 +140,8 @@ object DesktopOnlineMetadataResolver {
         "madras cafe" to MovieMetadata("Madras Cafe", "", "2013", "Action • Thriller • Drama", "Hindi")
     )
 
+    val CURATED_MOVIES: Map<String, MovieMetadata> get() = CURATED_TITLES
+
     fun clearCache() {
         movieCache.clear()
         seriesCache.clear()
@@ -109,8 +153,18 @@ object DesktopOnlineMetadataResolver {
         val lowerKey = cleanTitle.lowercase().replace(Regex("[^a-z0-9]"), " ").replace(Regex("\\s+"), " ").trim()
 
         CURATED_TITLES[lowerKey]?.let { return it }
-        for ((key, meta) in CURATED_TITLES) {
-            if (lowerKey == key || (key.length > 4 && lowerKey.contains(key)) || (lowerKey.length > 4 && key.contains(lowerKey))) {
+
+        // Sort by key length descending so specific titles like "dune part two" match before generic "dune"
+        val sortedCurated = CURATED_TITLES.entries.sortedByDescending { it.key.length }
+        for ((key, meta) in sortedCurated) {
+            if (lowerKey == key || (key.length > 3 && lowerKey.contains(key))) {
+                return meta
+            }
+        }
+
+        // Match partial titles where lowerKey is a significant prefix (at least 8 chars) of a curated title
+        for ((key, meta) in sortedCurated) {
+            if (lowerKey.length >= 8 && key.startsWith(lowerKey)) {
                 return meta
             }
         }
@@ -128,11 +182,16 @@ object DesktopOnlineMetadataResolver {
         movieCache[trimmed]?.let { return@withContext it }
 
         val syncMeta = resolveMovieSync(trimmed)
+        if (CURATED_TITLES.values.any { it.officialTitle == syncMeta.officialTitle } && syncMeta.posterUrl.isNotBlank()) {
+            movieCache[trimmed] = syncMeta
+            return@withContext syncMeta
+        }
+
         val (cleanQuery, releaseYear) = extractMovieQueryAndYear(trimmed)
         val searchCandidates = generateCandidateQueries(syncMeta.officialTitle.ifBlank { cleanQuery })
 
         var matchedTitle: String? = syncMeta.officialTitle.ifBlank { null }
-        var matchedPoster = ""
+        var matchedPoster = syncMeta.posterUrl
         var matchedYear = syncMeta.releaseYear.ifBlank { releaseYear ?: "" }
         var matchedGenre: String? = if (syncMeta.genre != "Drama • Cinema") syncMeta.genre else null
         var matchedLanguage: String? = if (syncMeta.language != "Unknown") syncMeta.language else null
@@ -408,9 +467,26 @@ object DesktopOnlineMetadataResolver {
         text = text.replace(Regex("(?i)@[\\w._-]+"), " ")
         text = text.replace(Regex("(?i)\\b(https?://)?(www\\.)?[a-z0-9_-]+\\.(org|com|net|in|top|xyz|me|io|co|info|biz|club|site|online|tv|ru|cc|to|shop|buzz)\\b"), " ")
         text = normalizeIndicDigits(text)
-        text = text.replace(Regex("[\\[\\](){}_+~]"), " ")
+        text = text.replace(Regex("[\\[\\](){}_+~\\-–—|]"), " ")
         text = text.replace(Regex("(?<=\\D)\\.|\\.(?=\\D)"), " ")
         text = text.replace(Regex("\\s+"), " ").trim()
+
+        // Strip leading release group / uploader tags (e.g. "Cebray", "CBR", "YTS", etc.)
+        val leadingTagRegex = Regex(
+            "(?i)^\\s*(cebray\\w*|cbr\\w*|1337x\\w*|mlsbd\\w*|hub4u\\w*|filmy\\w*|fbm\\w*|wmr\\w*|vegamovies\\w*|hdhub4u\\w*|" +
+            "bolly\\w*|katmovie\\w*|skymovies\\w*|cinevood\\w*|9xmovies\\w*|worldfree4u\\w*|" +
+            "mkvcinemas\\w*|uindex\\w*|yts\\w*|yify\\w*|rarbg\\w*|psa\\w*|pahe\\w*|galaxytv\\w*|" +
+            "galaxyrg\\w*|tgx\\w*|qxr\\w*|1[-_]?world\\w*|levelbook\\w*|t[-_]?series\\w*|" +
+            "shop|all|new|the\\s+complete|full\\s+movie|movie|film|cinema|hd|hq|exclusive)\\b[\\s:-]*"
+        )
+        while (true) {
+            val m = leadingTagRegex.find(text)
+            if (m != null && m.range.first == 0) {
+                text = text.substring(m.range.last + 1).trim()
+            } else {
+                break
+            }
+        }
 
         var year: String? = null
         val yearRegex = Regex("(?<!kalki\\s)\\b(19\\d{2}|20[0-2]\\d)\\b", RegexOption.IGNORE_CASE)
@@ -418,6 +494,7 @@ object DesktopOnlineMetadataResolver {
 
         val cutoffPattern = Regex(
             "(?i)\\b(" +
+            "cebray\\w*|cbr\\w*|" +
             "2160p|1080p|1080i|720p|480p|360p|4k|uhd|fhd|hdtv|hdr\\d*|dovi|dv|" +
             "bluray|blu-ray|brrip|bdrip|dvdrip|dvd|hdrip|web[-_]?dl|web[-_]?rip|webri|web|" +
             "imax|remux|untouched|proper|repack|extended|unrated|" +
@@ -457,7 +534,7 @@ object DesktopOnlineMetadataResolver {
             cleanTitle = latinOnly
         }
 
-        cleanTitle = cleanTitle.replace(Regex("(?i)^\\s*(shop|all|new|the\\s+complete|full\\s+movie|movie|film|cinema|hd|hq|exclusive)\\s+"), " ")
+        cleanTitle = cleanTitle.replace(Regex("(?i)^\\s*(cebray|cbr|shop|all|new|the\\s+complete|full\\s+movie|movie|film|cinema|hd|hq|exclusive)\\s+"), " ")
         cleanTitle = cleanTitle.replace(Regex("(?i)\\s+(bollywood\\s+movie|full\\s+movie|movie|film|cinema|exclusive|latest|trailer|teaser|bengali|hindi|english)\\s*$"), " ")
         cleanTitle = cleanTitle.replace(Regex("(^\\s*[-–—:]+\\s*|\\s*[-–—:]+\\s*$)"), " ")
         cleanTitle = cleanTitle.replace(Regex("\\s+"), " ").trim()
@@ -475,7 +552,7 @@ object DesktopOnlineMetadataResolver {
 
         val words = query.split(" ").filter { it.isNotBlank() }
         if (words.size > 1) {
-            val leadingIgnored = setOf("shop", "all", "new", "top", "hd", "the", "a")
+            val leadingIgnored = setOf("cebray", "cbr", "shop", "all", "new", "top", "hd", "the", "a")
             if (words.first().lowercase() in leadingIgnored) {
                 candidates.add(words.drop(1).joinToString(" "))
             }
@@ -522,7 +599,7 @@ object DesktopOnlineMetadataResolver {
         if (title.isNullOrBlank()) return false
         val lower = title.lowercase()
         val dirtyMarkers = listOf(
-            "1080p", "720p", "2160p", "480p", "bluray", "imax", "10bit", "8bit",
+            "cebray", "cbr", "1080p", "720p", "2160p", "480p", "bluray", "imax", "10bit", "8bit",
             "x265", "x264", "hevc", "web-dl", "webrip", "webri", "amzn", "aac",
             "1-world", "galaxyrg", "1400mb", "hindi", "bengali", "bollywood",
             "yts", "yify", "rarbg", "hub4u", "mlsbd", "1337x", "fbm", "wmr",
@@ -563,6 +640,7 @@ object DesktopOnlineMetadataResolver {
         if (hindiTitles.contains(lower)) return "Hindi"
 
         val englishTitles = setOf(
+            "dune", "dune: part one", "dune part one", "dune: part two", "dune part two",
             "top gun maverick", "top gun: maverick", "crime 101", "batman begins",
             "the vast of night", "the endless", "jack reacher", "glass onion",
             "6 underground", "deadpool and wolverine", "deadpool & wolverine",

@@ -80,6 +80,10 @@ fun DesktopInlinePlayerPanel(
     // Dynamic aspect ratio: initialized to 16:9, updates to exact stream aspect ratio (e.g. 2.39:1)
     var videoAspectRatio by remember { mutableFloatStateOf(16f / 9f) }
 
+    val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
+        DesktopAppSettings.state.seekStepSeconds * 1000L
+    }
+
     val isReleased = remember { AtomicBoolean(false) }
     val focusRequester = remember { FocusRequester() }
 
@@ -267,11 +271,11 @@ fun DesktopInlinePlayerPanel(
                             true
                         }
                         Key.DirectionLeft -> {
-                            player?.controls()?.skipTime(-10000)
+                            player?.controls()?.skipTime(-seekStepMs)
                             true
                         }
                         Key.DirectionRight -> {
-                            player?.controls()?.skipTime(10000)
+                            player?.controls()?.skipTime(seekStepMs)
                             true
                         }
                         Key.Escape -> {
@@ -589,25 +593,36 @@ private fun InlineTransportBar(
             )
         }
 
+        val seekSec = DesktopAppSettings.state.seekStepSeconds
+        val seekStepMs = seekSec * 1000L
+
         IconButton(
-            onClick = { onSkip(-10000) },
+            onClick = { onSkip(-seekStepMs) },
             modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
         ) {
             Icon(
-                imageVector = Icons.Rounded.Replay10,
-                contentDescription = "Rewind 10s",
+                imageVector = when (seekSec) {
+                    5 -> Icons.Rounded.Replay5
+                    30 -> Icons.Rounded.Replay30
+                    else -> Icons.Rounded.Replay10
+                },
+                contentDescription = "Rewind ${seekSec}s",
                 tint = Color(0xFF94A3B8),
                 modifier = Modifier.size(19.dp)
             )
         }
 
         IconButton(
-            onClick = { onSkip(10000) },
+            onClick = { onSkip(seekStepMs) },
             modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
         ) {
             Icon(
-                imageVector = Icons.Rounded.Forward10,
-                contentDescription = "Forward 10s",
+                imageVector = when (seekSec) {
+                    5 -> Icons.Rounded.Forward5
+                    30 -> Icons.Rounded.Forward30
+                    else -> Icons.Rounded.Forward10
+                },
+                contentDescription = "Forward ${seekSec}s",
                 tint = Color(0xFF94A3B8),
                 modifier = Modifier.size(19.dp)
             )

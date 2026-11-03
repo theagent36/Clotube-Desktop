@@ -19,6 +19,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.ui.screens.DesktopBootScreen
@@ -29,6 +30,7 @@ import com.sun.jna.platform.win32.User32
 import com.sun.jna.platform.win32.WinDef.HWND
 import com.sun.jna.platform.win32.WinDef.RECT
 import com.sun.jna.platform.win32.WinUser
+import com.sun.jna.ptr.IntByReference
 import uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import java.awt.Color as AwtColor
@@ -54,6 +56,46 @@ private const val SW_RESTORE = 9
 private fun User32.IsZoomed(hwnd: HWND): Boolean {
     val currentStyle = GetWindowLong(hwnd, GWL_STYLE)
     return (currentStyle and WS_MAXIMIZE) != 0
+}
+
+private fun applyWin32ImmersiveDarkMode(window: java.awt.Window) {
+    try {
+        val hwndPtr = Native.getWindowPointer(window) ?: return
+        if (hwndPtr == Pointer.NULL) return
+
+        val dwmapi = NativeLibrary.getInstance("dwmapi")
+        val dwmSetWindowAttribute = dwmapi.getFunction("DwmSetWindowAttribute")
+
+        // 1. DWMWA_USE_IMMERSIVE_DARK_MODE (20 on Win10 20H1+ and Win11; 19 on earlier Win10)
+        val darkModeEnabled = IntByReference(1)
+        val res = dwmSetWindowAttribute.invoke(
+            Int::class.java,
+            arrayOf(hwndPtr, 20, darkModeEnabled.pointer, 4)
+        ) as Int
+
+        if (res != 0) {
+            dwmSetWindowAttribute.invoke(
+                Int::class.java,
+                arrayOf(hwndPtr, 19, darkModeEnabled.pointer, 4)
+            )
+        }
+
+        // 2. Windows 11 DWMWA_CAPTION_COLOR = 35 (ColorRef: 0x00BBGGRR -> #07090E is 0x000E0907)
+        val captionColor = IntByReference(0x000E0907)
+        dwmSetWindowAttribute.invoke(
+            Int::class.java,
+            arrayOf(hwndPtr, 35, captionColor.pointer, 4)
+        )
+
+        // 3. Windows 11 DWMWA_TEXT_COLOR = 36 (White: 0x00FFFFFF)
+        val textColor = IntByReference(0x00FFFFFF)
+        dwmSetWindowAttribute.invoke(
+            Int::class.java,
+            arrayOf(hwndPtr, 36, textColor.pointer, 4)
+        )
+    } catch (_: Throwable) {
+        // Safe fallback on unsupported OS versions
+    }
 }
 
 /**
@@ -126,15 +168,21 @@ fun main() {
     LocalStreamServer.start()
 
     application {
+        val initialPlacement = if (DesktopAppSettings.state.launchMaximized) {
+            WindowPlacement.Maximized
+        } else {
+            WindowPlacement.Floating
+        }
+
         val windowState = rememberWindowState(
-            placement = WindowPlacement.Maximized,
+            placement = initialPlacement,
             width = 1280.dp,
             height = 820.dp
         )
         var isFullscreenActive by remember { mutableStateOf(false) }
         var isBooting by remember { mutableStateOf(true) }
 
-        var wasMaximizedBeforeFullscreen by remember { mutableStateOf(true) }
+        var wasMaximizedBeforeFullscreen by remember { mutableStateOf(DesktopAppSettings.state.launchMaximized) }
         var hasEverEnteredFullscreen by remember { mutableStateOf(false) }
         val savedFloatingRect = remember { RECT() }
 
@@ -152,6 +200,7 @@ fun main() {
         ) {
             LaunchedEffect(window) {
                 AppLifecycleManager.attachToWindow(window)
+                applyWin32ImmersiveDarkMode(window)
             }
 
             SideEffect {
@@ -228,6 +277,8 @@ fun main() {
                                     SWP_NOZORDER or SWP_FRAMECHANGED or SWP_SHOWWINDOW
                                 )
                             }
+
+                            applyWin32ImmersiveDarkMode(window)
 
                             SwingUtilities.invokeLater {
                                 window.revalidate()

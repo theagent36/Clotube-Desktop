@@ -392,6 +392,19 @@ fun DesktopSettingsScreen(
                             )
                             HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
                             SettingsToggleRow(
+                                title = "Cinema Color & Dynamic Range Optimization",
+                                subtitle = "Expands 16-235 limited range to 0-255 full PC levels and enriches saturation for 4K HDR and BluRay streams.",
+                                checked = settings.cinemaColorEnhancement,
+                                onCheckedChange = {
+                                    DesktopAppSettings.update { copy(cinemaColorEnhancement = it) }
+                                    showToast(
+                                        if (it) "Cinema Color Optimization enabled"
+                                        else "Cinema Color Optimization disabled (Flat raw output)"
+                                    )
+                                }
+                            )
+                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            SettingsToggleRow(
                                 title = "Background Eco Mode",
                                 subtitle = "Freeze Compose render cycles and drop GPU usage when the app window is minimized.",
                                 checked = settings.backgroundEcoMode,

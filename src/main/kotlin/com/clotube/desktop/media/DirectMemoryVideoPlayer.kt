@@ -31,13 +31,29 @@ class DirectMemoryVideoPlayer(
     val mediaUrl: String,
     val onFirstFrame: () -> Unit = {}
 ) {
-    private val settings = DesktopAppSettings.state
+    val settings = DesktopAppSettings.state
+
+    var playbackSpeed by mutableFloatStateOf(settings.defaultSpeed)
+        private set
+
+    var externalSubtitleName by mutableStateOf<String?>(null)
+        private set
+    var externalSubtitlePath: String? = null
+        private set
+
+    // Divisor of video height: 25 -> Small, 18 -> Normal, 12 -> Large
+    private val relFontSize: Int = when (settings.subtitleFontSizeSp) {
+        14 -> 25
+        18 -> 18
+        24 -> 12
+        else -> 18
+    }
 
     private val factory: MediaPlayerFactory by lazy {
         val isHwEnabled = settings.hardwareAcceleration
         val hwFlag = if (isHwEnabled) "--avcodec-hw=any" else "--avcodec-hw=none"
 
-        println("[DirectMemoryVideoPlayer] Initializing LibVLC Engine: Hardware Acceleration = $isHwEnabled ($hwFlag)")
+        println("[DirectMemoryVideoPlayer] Initializing LibVLC Engine: HW = $isHwEnabled ($hwFlag), Subtitle Rel-Divisor = $relFontSize (${settings.subtitleFontSizeSp}sp)")
 
         MediaPlayerFactory(
             "--no-video-title-show",
@@ -47,6 +63,7 @@ class DirectMemoryVideoPlayer(
             "--clock-jitter=0",
             "--clock-synchro=0",
             "--quiet",
+            "--freetype-rel-fontsize=$relFontSize",
             hwFlag
         )
     }
@@ -93,11 +110,12 @@ class DirectMemoryVideoPlayer(
                     val pitch = sourceWidth * 4
                     val byteCount = pitch * sourceHeight
 
+                    // Enforce OPAQUE to prevent alpha dilution of video colors
                     val info = ImageInfo(
                         width = sourceWidth,
                         height = sourceHeight,
                         colorType = ColorType.BGRA_8888,
-                        alphaType = ColorAlphaType.PREMUL
+                        alphaType = ColorAlphaType.OPAQUE
                     )
 
                     synchronized(frameLock) {
@@ -178,6 +196,15 @@ class DirectMemoryVideoPlayer(
             override fun playing(mp: MediaPlayer) {
                 isPlaying = true
                 isBuffering = false
+
+                val startupRate = settings.defaultSpeed
+                playbackSpeed = startupRate
+                if (mp.status().rate() != startupRate) {
+                    try {
+                        mp.controls().setRate(startupRate)
+                    } catch (_: Throwable) {}
+                }
+
                 if (hasAppliedPreferences.compareAndSet(false, true)) {
                     Executors.newSingleThreadScheduledExecutor().schedule({
                         DesktopTrackPreferences.applyStickyPreferences(mp)
@@ -224,9 +251,15 @@ class DirectMemoryVideoPlayer(
             mediaUrl,
             ":network-caching=$bufferMs",
             ":file-caching=$fileCacheMs",
-            ":clock-jitter=0",
-            ":clock-synchro=0"
+            ":freetype-rel-fontsize=$relFontSize"
         )
+    }
+
+    fun setPlaybackRate(rate: Float) {
+        playbackSpeed = rate
+        try {
+            mediaPlayer.controls().setRate(rate)
+        } catch (_: Throwable) {}
     }
 
     fun seekToFraction(fraction: Float) {
@@ -323,6 +356,27 @@ class DirectMemoryVideoPlayer(
         } catch (_: Exception) {}
     }
 
+    fun loadExternalSubtitle(filePath: String): Boolean {
+        return try {
+            val file = java.io.File(filePath)
+            if (!file.exists()) return false
+
+            val success = mediaPlayer.subpictures().setSubTitleFile(file.absolutePath)
+            externalSubtitlePath = file.absolutePath
+            externalSubtitleName = file.name
+            println("[DirectMemoryVideoPlayer] Loaded external subtitle: ${file.name} (success=$success)")
+            true
+        } catch (e: Exception) {
+            System.err.println("[DirectMemoryVideoPlayer] Failed to load subtitle file: ${e.message}")
+            false
+        }
+    }
+
+    fun reactivateExternalSubtitle(): Boolean {
+        val path = externalSubtitlePath ?: return false
+        return loadExternalSubtitle(path)
+    }
+
     fun getActiveAudioTrackId(): Int {
         return try { mediaPlayer.audio().track() } catch (_: Exception) { -1 }
     }
@@ -334,6 +388,8 @@ class DirectMemoryVideoPlayer(
     fun release() {
         if (isDisposed) return
         isDisposed = true
+        externalSubtitleName = null
+        externalSubtitlePath = null
         try {
             mediaPlayer.controls().stop()
             mediaPlayer.release()

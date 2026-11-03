@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeMute
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +49,7 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import com.clotube.desktop.ui.components.CinemaColorFilter
 import com.clotube.desktop.ui.components.PacedBufferingSpinner
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
@@ -110,6 +112,9 @@ fun DesktopMoviePlayerScreen(
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
 
     val shouldResume = DesktopAppSettings.state.resumePlayback
+    val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
+        DesktopAppSettings.state.seekStepSeconds * 1000L
+    }
     val effectiveInitialSeekMs = remember(currentPlayingMovie.id, userEmail, shouldResume) {
         if (!shouldResume) {
             0L
@@ -122,7 +127,10 @@ fun DesktopMoviePlayerScreen(
         }
     }
 
-    val player = remember(currentPlayingMovie.id, currentPlayingMovie.streamUrl) {
+    val subtitleFontSize = DesktopAppSettings.state.subtitleFontSizeSp
+    val cinemaColor = DesktopAppSettings.state.cinemaColorEnhancement
+    val activeColorFilter = if (cinemaColor) CinemaColorFilter.ToneMappedColorFilter else null
+    val player = remember(currentPlayingMovie.id, currentPlayingMovie.streamUrl, subtitleFontSize, cinemaColor) {
         DirectMemoryVideoPlayer(
             currentPlayingMovie.streamUrl.ifBlank {
                 "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
@@ -206,14 +214,18 @@ fun DesktopMoviePlayerScreen(
     }
 
     // Active track state management
-    var currentSubtitleId by remember { mutableIntStateOf(-1) }
-    var currentAudioId by remember { mutableIntStateOf(-1) }
-    var currentSpeed by remember { mutableFloatStateOf(1.0f) }
+    var currentSubtitleId by remember(currentPlayingMovie.id) { mutableIntStateOf(-1) }
+    var currentAudioId by remember(currentPlayingMovie.id) { mutableIntStateOf(-1) }
+    var currentSpeed by remember(currentPlayingMovie.id, player) {
+        mutableFloatStateOf(DesktopAppSettings.state.defaultSpeed)
+    }
 
     // Synchronize LibVLC track selection
     LaunchedEffect(player.isFirstFrameRendered) {
         if (player.isFirstFrameRendered) {
-            currentSubtitleId = player.mediaPlayer.subpictures().track()
+            if (currentSubtitleId != -99) {
+                currentSubtitleId = player.mediaPlayer.subpictures().track()
+            }
             currentAudioId = player.mediaPlayer.audio().track()
         }
     }
@@ -259,7 +271,7 @@ fun DesktopMoviePlayerScreen(
     // =========================================================================
     // BULLETPROOF AWT KEY EVENT DISPATCHER (Immune to Compose focus loss)
     // =========================================================================
-    DisposableEffect(player, isFullscreen, activePopup) {
+    DisposableEffect(player, isFullscreen, activePopup, seekStepMs) {
         val dispatcher = KeyEventDispatcher { e ->
             if (e.id == KeyEvent.KEY_PRESSED) {
                 // Any key interaction makes controls and cursor visible
@@ -271,14 +283,14 @@ fun DesktopMoviePlayerScreen(
 
                 when (e.keyCode) {
                     KeyEvent.VK_LEFT -> {
-                        val newTime = (player.currentTimeMs - 10000L).coerceAtLeast(0L)
+                        val newTime = (player.currentTimeMs - seekStepMs).coerceAtLeast(0L)
                         player.seekToTime(newTime)
                         seekFeedbackDirection = SeekFeedbackDirection.REWIND
                         seekFeedbackTrigger++
                         true
                     }
                     KeyEvent.VK_RIGHT -> {
-                        val newTime = (player.currentTimeMs + 10000L).coerceAtMost(player.totalDurationMs)
+                        val newTime = (player.currentTimeMs + seekStepMs).coerceAtMost(player.totalDurationMs)
                         player.seekToTime(newTime)
                         seekFeedbackDirection = SeekFeedbackDirection.FORWARD
                         seekFeedbackTrigger++
@@ -386,7 +398,8 @@ fun DesktopMoviePlayerScreen(
                         drawImage(
                             image = frame,
                             dstOffset = IntOffset(offsetX, offsetY),
-                            dstSize = IntSize(targetW, targetH)
+                            dstSize = IntSize(targetW, targetH),
+                            colorFilter = activeColorFilter
                         )
                     }
                 }
@@ -473,7 +486,9 @@ fun DesktopMoviePlayerScreen(
                             activePopup = activePopup,
                             onTogglePopup = { popup ->
                                 if (popup == PlayerPopupType.SUBTITLES) {
-                                    currentSubtitleId = player.mediaPlayer.subpictures().track()
+                                    if (currentSubtitleId != -99) {
+                                        currentSubtitleId = player.mediaPlayer.subpictures().track()
+                                    }
                                 } else if (popup == PlayerPopupType.AUDIO) {
                                     currentAudioId = player.mediaPlayer.audio().track()
                                 }
@@ -505,7 +520,11 @@ fun DesktopMoviePlayerScreen(
                     currentSpeed = currentSpeed,
                     onSelectSubtitle = { id ->
                         currentSubtitleId = id
-                        player.mediaPlayer.subpictures().setTrack(id)
+                        if (id == -99) {
+                            player.reactivateExternalSubtitle()
+                        } else {
+                            player.setSubtitleTrack(id, isOff = (id == -1))
+                        }
                         activePopup = PlayerPopupType.NONE
                     },
                     onSelectAudio = { id ->
@@ -515,7 +534,7 @@ fun DesktopMoviePlayerScreen(
                     },
                     onSelectSpeed = { speed ->
                         currentSpeed = speed
-                        player.mediaPlayer.controls().setRate(speed)
+                        player.setPlaybackRate(speed)
                         activePopup = PlayerPopupType.NONE
                     },
                     onDismiss = { activePopup = PlayerPopupType.NONE },
@@ -613,7 +632,8 @@ fun DesktopMoviePlayerScreen(
                                         drawImage(
                                             image = frame,
                                             dstOffset = IntOffset(offsetX, offsetY),
-                                            dstSize = IntSize(targetW, targetH)
+                                            dstSize = IntSize(targetW, targetH),
+                                            colorFilter = activeColorFilter
                                         )
                                     }
                                 }
@@ -666,7 +686,9 @@ fun DesktopMoviePlayerScreen(
                                         activePopup = activePopup,
                                         onTogglePopup = { popup ->
                                             if (popup == PlayerPopupType.SUBTITLES) {
-                                                currentSubtitleId = player.mediaPlayer.subpictures().track()
+                                                if (currentSubtitleId != -99) {
+                                                    currentSubtitleId = player.mediaPlayer.subpictures().track()
+                                                }
                                             } else if (popup == PlayerPopupType.AUDIO) {
                                                 currentAudioId = player.mediaPlayer.audio().track()
                                             }
@@ -694,7 +716,11 @@ fun DesktopMoviePlayerScreen(
                                     currentSpeed = currentSpeed,
                                     onSelectSubtitle = { id ->
                                         currentSubtitleId = id
-                                        player.mediaPlayer.subpictures().setTrack(id)
+                                        if (id == -99) {
+                                            player.reactivateExternalSubtitle()
+                                        } else {
+                                            player.setSubtitleTrack(id, isOff = (id == -1))
+                                        }
                                         activePopup = PlayerPopupType.NONE
                                     },
                                     onSelectAudio = { id ->
@@ -704,7 +730,7 @@ fun DesktopMoviePlayerScreen(
                                     },
                                     onSelectSpeed = { speed ->
                                         currentSpeed = speed
-                                        player.mediaPlayer.controls().setRate(speed)
+                                        player.setPlaybackRate(speed)
                                         activePopup = PlayerPopupType.NONE
                                     },
                                     onDismiss = { activePopup = PlayerPopupType.NONE },
@@ -910,8 +936,9 @@ private fun SeekFeedbackIndicator(
                     modifier = Modifier.size(26.dp)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
+                val seekSec = DesktopAppSettings.state.seekStepSeconds
                 Text(
-                    text = if (direction == SeekFeedbackDirection.REWIND) "-10" else "+10",
+                    text = if (direction == SeekFeedbackDirection.REWIND) "-$seekSec" else "+$seekSec",
                     color = Color.White,
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1004,18 +1031,67 @@ private fun InPlayerSettingsPopup(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
                         )
 
+                        // 1. Add External Subtitle File (VLC Action)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    com.clotube.desktop.ui.utils.SubtitleFilePicker.openSubtitleDialog { path ->
+                                        if (player.loadExternalSubtitle(path)) {
+                                            onSelectSubtitle(-99)
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 16.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Add Subtitle File",
+                                tint = Color(0xFF00E5FF),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "Add Subtitle File...",
+                                color = Color(0xFF00E5FF),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Divider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 4.dp))
+
+                        // 2. Active External Subtitle Entry (if loaded)
+                        player.externalSubtitleName?.let { extName ->
+                            MenuOptionItem(
+                                label = "[External] $extName",
+                                isSelected = currentSubtitleId == -99,
+                                onClick = {
+                                    onSelectSubtitle(-99)
+                                }
+                            )
+                        }
+
+                        // 3. Subtitles Off Option
                         MenuOptionItem(
                             label = "Subtitles Off",
                             isSelected = currentSubtitleId == -1,
-                            onClick = { onSelectSubtitle(-1) }
+                            onClick = {
+                                player.setSubtitleTrack(-1, isOff = true)
+                                onSelectSubtitle(-1)
+                            }
                         )
 
+                        // 4. Embedded Streams from Media Container
                         val spuTracks = player.mediaPlayer.subpictures().trackDescriptions() ?: emptyList()
                         spuTracks.filter { it.id() != -1 }.forEach { track ->
                             MenuOptionItem(
                                 label = track.description(),
-                                isSelected = track.id() == currentSubtitleId,
-                                onClick = { onSelectSubtitle(track.id()) }
+                                isSelected = currentSubtitleId == track.id(),
+                                onClick = {
+                                    onSelectSubtitle(track.id())
+                                }
                             )
                         }
                     }
@@ -1313,6 +1389,28 @@ private fun BottomTransportBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // Rewind Button
+                IconButton(
+                    onClick = {
+                        val currentMs = player.currentTimeMs
+                        val stepMs = DesktopAppSettings.state.seekStepSeconds * 1000L
+                        player.seekToTime((currentMs - stepMs).coerceAtLeast(0L))
+                    },
+                    modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    val sec = DesktopAppSettings.state.seekStepSeconds
+                    Icon(
+                        imageVector = when (sec) {
+                            5 -> Icons.Rounded.Replay5
+                            30 -> Icons.Rounded.Replay30
+                            else -> Icons.Rounded.Replay10
+                        },
+                        contentDescription = "Rewind ${sec}s",
+                        tint = Color(0xFFCBD5E1),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
                 IconButton(
                     onClick = { player.togglePlayPause() },
                     modifier = Modifier
@@ -1324,6 +1422,29 @@ private fun BottomTransportBar(
                         contentDescription = "Play/Pause",
                         tint = Color.White,
                         modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // Fast Forward Button
+                IconButton(
+                    onClick = {
+                        val currentMs = player.currentTimeMs
+                        val totalMs = player.totalDurationMs
+                        val stepMs = DesktopAppSettings.state.seekStepSeconds * 1000L
+                        player.seekToTime(if (totalMs > 0L) (currentMs + stepMs).coerceAtMost(totalMs) else currentMs + stepMs)
+                    },
+                    modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    val sec = DesktopAppSettings.state.seekStepSeconds
+                    Icon(
+                        imageVector = when (sec) {
+                            5 -> Icons.Rounded.Forward5
+                            30 -> Icons.Rounded.Forward30
+                            else -> Icons.Rounded.Forward10
+                        },
+                        contentDescription = "Forward ${sec}s",
+                        tint = Color(0xFFCBD5E1),
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
@@ -1410,6 +1531,11 @@ private fun BottomTransportBar(
                 }
 
                 // 3. Playback Speed Button / Chip
+                val speedLabel = if (currentSpeed % 1.0f == 0f) {
+                    "${currentSpeed.toInt()}.0x"
+                } else {
+                    "${currentSpeed}x"
+                }
                 Surface(
                     shape = RoundedCornerShape(6.dp),
                     color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
@@ -1419,7 +1545,7 @@ private fun BottomTransportBar(
                         .padding(horizontal = 2.dp)
                 ) {
                     Text(
-                        text = "${currentSpeed}x",
+                        text = speedLabel,
                         color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF42A5F5) else Color.White,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,

@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.clotube.desktop.auth.DesktopAuthManager
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopOnlineMetadataResolver
@@ -55,7 +56,18 @@ fun App(
     var movies by remember(userEmail) {
         mutableStateOf<List<DesktopMediaItem>>(
             cachedProfile?.movies?.map { rawItem ->
-                val item = DesktopLibraryCache.sanitizeMediaItem(rawItem)
+                val sanitized = DesktopLibraryCache.sanitizeMediaItem(rawItem)
+                val item = if (DesktopOnlineMetadataResolver.isTitleDirty(sanitized.title)) {
+                    val sync = DesktopOnlineMetadataResolver.resolveMovieSync(sanitized.title)
+                    sanitized.copy(
+                        title = sync.officialTitle,
+                        thumbnailUrl = if (sync.posterUrl.isNotBlank()) sync.posterUrl else sanitized.thumbnailUrl,
+                        genre = if (sync.genre.isNotBlank() && sync.genre != "Drama • Cinema") sync.genre else sanitized.genre,
+                        language = sync.language
+                    )
+                } else {
+                    sanitized
+                }
                 val guaranteedDriveThumb = item.fallbackThumbnailUrl?.takeIf { !it.isNullOrBlank() }
                     ?: if (!item.id.isNullOrBlank()) "https://drive.google.com/thumbnail?id=${item.id}&sz=w800" else ""
                 val existingPoster = item.thumbnailUrl?.takeIf { !it.isNullOrBlank() && !it.contains("drive.google.com/thumbnail") }
@@ -105,6 +117,31 @@ fun App(
 
     val coroutineScope = rememberCoroutineScope()
 
+    // Cache self-healing: Re-evaluate and persist any cached titles matching dirty markers (e.g. 'Cebray')
+    LaunchedEffect(userEmail) {
+        val hasDirtyTitles = movies.any { DesktopOnlineMetadataResolver.isTitleDirty(it.title) }
+        if (hasDirtyTitles) {
+            println("[App] Dirty or unscrubbed movie titles detected in cache (e.g. 'Cebray'). Triggering automatic metadata re-resolution...")
+            val cleanedMovies = movies.map { item ->
+                if (DesktopOnlineMetadataResolver.isTitleDirty(item.title)) {
+                    val sync = DesktopOnlineMetadataResolver.resolveMovieSync(item.title)
+                    item.copy(
+                        title = sync.officialTitle,
+                        thumbnailUrl = if (sync.posterUrl.isNotBlank()) sync.posterUrl else item.thumbnailUrl,
+                        genre = if (sync.genre.isNotBlank() && sync.genre != "Drama • Cinema") sync.genre else item.genre,
+                        language = sync.language
+                    )
+                } else {
+                    item
+                }
+            }
+            movies = cleanedMovies
+            if (!userEmail.isNullOrBlank()) {
+                DesktopLibraryCache.save(userEmail, cleanedMovies, series)
+            }
+        }
+    }
+
     // Synchronize Android/Drive Watch History in Background
     LaunchedEffect(userEmail, accessToken) {
         if (!userEmail.isNullOrBlank() && !accessToken.isNullOrBlank()) {
@@ -151,6 +188,10 @@ fun App(
 
                 // CASE A: User has cached media already loaded on screen
                 if (movies.isNotEmpty() || series.isNotEmpty()) {
+                    if (!DesktopAppSettings.state.deltaScanOnStartup && rescanTrigger == 0) {
+                        println("[App] Startup delta scan disabled by settings. Skipping background revalidation.")
+                        return@launch
+                    }
                     println("[App] Cached media active (${movies.size} movies, ${series.size} series). Running quiet background revalidation...")
 
                     // Perform one-shot scans in parallel without touching the UI
