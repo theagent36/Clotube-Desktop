@@ -256,79 +256,86 @@ fun DesktopSeriesDetailScreen(
 
     val activeEpisode = playingEpisode
 
-    val saveActiveEpisodeProgress = {
+    // 1. Resolve saved position for the active episode
+    val savedPos = remember(activeEpisode?.id, userEmail) {
+        val ep = activeEpisode
+        if (userEmail.isNotBlank() && ep != null) {
+            com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
+        } else 0L
+    }
+
+    // 2. Resume Playback Handler: waits for stream readiness, respects settings toggle
+    val hasAppliedResume = remember(activeEpisode?.id) { java.util.concurrent.atomic.AtomicBoolean(false) }
+
+    LaunchedEffect(activeEpisode?.id, player?.isFirstFrameRendered, player?.totalDurationMs) {
+        val p = player ?: return@LaunchedEffect
+        val shouldResume = DesktopAppSettings.state.resumePlayback
+        if (shouldResume && savedPos > 1500L && hasAppliedResume.compareAndSet(false, true)) {
+            var attempts = 0
+            while (attempts < 30 && (!p.isFirstFrameRendered || p.totalDurationMs <= 0L)) {
+                kotlinx.coroutines.delay(100L)
+                attempts++
+            }
+            kotlinx.coroutines.delay(150L)
+            p.seekToTime(savedPos)
+            println("[SeriesPlayer] Resumed ${activeEpisode?.title} at ${savedPos}ms (resumePlayback = true)")
+        }
+    }
+
+    // 3. Periodic Progress Recording
+    val saveSeriesProgress = {
         val ep = activeEpisode
         val p = player
         if (ep != null && p != null && userEmail.isNotBlank()) {
             val curPos = p.currentTimeMs
-            val totalDur = if (ep.durationMs > 0L) ep.durationMs else p.totalDurationMs
-            if (curPos > 0L) {
+            val dur = if (ep.durationMs > 0L) ep.durationMs else p.totalDurationMs
+            if (curPos > 1000L) {
                 coroutineScope.launch(Dispatchers.IO) {
-                    com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
-                        email = userEmail,
-                        fileId = ep.id,
-                        title = ep.title,
-                        positionMs = curPos,
-                        durationMs = totalDur,
-                        isSeries = true,
-                        seriesId = seriesItem.id,
-                        seasonNumber = ep.seasonNumber,
-                        episodeNumber = ep.episodeNumber
-                    )
-                    com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                    try {
+                        com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
+                            email = userEmail,
+                            fileId = ep.id,
+                            title = ep.title,
+                            positionMs = curPos,
+                            durationMs = dur,
+                            isSeries = true,
+                            seriesId = seriesItem.id,
+                            seasonNumber = ep.seasonNumber,
+                            episodeNumber = ep.episodeNumber
+                        )
+                        if (accessToken.isNotBlank()) {
+                            com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                        }
+                    } catch (t: Throwable) {
+                        System.err.println("[SeriesPlayer] Failed to save watch progress: ${t.message}")
+                    }
                 }
             }
         }
     }
+    val saveActiveEpisodeProgress = saveSeriesProgress
 
-    // Periodic Progress Recorder (Records every 5 seconds during active series playback)
     LaunchedEffect(player?.isPlaying, activeEpisode?.id, userEmail) {
         if (player?.isPlaying == true && activeEpisode != null && userEmail.isNotBlank()) {
             while (isActive) {
                 delay(5000L)
-                saveActiveEpisodeProgress()
+                saveSeriesProgress()
             }
+        } else if (player?.isPlaying == false && activeEpisode != null && userEmail.isNotBlank()) {
+            saveSeriesProgress()
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            saveActiveEpisodeProgress()
+            saveSeriesProgress()
         }
     }
 
     DisposableEffect(player) {
         onDispose {
-            saveActiveEpisodeProgress()
+            saveSeriesProgress()
             player?.release()
-        }
-    }
-
-    // Track which episode has already consumed its initial seek so fullscreen toggles never re-seek
-    var resumedEpisodeId by remember(seriesItem.id) { mutableStateOf<String?>(null) }
-
-    val shouldResume = DesktopAppSettings.state.resumePlayback
-    val savedPos = remember(playingEpisode?.id, userEmail, shouldResume) {
-        if (shouldResume) {
-            playingEpisode?.let { ep ->
-                DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
-            } ?: 0L
-        } else {
-            0L
-        }
-    }
-
-    // Only supply savedPos on the very first mount of this episode
-    val effectiveInitialSeekMs = if (playingEpisode != null && resumedEpisodeId != playingEpisode?.id) {
-        savedPos
-    } else {
-        0L
-    }
-
-    // Reset latch when episode changes so the next episode can resume
-    LaunchedEffect(playingEpisode?.id) {
-        if (resumedEpisodeId != playingEpisode?.id) {
-            // Keep until first seek applied
         }
     }
 
@@ -343,10 +350,8 @@ fun DesktopSeriesDetailScreen(
             nextEpisodeTitle = nextEpisode?.title ?: "",
             nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
             nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
-            initialSeekMs = effectiveInitialSeekMs,
-            onInitialSeekApplied = {
-                resumedEpisodeId = playingEpisode?.id
-            },
+            initialSeekMs = 0L,
+            onInitialSeekApplied = null,
             onProgressUpdate = { currentPos ->
                 playingEpisode?.let { ep ->
                     coroutineScope.launch {
@@ -403,7 +408,6 @@ fun DesktopSeriesDetailScreen(
                             DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
                         }
                     }
-                    resumedEpisodeId = null // Allow next episode to resume
                     playingEpisode = nextEpisode
                     if (selectedSeasonNumber != nextEpisode.seasonNumber) {
                         selectedSeasonNumber = nextEpisode.seasonNumber
@@ -413,7 +417,6 @@ fun DesktopSeriesDetailScreen(
             onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
                 {
                     saveActiveEpisodeProgress()
-                    resumedEpisodeId = null // Allow prev episode to resume
                     playingEpisode = prevEpisode
                     if (selectedSeasonNumber != prevEpisode.seasonNumber) {
                         selectedSeasonNumber = prevEpisode.seasonNumber
@@ -589,10 +592,8 @@ fun DesktopSeriesDetailScreen(
                                 nextEpisodeTitle = nextEpisode?.title ?: "",
                                 nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
                                 nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
-                                initialSeekMs = effectiveInitialSeekMs,
-                                onInitialSeekApplied = {
-                                    resumedEpisodeId = playingEpisode?.id
-                                },
+                                initialSeekMs = 0L,
+                                onInitialSeekApplied = null,
                                 onProgressUpdate = { currentPos ->
                                     playingEpisode?.let { ep ->
                                         coroutineScope.launch {
@@ -649,7 +650,6 @@ fun DesktopSeriesDetailScreen(
                                                 DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
                                             }
                                         }
-                                        resumedEpisodeId = null
                                         playingEpisode = nextEpisode
                                         if (selectedSeasonNumber != nextEpisode.seasonNumber) {
                                             selectedSeasonNumber = nextEpisode.seasonNumber
@@ -659,7 +659,6 @@ fun DesktopSeriesDetailScreen(
                                 onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
                                     {
                                         saveActiveEpisodeProgress()
-                                        resumedEpisodeId = null
                                         playingEpisode = prevEpisode
                                         if (selectedSeasonNumber != prevEpisode.seasonNumber) {
                                             selectedSeasonNumber = prevEpisode.seasonNumber
@@ -908,7 +907,6 @@ fun DesktopSeriesDetailScreen(
                                     onSelectEpisode = {
                                         if (activeEpisode?.id != ep.id) {
                                             saveActiveEpisodeProgress()
-                                            resumedEpisodeId = null
                                             playingEpisode = ep
                                         }
                                     },

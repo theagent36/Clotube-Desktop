@@ -242,9 +242,9 @@ object DesktopWatchHistoryManager {
         val dur = (local["${fileId}_dur"]?.value as? Number)?.toLong() ?: 0L
         val fraction = (local["${fileId}_fraction"]?.value as? Number)?.toFloat() ?: 0f
 
-        // If completed (>90%), start from beginning
-        if (fraction >= 0.90f || (dur > 0L && pos >= (dur * 0.90f))) return 0L
-        return if (pos > 10000L) pos else 0L
+        // If completed (>95%), start from beginning
+        if (fraction >= 0.95f || (dur > 0L && pos >= (dur * 0.95f))) return 0L
+        return if (pos > 1500L) pos else 0L
     }
 
     fun isEpisodeWatched(email: String, fileId: String): Boolean {

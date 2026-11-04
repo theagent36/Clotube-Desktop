@@ -110,21 +110,10 @@ fun DesktopMoviePlayerScreen(
     onBack: () -> Unit
 ) {
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
+    val coroutineScope = rememberCoroutineScope()
 
-    val shouldResume = DesktopAppSettings.state.resumePlayback
     val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
         DesktopAppSettings.state.seekStepSeconds * 1000L
-    }
-    val effectiveInitialSeekMs = remember(currentPlayingMovie.id, userEmail, shouldResume) {
-        if (!shouldResume) {
-            0L
-        } else if (currentPlayingMovie.id == initialMovie.id) {
-            initialSeekMs
-        } else if (userEmail.isNotBlank()) {
-            DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)
-        } else {
-            0L
-        }
     }
 
     val subtitleFontSize = DesktopAppSettings.state.subtitleFontSizeSp
@@ -138,56 +127,66 @@ fun DesktopMoviePlayerScreen(
         )
     }
 
-    val hasAppliedInitialSeek = remember(currentPlayingMovie.id) { AtomicBoolean(false) }
+    // 1. Resolve saved position for this movie
+    val savedPos = remember(currentPlayingMovie.id, userEmail) {
+        if (userEmail.isNotBlank()) {
+            val queried = com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)
+            if (queried > 0L) queried else if (currentPlayingMovie.id == initialMovie.id && initialSeekMs > 0L) initialSeekMs else 0L
+        } else if (currentPlayingMovie.id == initialMovie.id) {
+            initialSeekMs
+        } else 0L
+    }
 
-    LaunchedEffect(player.isPlaying, player.isBuffering, effectiveInitialSeekMs) {
-        if (player.currentTimeMs >= 2500L) {
-            hasAppliedInitialSeek.set(true)
-            return@LaunchedEffect
-        }
+    // 2. Resume Playback Handler: waits for video readiness, respects settings toggle
+    val hasAppliedResume = remember(currentPlayingMovie.id) { java.util.concurrent.atomic.AtomicBoolean(false) }
 
-        if (player.isPlaying && !player.isBuffering && effectiveInitialSeekMs > 1000L && hasAppliedInitialSeek.compareAndSet(false, true)) {
-            delay(150L)
-            if (player.currentTimeMs < 2500L) {
-                player.seekToTime(effectiveInitialSeekMs)
-                println("[DesktopMoviePlayerScreen] Resumed ${currentPlayingMovie.title} at ${effectiveInitialSeekMs}ms")
+    LaunchedEffect(currentPlayingMovie.id, player.isFirstFrameRendered, player.totalDurationMs) {
+        val shouldResume = DesktopAppSettings.state.resumePlayback
+        if (shouldResume && savedPos > 1500L && hasAppliedResume.compareAndSet(false, true)) {
+            var attempts = 0
+            while (attempts < 30 && (!player.isFirstFrameRendered || player.totalDurationMs <= 0L)) {
+                kotlinx.coroutines.delay(100L)
+                attempts++
             }
+            kotlinx.coroutines.delay(150L) // Settle delay for LibVLC clock
+            player.seekToTime(savedPos)
+            println("[MoviePlayer] Resumed ${currentPlayingMovie.title} at ${savedPos}ms (resumePlayback = true)")
         }
     }
 
-    val coroutineScope = rememberCoroutineScope()
-
+    // 3. Periodic Progress Recording (every 5 seconds during playback, and on pause)
     val saveMovieProgress = {
-        val curTime = player.currentTimeMs
-        val totalDur = player.totalDurationMs
-        val currentMovie = currentPlayingMovie
-        if (curTime > 0L && userEmail.isNotBlank()) {
-            CoroutineScope(Dispatchers.IO).launch {
+        val curMs = player.currentTimeMs
+        val durMs = player.totalDurationMs
+        if (curMs > 1000L && userEmail.isNotBlank()) {
+            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                    com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
                         email = userEmail,
-                        fileId = currentMovie.id,
-                        title = currentMovie.title,
-                        positionMs = curTime,
-                        durationMs = totalDur,
+                        fileId = currentPlayingMovie.id,
+                        title = currentPlayingMovie.title,
+                        positionMs = curMs,
+                        durationMs = durMs,
                         isSeries = false
                     )
                     if (accessToken.isNotBlank()) {
-                        DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                        com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
                     }
                 } catch (t: Throwable) {
-                    System.err.println("[DesktopMoviePlayerScreen] Failed to save watch progress: ${t.message}")
+                    System.err.println("[MoviePlayer] Failed to save watch progress: ${t.message}")
                 }
             }
         }
     }
 
-    LaunchedEffect(player.isPlaying, userEmail, currentPlayingMovie.id) {
+    LaunchedEffect(player.isPlaying, currentPlayingMovie.id, userEmail) {
         if (player.isPlaying && userEmail.isNotBlank()) {
             while (isActive) {
-                delay(5000L)
+                kotlinx.coroutines.delay(5000L)
                 saveMovieProgress()
             }
+        } else if (!player.isPlaying && userEmail.isNotBlank()) {
+            saveMovieProgress()
         }
     }
 
@@ -835,6 +834,7 @@ fun DesktopMoviePlayerScreen(
                                         .fillMaxWidth()
                                         .clickable {
                                             if (movie.id != currentPlayingMovie.id) {
+                                                saveMovieProgress()
                                                 currentPlayingMovie = movie
                                             }
                                         }
