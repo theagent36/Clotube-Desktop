@@ -110,7 +110,6 @@ fun DesktopMoviePlayerScreen(
     onBack: () -> Unit
 ) {
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
-    val coroutineScope = rememberCoroutineScope()
 
     val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
         DesktopAppSettings.state.seekStepSeconds * 1000L
@@ -119,15 +118,8 @@ fun DesktopMoviePlayerScreen(
     val subtitleFontSize = DesktopAppSettings.state.subtitleFontSizeSp
     val cinemaColor = DesktopAppSettings.state.cinemaColorEnhancement
     val activeColorFilter = if (cinemaColor) CinemaColorFilter.ToneMappedColorFilter else null
-    val player = remember(currentPlayingMovie.id, currentPlayingMovie.streamUrl, subtitleFontSize, cinemaColor) {
-        DirectMemoryVideoPlayer(
-            currentPlayingMovie.streamUrl.ifBlank {
-                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-            }
-        )
-    }
+    val shouldResume = DesktopAppSettings.state.resumePlayback
 
-    // 1. Resolve saved position for this movie
     val savedPos = remember(currentPlayingMovie.id, userEmail) {
         if (userEmail.isNotBlank()) {
             val queried = com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)
@@ -137,29 +129,26 @@ fun DesktopMoviePlayerScreen(
         } else 0L
     }
 
-    // 2. Resume Playback Handler: waits for video readiness, respects settings toggle
-    val hasAppliedResume = remember(currentPlayingMovie.id) { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val initialSeekTarget = if (shouldResume && savedPos > 1500L) savedPos else 0L
 
-    LaunchedEffect(currentPlayingMovie.id, player.isFirstFrameRendered, player.totalDurationMs) {
-        val shouldResume = DesktopAppSettings.state.resumePlayback
-        if (shouldResume && savedPos > 1500L && hasAppliedResume.compareAndSet(false, true)) {
-            var attempts = 0
-            while (attempts < 30 && (!player.isFirstFrameRendered || player.totalDurationMs <= 0L)) {
-                kotlinx.coroutines.delay(100L)
-                attempts++
-            }
-            kotlinx.coroutines.delay(150L) // Settle delay for LibVLC clock
-            player.seekToTime(savedPos)
-            println("[MoviePlayer] Resumed ${currentPlayingMovie.title} at ${savedPos}ms (resumePlayback = true)")
-        }
+    val player = remember(currentPlayingMovie.id, currentPlayingMovie.streamUrl, subtitleFontSize, cinemaColor) {
+        DirectMemoryVideoPlayer(
+            mediaUrl = currentPlayingMovie.streamUrl.ifBlank {
+                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+            },
+            initialSeekMs = initialSeekTarget
+        )
     }
 
-    // 3. Periodic Progress Recording (every 5 seconds during playback, and on pause)
+    // Process-level scope: persists even after this screen leaves the composition
+    val progressSaveScope = remember { kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()) }
+
+    // Periodic Progress Recording (every 5 seconds during playback, and on pause)
     val saveMovieProgress = {
         val curMs = player.currentTimeMs
         val durMs = player.totalDurationMs
         if (curMs > 1000L && userEmail.isNotBlank()) {
-            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            progressSaveScope.launch {
                 try {
                     com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
                         email = userEmail,

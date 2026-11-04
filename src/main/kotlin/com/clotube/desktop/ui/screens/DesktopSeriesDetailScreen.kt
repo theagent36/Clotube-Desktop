@@ -238,23 +238,17 @@ fun DesktopSeriesDetailScreen(
     val nextEpisode = if (hasNextGlobal) allEpisodes[globalEpIndex + 1] else null
     val prevEpisode = if (hasPrevGlobal) allEpisodes[globalEpIndex - 1] else null
 
-    val activeStreamUrl = remember(playingEpisode?.id, accessToken) {
-        playingEpisode?.let { ep ->
-            LocalStreamServer.getStreamUrl(ep.id, accessToken)
+    val activeEpisode = playingEpisode
+
+    val activeStreamUrl = remember(activeEpisode?.id, accessToken) {
+        activeEpisode?.let { ep ->
+            if (ep.streamUrl.isNotBlank()) ep.streamUrl else LocalStreamServer.getStreamUrl(ep.id, accessToken)
         } ?: ""
     }
 
     val subtitleFontSize = DesktopAppSettings.state.subtitleFontSizeSp
     val cinemaColor = DesktopAppSettings.state.cinemaColorEnhancement
-    val player = remember(activeStreamUrl, subtitleFontSize, cinemaColor) {
-        if (activeStreamUrl.isNotBlank()) {
-            DirectMemoryVideoPlayer(activeStreamUrl)
-        } else {
-            null
-        }
-    }
-
-    val activeEpisode = playingEpisode
+    val shouldResume = DesktopAppSettings.state.resumePlayback
 
     // 1. Resolve saved position for the active episode
     val savedPos = remember(activeEpisode?.id, userEmail) {
@@ -264,25 +258,20 @@ fun DesktopSeriesDetailScreen(
         } else 0L
     }
 
-    // 2. Resume Playback Handler: waits for stream readiness, respects settings toggle
-    val hasAppliedResume = remember(activeEpisode?.id) { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val initialSeekTarget = if (shouldResume && savedPos > 1500L) savedPos else 0L
 
-    LaunchedEffect(activeEpisode?.id, player?.isFirstFrameRendered, player?.totalDurationMs) {
-        val p = player ?: return@LaunchedEffect
-        val shouldResume = DesktopAppSettings.state.resumePlayback
-        if (shouldResume && savedPos > 1500L && hasAppliedResume.compareAndSet(false, true)) {
-            var attempts = 0
-            while (attempts < 30 && (!p.isFirstFrameRendered || p.totalDurationMs <= 0L)) {
-                kotlinx.coroutines.delay(100L)
-                attempts++
-            }
-            kotlinx.coroutines.delay(150L)
-            p.seekToTime(savedPos)
-            println("[SeriesPlayer] Resumed ${activeEpisode?.title} at ${savedPos}ms (resumePlayback = true)")
-        }
+    val player = remember(activeEpisode?.id, activeStreamUrl, subtitleFontSize, cinemaColor) {
+        if (activeStreamUrl.isNotBlank()) {
+            DirectMemoryVideoPlayer(
+                mediaUrl = activeStreamUrl,
+                initialSeekMs = initialSeekTarget
+            )
+        } else null
     }
 
-    // 3. Periodic Progress Recording
+    val progressSaveScope = remember { kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()) }
+
+    // 2. Periodic Progress Recording
     val saveSeriesProgress = {
         val ep = activeEpisode
         val p = player
@@ -290,7 +279,7 @@ fun DesktopSeriesDetailScreen(
             val curPos = p.currentTimeMs
             val dur = if (ep.durationMs > 0L) ep.durationMs else p.totalDurationMs
             if (curPos > 1000L) {
-                coroutineScope.launch(Dispatchers.IO) {
+                progressSaveScope.launch {
                     try {
                         com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
                             email = userEmail,
@@ -354,7 +343,7 @@ fun DesktopSeriesDetailScreen(
             onInitialSeekApplied = null,
             onProgressUpdate = { currentPos ->
                 playingEpisode?.let { ep ->
-                    coroutineScope.launch {
+                    progressSaveScope.launch {
                         DesktopWatchHistoryManager.recordPlaybackProgress(
                             email = userEmail,
                             fileId = ep.id,
@@ -596,7 +585,7 @@ fun DesktopSeriesDetailScreen(
                                 onInitialSeekApplied = null,
                                 onProgressUpdate = { currentPos ->
                                     playingEpisode?.let { ep ->
-                                        coroutineScope.launch {
+                                        progressSaveScope.launch {
                                             DesktopWatchHistoryManager.recordPlaybackProgress(
                                                 email = userEmail,
                                                 fileId = ep.id,

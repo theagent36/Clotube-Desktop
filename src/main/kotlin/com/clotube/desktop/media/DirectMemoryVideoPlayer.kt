@@ -29,6 +29,7 @@ private fun MediaPlayer.subtitles() = this.subpictures()
 
 class DirectMemoryVideoPlayer(
     val mediaUrl: String,
+    val initialSeekMs: Long = 0L,
     val onFirstFrame: () -> Unit = {}
 ) {
     val settings = DesktopAppSettings.state
@@ -102,6 +103,31 @@ class DirectMemoryVideoPlayer(
     @Volatile
     private var isDisposed: Boolean = false
     private val hasAppliedPreferences = AtomicBoolean(false)
+    private val hasAppliedInitialSeek = AtomicBoolean(false)
+    private val asyncExecutor = Executors.newSingleThreadScheduledExecutor()
+
+    private fun checkAndApplyInitialSeek(mp: MediaPlayer) {
+        if (initialSeekMs <= 1500L) return
+        if (!hasAppliedInitialSeek.compareAndSet(false, true)) return
+
+        asyncExecutor.schedule({
+            try {
+                if (isDisposed) return@schedule
+                var attempts = 0
+                while (attempts < 35 && (!mp.status().isPlayable || !mp.status().isSeekable)) {
+                    Thread.sleep(100)
+                    attempts++
+                }
+                if (isDisposed) return@schedule
+
+                mp.controls().setTime(initialSeekMs)
+                currentTimeMs = initialSeekMs
+                println("[DirectMemoryVideoPlayer] Engine-level resume applied successfully at ${initialSeekMs}ms")
+            } catch (t: Throwable) {
+                System.err.println("[DirectMemoryVideoPlayer] Resume seek error: ${t.message}")
+            }
+        }, 150, TimeUnit.MILLISECONDS)
+    }
 
     init {
         val callbackSurface = factory.videoSurfaces().newVideoSurface(
@@ -210,6 +236,8 @@ class DirectMemoryVideoPlayer(
                         DesktopTrackPreferences.applyStickyPreferences(mp)
                     }, 400, TimeUnit.MILLISECONDS)
                 }
+
+                checkAndApplyInitialSeek(mp)
             }
 
             override fun buffering(mp: MediaPlayer, newCache: Float) {
@@ -232,11 +260,15 @@ class DirectMemoryVideoPlayer(
                 if (kotlin.math.abs(newTime - currentTimeMs) >= 250L || newTime == 0L) {
                     currentTimeMs = newTime
                 }
+                if (newTime in 0L..1500L && initialSeekMs > 2000L) {
+                    checkAndApplyInitialSeek(mp)
+                }
             }
 
             override fun lengthChanged(mp: MediaPlayer, newLength: Long) {
                 if (newLength > 0L) {
                     totalDurationMs = newLength
+                    checkAndApplyInitialSeek(mp)
                 }
             }
 
@@ -249,12 +281,16 @@ class DirectMemoryVideoPlayer(
 
         val bufferMs = settings.bufferDepthMs
         val fileCacheMs = (bufferMs * 0.6).toInt()
-        mediaPlayer.media().play(
-            mediaUrl,
+        val mediaArgs = mutableListOf(
             ":network-caching=$bufferMs",
             ":file-caching=$fileCacheMs",
             ":freetype-rel-fontsize=$relFontSize"
         )
+        if (initialSeekMs > 1500L) {
+            mediaArgs.add(":start-time=${initialSeekMs / 1000L}")
+        }
+
+        mediaPlayer.media().play(mediaUrl, *mediaArgs.toTypedArray())
     }
 
     fun setPlaybackRate(rate: Float) {
@@ -283,8 +319,7 @@ class DirectMemoryVideoPlayer(
         try {
             if (!mediaPlayer.status().isPlayable) return
             val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
-            if (totalMs <= 0L) return
-            val clamped = timeMs.coerceIn(0L, totalMs)
+            val clamped = if (totalMs > 0L) timeMs.coerceIn(0L, totalMs) else timeMs.coerceAtLeast(0L)
             mediaPlayer.controls().setTime(clamped)
             currentTimeMs = clamped
         } catch (_: Throwable) {}
@@ -391,8 +426,8 @@ class DirectMemoryVideoPlayer(
             externalSubtitleName = file.name
             println("[DirectMemoryVideoPlayer] Loaded external subtitle: ${file.name} (success=$success)")
             true
-        } catch (e: Throwable) {
-            System.err.println("[DirectMemoryVideoPlayer] Failed to load subtitle file: ${e.message}")
+        } catch (_: Throwable) {
+            System.err.println("[DirectMemoryVideoPlayer] Failed to load subtitle file: $filePath")
             false
         }
     }
@@ -416,6 +451,7 @@ class DirectMemoryVideoPlayer(
     fun release() {
         if (isDisposed) return
         isDisposed = true
+        asyncExecutor.shutdownNow()
         externalSubtitleName = null
         externalSubtitlePath = null
         try {
