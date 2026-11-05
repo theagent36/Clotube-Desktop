@@ -49,7 +49,7 @@ compose.desktop {
             "-XX:MaxGCPauseMillis=20",
             "-Dskiko.renderApi=DIRECT3D",
             "-Dcompose.interop.blending=true",
-            "-Djava.net.preferIPv4Stack=true",
+            "-Djava.net.preferIPv4Stack=false",
             "-Dsun.awt.noerasebackground=true"
         )
 

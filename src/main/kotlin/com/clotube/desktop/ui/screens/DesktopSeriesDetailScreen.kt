@@ -106,8 +106,9 @@ fun DesktopSeriesDetailScreen(
 
     var seasonDropdownExpanded by remember { mutableStateOf(false) }
 
-    // Watched episode IDs for this user
-    var watchedEpisodeIds by remember(userEmail) {
+    // Observe global watch history revision so unchecking episodes on phone updates UI live
+    val historyRev = DesktopWatchHistoryManager.historyRevision.intValue
+    var watchedEpisodeIds by remember(userEmail, historyRev) {
         mutableStateOf(DesktopWatchHistoryManager.getWatchedEpisodeIds(userEmail))
     }
 
@@ -1132,10 +1133,10 @@ private fun EpisodeListItemCard(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(26.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
-                                    .shadow(8.dp, CircleShape),
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
+                                .shadow(8.dp, CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
@@ -1208,10 +1209,10 @@ private fun EpisodeListItemCard(
                 )
             }
 
-            // Right End: Animated Soundwave or Quick Watched Toggle Button
+            // Right End: Animated Soundwave and Watched Toggle Button
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (isCurrentlyPlaying) {
                     PacedEqualizerBars(
@@ -1220,18 +1221,25 @@ private fun EpisodeListItemCard(
                     )
                 }
 
-                if (isHovered || isWatched) {
-                    IconButton(
-                        onClick = onToggleWatched,
-                        modifier = Modifier
-                            .size(24.dp)
-                            .pointerHoverIcon(PointerIcon.Hand)
-                    ) {
+                IconButton(
+                    onClick = onToggleWatched,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    if (isWatched) {
                         Icon(
-                            imageVector = if (isWatched) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
-                            contentDescription = if (isWatched) "Mark Unwatched" else "Mark Watched",
-                            tint = if (isWatched) Color(0xFF00E5FF) else Color(0xFF64748B),
-                            modifier = Modifier.size(17.dp)
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = "Watched",
+                            tint = Color(0xFF00E5FF),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.RadioButtonUnchecked,
+                            contentDescription = "Mark watched",
+                            tint = if (isHovered) Color(0xFF94A3B8) else Color(0xFF475569),
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }

@@ -21,23 +21,25 @@ object DesktopWatchHistorySync {
     private var lastUploadedHash = ""
     private var lastUploadTime = 0L
 
-    // Safety net state
-    val hasPendingSync = AtomicBoolean(false)
-    var lastSuccessfulSyncTime = 0L
+    private val hasPendingSync = AtomicBoolean(false)
     private var autoRecoveryJob: Job? = null
-    private val syncScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    val syncScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    /**
-     * Rapid socket ping to Google APIs to verify actual internet connectivity.
-     */
     fun isInternetAvailable(): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress("www.googleapis.com", 443), 2000)
+                socket.connect(InetSocketAddress("8.8.8.8", 53), 2000)
                 true
             }
         } catch (_: Exception) {
-            false
+            try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress("www.google.com", 443), 2500)
+                    true
+                }
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 
@@ -66,10 +68,7 @@ object DesktopWatchHistorySync {
         }
     }
 
-    /**
-     * Downloads clotube_watch_history.json from Drive and merges it into the local profile.
-     */
-    suspend fun pullAndMerge(email: String, accessToken: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun pullAndMerge(email: String, accessToken: String = ""): Boolean = withContext(Dispatchers.IO) {
         if (email.isBlank()) return@withContext false
         try {
             val driveService = getDriveService() ?: return@withContext false
@@ -92,20 +91,10 @@ object DesktopWatchHistorySync {
         false
     }
 
-    /**
-     * Pushes the local profile watch history to Google Drive.
-     * Enforces debouncing, catch network drops, and triggers the pending sync latch on failure.
-     */
-    suspend fun pushLocalHistory(email: String, accessToken: String, force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+    suspend fun syncAndPush(email: String, force: Boolean = false): Boolean = withContext(Dispatchers.IO + NonCancellable) {
         if (email.isBlank()) return@withContext false
         val now = System.currentTimeMillis()
-        if (!force && (now - lastUploadTime < 25000L)) return@withContext false
-
-        val payload = DesktopWatchHistoryManager.getLocalPayloadJson(email)
-        val payloadHash = payload.hashCode().toString()
-        if (!force && payloadHash == lastUploadedHash) return@withContext false
-
-        lastUploadTime = now
+        if (!force && (now - lastUploadTime < 15000L)) return@withContext false
 
         try {
             val driveService = getDriveService()
@@ -114,8 +103,27 @@ object DesktopWatchHistorySync {
                 return@withContext false
             }
 
-            val mediaContent = ByteArrayContent.fromString("application/json", payload)
             val fileId = findHistoryFileId(driveService)
+
+            if (fileId != null) {
+                try {
+                    val outputStream = ByteArrayOutputStream()
+                    driveService.files().get(fileId)
+                        .setSupportsAllDrives(true)
+                        .executeMediaAndDownloadTo(outputStream)
+                    val remoteJson = outputStream.toString("UTF-8")
+                    DesktopWatchHistoryManager.mergeRemotePayload(email, remoteJson)
+                } catch (e: Exception) {
+                    System.err.println("[DesktopWatchHistorySync] Pre-push remote pull failed: ${e.message}")
+                }
+            }
+
+            val payload = DesktopWatchHistoryManager.getLocalPayloadJson(email)
+            val payloadHash = payload.hashCode().toString()
+            if (!force && payloadHash == lastUploadedHash) return@withContext false
+
+            lastUploadTime = now
+            val mediaContent = ByteArrayContent.fromString("application/json", payload)
 
             if (fileId != null) {
                 driveService.files().update(fileId, null, mediaContent)
@@ -132,46 +140,45 @@ object DesktopWatchHistorySync {
             }
 
             lastUploadedHash = payloadHash
-            lastSuccessfulSyncTime = now
             hasPendingSync.set(false)
-            println("[DesktopWatchHistorySync] Successfully pushed watch history to Google Drive.")
+            println("[DesktopWatchHistorySync] Successfully synced watch history with Google Drive.")
             return@withContext true
         } catch (e: IOException) {
-            // Network dropped mid-upload or DNS unresolvable
             hasPendingSync.set(true)
-            System.err.println("[DesktopWatchHistorySync] Network offline during upload. Queued for auto-recovery when connection restores: ${e.message}")
+            System.err.println("[DesktopWatchHistorySync] Network offline during sync. Queued for auto-recovery: ${e.message}")
         } catch (e: GoogleJsonResponseException) {
             hasPendingSync.set(true)
             System.err.println("[DesktopWatchHistorySync] Google API error (${e.statusCode}): ${e.details?.message ?: e.message}")
         } catch (e: Exception) {
             hasPendingSync.set(true)
-            System.err.println("[DesktopWatchHistorySync] Unexpected error during push: ${e.message}")
+            System.err.println("[DesktopWatchHistorySync] Unexpected error during sync: ${e.message}")
         }
         false
     }
 
-    /**
-     * Background daemon that detects when internet is restored and flushes pending history uploads.
-     */
+    suspend fun pushLocalHistory(email: String, accessToken: String = "", force: Boolean = false): Boolean {
+        return syncAndPush(email, force)
+    }
+
     fun startAutoRecoveryWorker(userEmail: String, accessTokenProvider: () -> String) {
         if (autoRecoveryJob?.isActive == true) return
 
         autoRecoveryJob = syncScope.launch {
-            println("[DesktopWatchHistorySync] Auto-recovery network monitor started.")
+            var loopCount = 0
             while (isActive) {
-                delay(15000L) // Check every 15 seconds
+                delay(12000L)
+                loopCount++
+
+                val token = accessTokenProvider()
+                if (token.isBlank() || userEmail.isBlank() || !isInternetAvailable()) continue
 
                 if (hasPendingSync.get()) {
-                    if (isInternetAvailable()) {
-                        val token = accessTokenProvider()
-                        if (token.isNotBlank() && userEmail.isNotBlank()) {
-                            println("[DesktopWatchHistorySync] Internet restored! Flushing queued watch history to Google Drive...")
-                            val success = pushLocalHistory(userEmail, token, force = true)
-                            if (success) {
-                                println("[DesktopWatchHistorySync] Pending watch history flushed successfully.")
-                            }
-                        }
-                    }
+                    val pushed = syncAndPush(userEmail, force = true)
+                    if (pushed) hasPendingSync.set(false)
+                }
+
+                if (loopCount % 2 == 0) {
+                    pullAndMerge(userEmail, token)
                 }
             }
         }

@@ -1520,9 +1520,9 @@ private fun FigmaHomeContent(
 ) {
     val scrollState = rememberScrollState()
 
-    // Keyed on watchHistoryRevision so returning from player immediately reflects new progress!
-    val continueWatchingItems = remember(userEmail, movies, series, watchHistoryRevision) {
-        com.clotube.desktop.data.DesktopWatchHistoryManager.getContinueWatching(userEmail, movies, series)
+    val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
+    val continueWatchingItems = remember(userEmail, movies, series, watchHistoryRevision, globalRevision) {
+        DesktopWatchHistoryManager.getContinueWatching(userEmail, movies, series)
     }
 
     // Combine all indexed movies and series for the hero billboard slideshow pool
@@ -1675,7 +1675,8 @@ private fun FigmaMoviesContent(
     watchHistoryRevision: Int = 0,
     onMovieClick: (DesktopMediaItem) -> Unit
 ) {
-    val lastWatchedMovie = remember(movies, userEmail, watchHistoryRevision) {
+    val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
+    val lastWatchedMovie = remember(movies, userEmail, watchHistoryRevision, globalRevision) {
         DesktopWatchHistoryManager.getLastWatchedMovie(userEmail, movies)
     }
 
@@ -2098,7 +2099,8 @@ private fun FigmaSeriesContent(
     watchHistoryRevision: Int = 0,
     onSeriesClick: (DesktopMediaItem, String?) -> Unit
 ) {
-    val lastWatchedSeries = remember(series, userEmail, watchHistoryRevision) {
+    val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
+    val lastWatchedSeries = remember(series, userEmail, watchHistoryRevision, globalRevision) {
         DesktopWatchHistoryManager.getLastWatchedSeries(userEmail, series)
     }
 
@@ -2746,8 +2748,9 @@ private fun FigmaRecentsContent(
     val coroutineScope = rememberCoroutineScope()
     var isClearing by remember { mutableStateOf(false) }
 
-    val historyItems = remember(userEmail, movies, series, watchHistoryRevision) {
-        com.clotube.desktop.data.DesktopWatchHistoryManager.getAllWatchHistory(userEmail, movies, series)
+    val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
+    val historyItems = remember(userEmail, movies, series, watchHistoryRevision, globalRevision) {
+        DesktopWatchHistoryManager.getAllWatchHistory(userEmail, movies, series)
     }
 
     LazyColumn(

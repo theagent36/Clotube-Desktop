@@ -144,10 +144,17 @@ fun setupLibVlcEnvironment() {
 fun main() {
     setupLibVlcEnvironment()
 
-    System.setProperty("java.net.preferIPv4Stack", "true")
+    // 1. Network & DNS Stabilization (Fixes UnknownHostException: www.googleapis.com and api.tvmaze.com)
+    System.setProperty("java.net.useSystemProxies", "false")
+    System.setProperty("java.net.preferIPv4Stack", "false")
     System.setProperty("java.net.preferIPv6Addresses", "false")
+    java.security.Security.setProperty("networkaddress.cache.ttl", "30")
+    java.security.Security.setProperty("networkaddress.cache.negative.ttl", "5")
+
+    // 2. Hardware Presentation Flags
     System.setProperty("sun.awt.noerasebackground", "true")
-    System.setProperty("compose.interop.blending", "true")
+    System.setProperty("sun.awt.erasebackgroundonresize", "false")
+    System.setProperty("compose.interop.blending", "false")
     System.setProperty("skiko.renderApi", "DIRECT3D")
 
     try {
