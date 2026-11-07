@@ -48,8 +48,8 @@ compose.desktop {
             "-Xmx1024m",
             "-XX:MaxGCPauseMillis=20",
             "-Dskiko.renderApi=DIRECT3D",
-            "-Dcompose.interop.blending=true",
-            "-Djava.net.preferIPv4Stack=false",
+            "-Dcompose.interop.blending=false",
+            "-Djava.net.preferIPv4Stack=true",
             "-Dsun.awt.noerasebackground=true"
         )
 
@@ -58,21 +58,23 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             packageName = "Clotube"
-            packageVersion = "1.0.5" // Incremented to 1.0.5 for in-place upgrade over installed 1.0.4
+            packageVersion = "1.0.6" // Incremented version for v1.0.6 update
             description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"
             includeAllModules = true
 
-            // Bundles package-resources into %LOCALAPPDATA%\Clotube\app\resources\
-            appResourcesRootDir.set(project.layout.projectDirectory.dir("package-resources"))
+            // Bundles 64-bit VLC runtime into %LOCALAPPDATA%\Clotube\app\resources\ if present
+            if (project.file("package-resources").exists()) {
+                appResourcesRootDir.set(project.layout.projectDirectory.dir("package-resources"))
+            }
 
             windows {
                 menuGroup = "Clotube"
                 perUserInstall = true             // Clean install into AppData without requiring UAC admin elevation
                 dirChooser = true                 // Permits custom destination directory selection
                 shortcut = true                   // Generates Start Menu and Desktop shortcuts
-                upgradeUuid = "a6873bc0-9c17-4f62-b924-f7b5878d65a2"
+                upgradeUuid = "a6873bc0-9c17-4f62-b924-f7b5878d65a2" // Must remain identical across releases
 
                 val iconFileObj = if (project.file("src/main/resources/app_icon.ico").exists()) {
                     project.file("src/main/resources/app_icon.ico")
@@ -85,3 +87,7 @@ compose.desktop {
     }
 }
 
+tasks.withType<ProcessResources> {
+    exclude("**/client_secrets*.json")
+    exclude("**/client_secrets*.bak")
+}

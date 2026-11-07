@@ -137,6 +137,7 @@ fun DesktopHomeScreen(
     onToggleFullscreen: () -> Unit = { onFullscreenToggle(!isAppFullscreen) },
     onRefresh: () -> Unit = {},
     onRescan: () -> Unit = onRefresh,
+    isSyncing: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val effectiveFullscreen = isFullscreen || isAppFullscreen
@@ -581,7 +582,8 @@ fun DesktopHomeScreen(
                                             }
                                         }
                                     },
-                                    onRescan = onRescan
+                                    onRescan = onRescan,
+                                    isSyncing = isSyncing
                                 )
                             }
                             DesktopNavSection.MOVIES -> {
@@ -1516,7 +1518,8 @@ private fun FigmaHomeContent(
     onNavigateSection: (DesktopNavSection) -> Unit,
     onSeriesClick: (DesktopMediaItem) -> Unit,
     onContinueWatchingClick: ((DesktopContinueWatchingItem) -> Unit)? = null,
-    onRescan: () -> Unit = {}
+    onRescan: () -> Unit = {},
+    isSyncing: Boolean = false
 ) {
     val scrollState = rememberScrollState()
 
@@ -1538,63 +1541,104 @@ private fun FigmaHomeContent(
                 .padding(32.dp),
             contentAlignment = Alignment.Center
         ) {
-            Surface(
-                modifier = Modifier.widthIn(max = 520.dp),
-                shape = RoundedCornerShape(16.dp),
-                color = Color(0xFF0C1018),
-                border = BorderStroke(1.dp, Color(0xFF1E2638))
-            ) {
-                Column(
-                    modifier = Modifier.padding(28.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+            if (isSyncing) {
+                // 1. ACTIVE INDEXING STATE
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0D111A)),
+                    border = BorderStroke(1.dp, Color(0xFF1B2234)),
+                    modifier = Modifier.width(440.dp)
                 ) {
-                    Box(
+                    Column(
                         modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF131D2D)),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.CloudOff,
-                            contentDescription = null,
-                            tint = Color(0xFF00E5FF),
-                            modifier = Modifier.size(28.dp)
+                        CircularProgressIndicator(
+                            color = Color(0xFF00E5FF),
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(44.dp)
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Text(
+                            text = "Indexing items from Drive...",
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Scanning your Google Drive for 'Movies' and 'Series' folders. This will only take a moment.",
+                            color = Color(0xFF8E9BAE),
+                            fontSize = 12.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            lineHeight = 18.sp
                         )
                     }
-
-                    Text(
-                        text = "No Media Indexed in Google Drive",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Text(
-                        text = "Clotube connected to your account, but found 0 movies or series folders in Drive. Check that your folders are named 'Movies' or 'Series', or verify your internet connection.",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    Button(
-                        onClick = onRescan,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.height(42.dp).pointerHoverIcon(PointerIcon.Hand)
+                }
+            } else {
+                // 2. VERIFIED EMPTY STATE (Only shown when scan is 100% finished and 0 items found)
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0D111A)),
+                    border = BorderStroke(1.dp, Color(0xFF1B2234)),
+                    modifier = Modifier.width(480.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(52.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF131D2E)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudQueue,
+                                contentDescription = null,
+                                tint = Color(0xFF00E5FF),
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = "No Media Indexed in Google Drive",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold)
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "Clotube connected to your account, but found 0 movies or series folders in Drive. Check that your folders are named 'Movies' or 'Series', or verify your internet connection.",
+                            color = Color(0xFF8E9BAE),
+                            fontSize = 12.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            lineHeight = 18.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(22.dp))
+
+                        Button(
+                            onClick = onRescan,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 10.dp),
+                            modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                        ) {
+                            Icon(imageVector = Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
                     }
                 }
             }

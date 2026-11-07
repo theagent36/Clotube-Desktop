@@ -1,5 +1,6 @@
 package com.clotube.desktop.auth
 
+import com.clotube.desktop.data.DesktopProfileManager
 import com.google.api.client.auth.oauth2.AuthorizationCodeRequestUrl
 import com.google.api.client.auth.oauth2.Credential
 import com.google.api.client.extensions.java6.auth.oauth2.AuthorizationCodeInstalledApp
@@ -12,11 +13,13 @@ import com.google.api.client.util.store.FileDataStoreFactory
 import com.google.api.services.oauth2.Oauth2
 import com.google.api.services.oauth2.model.Userinfo
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.util.concurrent.ConcurrentHashMap
 
 data class DesktopAuthState(
     val isSignedIn: Boolean = false,
@@ -52,45 +55,165 @@ object DesktopAuthManager {
         "profile"
     )
 
-    private var flowInstance: GoogleAuthorizationCodeFlow? = null
-    private var dataStoreFactoryInstance: FileDataStoreFactory? = null
+    private val flowMap = ConcurrentHashMap<String, GoogleAuthorizationCodeFlow>()
     private var cachedAuthState: DesktopAuthState? = null
 
-    private fun getClotubeDataDir(): File {
-        val appData = System.getenv("APPDATA")
-        val baseDir = if (!appData.isNullOrBlank()) {
-            File(appData, "Clotube")
-        } else {
-            File(System.getProperty("user.home"), ".clotube")
+    fun getClotubeDataDir(): File = DesktopProfileManager.appDataRoot
+    fun getTokensDirectory(): File = File(getClotubeDataDir(), "tokens")
+    fun getAuthStateFile(): File = File(getClotubeDataDir(), "auth_state.json")
+
+    fun getClientSecretsFile(emailHint: String? = null): File {
+        if (!emailHint.isNullOrBlank()) {
+            val f = DesktopProfileManager.getClientSecretsFile(emailHint)
+            if (f.exists() && f.length() > 0) return f
         }
-        if (!baseDir.exists()) {
-            baseDir.mkdirs()
+        val activeEmail = DesktopProfileManager.getActiveEmail()
+        if (!activeEmail.isNullOrBlank()) {
+            val f = DesktopProfileManager.getClientSecretsFile(activeEmail)
+            if (f.exists() && f.length() > 0) return f
         }
-        return baseDir
+        val staged = DesktopProfileManager.getStagedClientSecretsFile()
+        if (staged.exists() && staged.length() > 0) return staged
+
+        val rootLegacy = File(getClotubeDataDir(), "client_secrets.json")
+        if (rootLegacy.exists() && rootLegacy.length() > 0) return rootLegacy
+
+        return staged
     }
 
-    private fun getTokensDirectory(): File = File(getClotubeDataDir(), "tokens")
-    private fun getAuthStateFile(): File = File(getClotubeDataDir(), "auth_state.json")
+    fun getClientSecretsPath(emailHint: String? = null): String = getClientSecretsFile(emailHint).absolutePath
 
-    private fun loadClientSecrets(): GoogleClientSecrets {
-        val searchStreams = listOf<() -> InputStream?>(
-            { Thread.currentThread().contextClassLoader.getResourceAsStream("client_secrets.json") },
-            { DesktopAuthManager::class.java.getResourceAsStream("/client_secrets.json") },
-            {
-                val f = File(getClotubeDataDir(), "client_secrets.json")
-                if (f.exists()) f.inputStream() else null
-            },
-            {
-                val f = File("src/main/resources/client_secrets.json")
-                if (f.exists()) f.inputStream() else null
-            },
-            {
-                val f = File("client_secrets.json")
-                if (f.exists()) f.inputStream() else null
+    fun hasClientSecrets(emailHint: String? = null): Boolean {
+        if (!emailHint.isNullOrBlank()) {
+            val f = DesktopProfileManager.getClientSecretsFile(emailHint)
+            if (f.exists() && f.length() > 0) return true
+        }
+        val activeEmail = DesktopProfileManager.getActiveEmail()
+        if (!activeEmail.isNullOrBlank()) {
+            val f = DesktopProfileManager.getClientSecretsFile(activeEmail)
+            if (f.exists() && f.length() > 0) return true
+        }
+        val staged = DesktopProfileManager.getStagedClientSecretsFile()
+        if (staged.exists() && staged.length() > 0) return true
+
+        // Check if any profile has client_secrets.json
+        val anyProfileSecrets = DesktopProfileManager.profilesRoot.listFiles()?.any { dir ->
+            dir.isDirectory && File(dir, "client_secrets.json").let { it.exists() && it.length() > 0 }
+        } ?: false
+        if (anyProfileSecrets) return true
+
+        val rootLegacy = File(getClotubeDataDir(), "client_secrets.json")
+        if (rootLegacy.exists() && rootLegacy.length() > 0) return true
+
+        return false
+    }
+
+    fun getMaskedClientId(emailHint: String? = null): String? {
+        return try {
+            val providers = mutableListOf<() -> InputStream?>()
+
+            if (!emailHint.isNullOrBlank()) {
+                providers.add {
+                    val f = DesktopProfileManager.getClientSecretsFile(emailHint)
+                    if (f.exists() && f.length() > 0) f.inputStream() else null
+                }
             }
-        )
 
-        for (provider in searchStreams) {
+            val activeEmail = DesktopProfileManager.getActiveEmail()
+            if (!activeEmail.isNullOrBlank()) {
+                providers.add {
+                    val f = DesktopProfileManager.getClientSecretsFile(activeEmail)
+                    if (f.exists() && f.length() > 0) f.inputStream() else null
+                }
+            }
+
+            providers.add {
+                val f = DesktopProfileManager.getStagedClientSecretsFile()
+                if (f.exists() && f.length() > 0) f.inputStream() else null
+            }
+
+            providers.add {
+                val f = File(getClotubeDataDir(), "client_secrets.json")
+                if (f.exists() && f.length() > 0) f.inputStream() else null
+            }
+
+            for (provider in providers) {
+                try {
+                    val stream = provider()
+                    if (stream != null) {
+                        val content = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        val json = JsonParser.parseString(content).asJsonObject
+                        val clientBlock = json.getAsJsonObject("installed") ?: json.getAsJsonObject("web")
+                        val clientId = clientBlock?.get("client_id")?.asString
+                        if (!clientId.isNullOrBlank()) {
+                            return if (clientId.length > 8) "..." + clientId.takeLast(8) else clientId
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+            null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun saveClientSecrets(sourceFile: File, emailHint: String? = null): Result<Unit> {
+        return try {
+            if (!sourceFile.exists()) {
+                return Result.failure(IllegalArgumentException("Selected credentials file does not exist."))
+            }
+            val content = sourceFile.readText(Charsets.UTF_8)
+            val json = JsonParser.parseString(content).asJsonObject
+            val clientBlock = json.getAsJsonObject("installed") ?: json.getAsJsonObject("web")
+                ?: return Result.failure(IllegalArgumentException("Invalid JSON: Missing 'installed' or 'web' root block."))
+
+            val clientId = clientBlock.get("client_id")?.asString
+            val clientSecret = clientBlock.get("client_secret")?.asString
+
+            if (clientId.isNullOrBlank() || clientSecret.isNullOrBlank()) {
+                return Result.failure(IllegalArgumentException("Invalid credentials: 'client_id' or 'client_secret' is empty."))
+            }
+
+            // Always write to staged file for onboarding
+            val stagedFile = DesktopProfileManager.getStagedClientSecretsFile()
+            stagedFile.writeText(content, Charsets.UTF_8)
+
+            // If an email hint was provided, write directly into that profile
+            if (!emailHint.isNullOrBlank()) {
+                val targetFile = DesktopProfileManager.getClientSecretsFile(emailHint)
+                targetFile.parentFile?.mkdirs()
+                targetFile.writeText(content, Charsets.UTF_8)
+                flowMap.remove(emailHint.lowercase().trim())
+            }
+
+            flowMap.remove("staged")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun loadClientSecrets(email: String?): GoogleClientSecrets {
+        val providers = mutableListOf<() -> InputStream?>()
+
+        if (!email.isNullOrBlank()) {
+            providers.add {
+                val f = DesktopProfileManager.getClientSecretsFile(email)
+                if (f.exists() && f.length() > 0) f.inputStream() else null
+            }
+        }
+
+        providers.add {
+            val f = DesktopProfileManager.getStagedClientSecretsFile()
+            if (f.exists() && f.length() > 0) f.inputStream() else null
+        }
+
+        providers.add {
+            val f = File(getClotubeDataDir(), "client_secrets.json")
+            if (f.exists() && f.length() > 0) f.inputStream() else null
+        }
+
+        for (provider in providers) {
             try {
                 val stream = provider()
                 if (stream != null) {
@@ -101,21 +224,24 @@ object DesktopAuthManager {
             } catch (_: Throwable) {}
         }
 
-        throw IllegalStateException("Unable to locate 'client_secrets.json'. Place it in src/main/resources/ or %APPDATA%/Clotube/")
+        throw IllegalStateException("Unable to locate 'client_secrets.json'. Please complete the Google Cloud setup.")
     }
 
     @Synchronized
-    private fun getOrCreateFlow(forceRefresh: Boolean = false): GoogleAuthorizationCodeFlow {
-        if (forceRefresh || flowInstance == null) {
-            val tokensDir = getTokensDirectory()
+    private fun getOrCreateFlow(email: String?, forceRefresh: Boolean = false): GoogleAuthorizationCodeFlow {
+        val key = email?.lowercase()?.trim() ?: "staged"
+        if (forceRefresh || !flowMap.containsKey(key)) {
+            val tokensDir = if (!email.isNullOrBlank()) {
+                DesktopProfileManager.getTokensDir(email)
+            } else {
+                DesktopProfileManager.getStagedTokensDir()
+            }
             if (!tokensDir.exists()) tokensDir.mkdirs()
 
             val dataStoreFactory = FileDataStoreFactory(tokensDir)
-            dataStoreFactoryInstance = dataStoreFactory
+            val clientSecrets = loadClientSecrets(email)
 
-            val clientSecrets = loadClientSecrets()
-
-            flowInstance = GoogleAuthorizationCodeFlow.Builder(
+            val flow = GoogleAuthorizationCodeFlow.Builder(
                 HTTP_TRANSPORT,
                 JSON_FACTORY,
                 clientSecrets,
@@ -124,38 +250,34 @@ object DesktopAuthManager {
                 .setDataStoreFactory(dataStoreFactory)
                 .setAccessType("offline")
                 .build()
+
+            flowMap[key] = flow
         }
-        return flowInstance!!
+        return flowMap[key]!!
     }
 
-    /**
-     * Retrieves the active OAuth Credential with auto-refresh capability.
-     * If the access token is expired or within 60s of expiration, it refreshes it automatically.
-     */
     @Synchronized
-    fun getCredential(): Credential? {
+    fun getCredential(email: String? = null): Credential? {
+        val targetEmail = email?.ifBlank { null } ?: DesktopProfileManager.getActiveEmail() ?: return null
         return try {
-            val flow = getOrCreateFlow()
+            val flow = getOrCreateFlow(targetEmail)
             val credential = flow.loadCredential("user") ?: return null
 
             val expiresIn = credential.expiresInSeconds
-            if (expiresIn == null || expiresIn <= 60) {
-                println("[DesktopAuthManager] Access token expired or expiring soon. Refreshing via OAuth endpoint...")
+            if (expiresIn == null || expiresIn <= 300) {
                 val refreshed = credential.refreshToken()
                 if (refreshed && credential.accessToken != null) {
-                    println("[DesktopAuthManager] Access token successfully refreshed!")
                     val current = cachedAuthState
-                    if (current != null && current.isSignedIn) {
+                    if (current != null && current.isSignedIn && current.userEmail.equals(targetEmail, ignoreCase = true)) {
                         val updated = current.copy(accessToken = credential.accessToken)
                         cachedAuthState = updated
-                        val authFile = getAuthStateFile()
-                        authFile.writeText(gson.toJson(updated), Charsets.UTF_8)
+                        DesktopProfileManager.getAuthStateFile(targetEmail).writeText(gson.toJson(updated), Charsets.UTF_8)
                     }
                 }
             }
             credential
         } catch (e: Exception) {
-            System.err.println("[DesktopAuthManager] Error loading or refreshing credential: ${e.message}")
+            System.err.println("[DesktopAuthManager] Error refreshing credential for $targetEmail: ${e.message}")
             null
         }
     }
@@ -163,7 +285,14 @@ object DesktopAuthManager {
     fun getSavedAuthState(): DesktopAuthState {
         cachedAuthState?.let { return it }
 
-        val authFile = getAuthStateFile()
+        val activeEmail = DesktopProfileManager.getActiveEmail()
+        if (activeEmail.isNullOrBlank()) {
+            val unauth = DesktopAuthState(isSignedIn = false)
+            cachedAuthState = unauth
+            return unauth
+        }
+
+        val authFile = DesktopProfileManager.getAuthStateFile(activeEmail)
         if (!authFile.exists() || authFile.length() == 0L) {
             val unauth = DesktopAuthState(isSignedIn = false)
             cachedAuthState = unauth
@@ -173,8 +302,8 @@ object DesktopAuthManager {
         return try {
             val json = authFile.readText(Charsets.UTF_8)
             val state = gson.fromJson(json, DesktopAuthState::class.java)
-            if (state != null && state.isSignedIn) {
-                val credential = getCredential()
+            if (state != null && state.isSignedIn && state.accessToken.isNotBlank()) {
+                val credential = getCredential(activeEmail)
                 if (credential != null && credential.accessToken != null) {
                     val validState = state.copy(accessToken = credential.accessToken)
                     cachedAuthState = validState
@@ -185,18 +314,16 @@ object DesktopAuthManager {
             } else {
                 DesktopAuthState(isSignedIn = false)
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             DesktopAuthState(isSignedIn = false)
         }
     }
 
-    suspend fun startDesktopOAuthFlow(): DesktopAuthState = withContext(Dispatchers.IO) {
+    suspend fun startDesktopOAuthFlow(expectedEmail: String? = null): DesktopAuthState = withContext(Dispatchers.IO) {
         try {
-            // Build a completely fresh flow instance for the login session
-            val flow = getOrCreateFlow(forceRefresh = true)
+            val flow = getOrCreateFlow(expectedEmail, forceRefresh = true)
             val receiver = LocalServerReceiver.Builder().setPort(-1).build()
 
-            // Custom installer injecting prompt=select_account into Google OAuth URL
             val installedApp = object : AuthorizationCodeInstalledApp(flow, receiver) {
                 override fun onAuthorization(authorizationUrl: AuthorizationCodeRequestUrl) {
                     authorizationUrl.set("prompt", "select_account")
@@ -206,7 +333,6 @@ object DesktopAuthManager {
 
             val credential: Credential = installedApp.authorize("user")
 
-            // Retrieve authenticated Google profile metadata
             val oauth2 = Oauth2.Builder(
                 HTTP_TRANSPORT,
                 JSON_FACTORY,
@@ -214,11 +340,33 @@ object DesktopAuthManager {
             ).setApplicationName("Clotube Desktop").build()
 
             val userInfo: Userinfo = oauth2.userinfo().get().execute()
-            val email = userInfo.email ?: ""
+            val email = userInfo.email?.trim()?.lowercase() ?: ""
             val name = userInfo.name ?: userInfo.givenName ?: email.substringBefore('@')
             val photoUrl = userInfo.picture
             val token = credential.accessToken ?: ""
 
+            if (email.isBlank()) {
+                throw IllegalStateException("Authenticated user email is missing from Google userinfo.")
+            }
+
+            // 1. Move/save client_secrets.json directly into this user's profile
+            val stagedSecrets = DesktopProfileManager.getStagedClientSecretsFile()
+            val targetSecrets = DesktopProfileManager.getClientSecretsFile(email)
+            if (stagedSecrets.exists() && stagedSecrets.length() > 0) {
+                stagedSecrets.copyTo(targetSecrets, overwrite = true)
+            }
+
+            // 2. Move tokens from staging directory into profile tokens if necessary
+            val profileTokensDir = DesktopProfileManager.getTokensDir(email)
+            if (expectedEmail.isNullOrBlank()) {
+                val stagedTokens = DesktopProfileManager.getStagedTokensDir()
+                stagedTokens.listFiles()?.forEach { file ->
+                    file.copyTo(File(profileTokensDir, file.name), overwrite = true)
+                }
+                stagedTokens.deleteRecursively()
+            }
+
+            // 3. Persist auth state into user's profile
             val state = DesktopAuthState(
                 isSignedIn = true,
                 accessToken = token,
@@ -226,52 +374,63 @@ object DesktopAuthManager {
                 userName = name,
                 userPhotoUrl = photoUrl
             )
+            DesktopProfileManager.getAuthStateFile(email).writeText(gson.toJson(state), Charsets.UTF_8)
+            DesktopProfileManager.setActiveEmail(email)
 
-            // Persist to disk and update cache
-            val authFile = getAuthStateFile()
-            authFile.writeText(gson.toJson(state), Charsets.UTF_8)
             cachedAuthState = state
-
-            println("[DesktopAuthManager] OAuth successfully authenticated: $email")
+            flowMap.remove("staged")
+            println("[DesktopAuthManager] Successfully registered & scoped credentials for profile: $email")
             state
         } catch (e: Exception) {
-            System.err.println("[DesktopAuthManager] OAuth flow aborted/failed: ${e.message}")
-            e.printStackTrace()
+            System.err.println("[DesktopAuthManager] OAuth flow failed: ${e.message}")
             DesktopAuthState(isSignedIn = false)
         }
     }
 
     /**
-     * Completely purges in-memory caches, active credentials, and disk tokens.
+     * Instantly switches the active session to a saved profile without re-authenticating.
+     */
+    fun switchProfile(email: String): DesktopAuthState {
+        val authFile = DesktopProfileManager.getAuthStateFile(email)
+        if (!authFile.exists() || authFile.length() == 0L) {
+            return DesktopAuthState(isSignedIn = false)
+        }
+
+        return try {
+            val json = authFile.readText(Charsets.UTF_8)
+            val state = gson.fromJson(json, DesktopAuthState::class.java)
+            DesktopProfileManager.setActiveEmail(email)
+
+            val cred = getCredential(email)
+            val activeState = if (cred != null && cred.accessToken != null) {
+                state.copy(accessToken = cred.accessToken, isSignedIn = true)
+            } else {
+                state.copy(isSignedIn = true)
+            }
+
+            cachedAuthState = activeState
+            println("[DesktopAuthManager] Switched active profile to: $email")
+            activeState
+        } catch (e: Exception) {
+            System.err.println("[DesktopAuthManager] Failed to switch profile to $email: ${e.message}")
+            DesktopAuthState(isSignedIn = false)
+        }
+    }
+
+    /**
+     * Signs out of the current active session without destroying stored offline credentials.
      */
     fun signOut() {
-        println("[DesktopAuthManager] Signing out: Purging in-memory maps and disk tokens...")
+        val activeEmail = DesktopProfileManager.getActiveEmail()
+        println("[DesktopAuthManager] Signing out active session: $activeEmail")
 
-        // 1. Invalidate Google's in-memory credential data store map
-        try {
-            flowInstance?.credentialDataStore?.clear()
-        } catch (e: Exception) {
-            System.err.println("[DesktopAuthManager] Warning clearing credential store: ${e.message}")
+        if (!activeEmail.isNullOrBlank()) {
+            flowMap[activeEmail]?.credentialDataStore?.clear()
+            flowMap.remove(activeEmail)
         }
+        flowMap.clear()
 
-        // 2. Tear down in-memory references
-        flowInstance = null
-        dataStoreFactoryInstance = null
+        DesktopProfileManager.setActiveEmail(null)
         cachedAuthState = DesktopAuthState(isSignedIn = false)
-
-        // 3. Delete disk token files and auth state cache
-        try {
-            val tokensDir = getTokensDirectory()
-            if (tokensDir.exists()) {
-                tokensDir.deleteRecursively()
-            }
-            val authFile = getAuthStateFile()
-            if (authFile.exists()) {
-                authFile.delete()
-            }
-            println("[DesktopAuthManager] Token storage and auth state wiped successfully.")
-        } catch (e: Exception) {
-            System.err.println("[DesktopAuthManager] Error deleting disk cache: ${e.message}")
-        }
     }
 }

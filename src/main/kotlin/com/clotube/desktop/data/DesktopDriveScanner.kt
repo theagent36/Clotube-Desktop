@@ -31,8 +31,7 @@ class DesktopDriveScanner(
     private val driveService: Drive?
 
     companion object {
-        private const val INITIAL_FAST_PAINT_SIZE = 5
-        private const val SUBSEQUENT_PACKET_SIZE = 4
+        private const val CHUNK_SIZE = 4 // Exactly 1 row in desktop grid view
 
         // [7.2] Reusable singleton HTTP transport and JSON factory across all scanner instances
         private val sharedHttpTransport by lazy { GoogleNetHttpTransport.newTrustedTransport() }
@@ -128,17 +127,17 @@ class DesktopDriveScanner(
                         )
                     )
 
-                    // 1. FAST FIRST PAINT: Emit initial 5 movies immediately
-                    if (!emittedFirstChunk && discoveredMovies.size >= INITIAL_FAST_PAINT_SIZE) {
+                    // 1. FAST FIRST PAINT: Emit initial 4 movies immediately to unlock UI
+                    if (!emittedFirstChunk && discoveredMovies.size >= CHUNK_SIZE) {
                         emittedFirstChunk = true
                         lastEmittedCount = discoveredMovies.size
-                        println("[DesktopDriveScanner] Fast first paint: Emitting initial 5 movies to UI.")
+                        println("[DesktopDriveScanner] Fast first paint: Emitting initial $CHUNK_SIZE movies to UI.")
                         emit(discoveredMovies.toList())
                     }
-                    // 2. PROGRESSIVE PACKETS: Emit every time 4 new movies are resolved (1 grid row)
-                    else if (emittedFirstChunk && (discoveredMovies.size - lastEmittedCount) >= SUBSEQUENT_PACKET_SIZE) {
+                    // 2. PROGRESSIVE PACKETS: Emit every time 4 new movies are resolved
+                    else if (emittedFirstChunk && (discoveredMovies.size - lastEmittedCount) >= CHUNK_SIZE) {
                         lastEmittedCount = discoveredMovies.size
-                        println("[DesktopDriveScanner] Progressive packet: Emitted batch (${discoveredMovies.size} total movies).")
+                        println("[DesktopDriveScanner] Progressive chunk emitted: ${discoveredMovies.size} total movies.")
                         emit(discoveredMovies.toList())
                     }
                 }
@@ -193,17 +192,17 @@ class DesktopDriveScanner(
                 )
             )
 
-            // Fast first paint for series
-            if (!emittedFirstChunk && discoveredSeries.size >= INITIAL_FAST_PAINT_SIZE) {
+            // Emit initial 4 series immediately
+            if (!emittedFirstChunk && discoveredSeries.size >= CHUNK_SIZE) {
                 emittedFirstChunk = true
                 lastEmittedCount = discoveredSeries.size
-                println("[DesktopDriveScanner] Fast first paint: Emitting initial 5 series to UI.")
+                println("[DesktopDriveScanner] Fast first paint: Emitting initial $CHUNK_SIZE series to UI.")
                 emit(discoveredSeries.toList())
             }
-            // Progressive packet for series (every 4 series)
-            else if (emittedFirstChunk && (discoveredSeries.size - lastEmittedCount) >= SUBSEQUENT_PACKET_SIZE) {
+            // Emit subsequent 4-series chunks
+            else if (emittedFirstChunk && (discoveredSeries.size - lastEmittedCount) >= CHUNK_SIZE) {
                 lastEmittedCount = discoveredSeries.size
-                println("[DesktopDriveScanner] Progressive packet: Emitted batch (${discoveredSeries.size} total series).")
+                println("[DesktopDriveScanner] Progressive chunk emitted: ${discoveredSeries.size} total series.")
                 emit(discoveredSeries.toList())
             }
         }
