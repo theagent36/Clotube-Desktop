@@ -26,9 +26,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -39,6 +44,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Velocity
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopSeriesCache
@@ -53,6 +59,7 @@ import com.clotube.desktop.model.DesktopSeries
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import com.clotube.desktop.ui.components.PacedEqualizerBars
 import com.clotube.desktop.ui.components.PacedLoadingSpinner
+import com.clotube.desktop.ui.motion.FluidMotionKit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -159,19 +166,28 @@ fun DesktopSeriesDetailScreen(
             }
             isLoading = false
         } else {
-            // Background quiet revalidation strictly on Dispatchers.IO
+            // Background quiet revalidation: Only update state if Drive data actually changed
             withContext(Dispatchers.IO) {
                 try {
                     val scanner = DesktopDriveScanner(accessToken)
                     val fresh = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
                     if (fresh.seasons.isNotEmpty()) {
                         DesktopSeriesCache.save(userEmail, fresh)
-                        withContext(Dispatchers.Main) {
-                            seriesDetails = fresh
+
+                        val currentCount = seriesDetails?.seasons?.sumOf { it.episodes.size } ?: 0
+                        val freshCount = fresh.seasons.sumOf { it.episodes.size }
+                        val currentIds = seriesDetails?.seasons?.flatMap { it.episodes }?.map { it.id } ?: emptyList()
+                        val freshIds = fresh.seasons.flatMap { it.episodes }.map { it.id }
+
+                        // Only assign on Main thread if there is an actual difference to avoid wiping scroll state
+                        if (currentCount != freshCount || currentIds != freshIds) {
+                            withContext(Dispatchers.Main) {
+                                seriesDetails = fresh
+                            }
                         }
                     }
                 } catch (e: Exception) {
-                    System.err.println("[DesktopSeriesDetailScreen] Background refresh error for ${seriesItem.title}:${e.message}")
+                    System.err.println("[DesktopSeriesDetailScreen] Background refresh error: ${e.message}")
                 }
             }
         }
@@ -224,26 +240,36 @@ fun DesktopSeriesDetailScreen(
 
     // Remember scroll state for the episode playlist LazyColumn
     val episodeListState = rememberLazyListState()
+    val hasAutoScrolledToActive = remember(seriesItem.id, selectedSeasonNumber) { mutableStateOf(false) }
 
-    // Locate index of currently playing episode inside the displayed list
-    val targetScrollIndex = remember(displayedEpisodes, currentEpisode.id) {
-        displayedEpisodes.indexOfFirst { it.id == currentEpisode.id }.coerceAtLeast(0)
+    // Auto-scroll to active episode once on load, never fighting manual user scrolling
+    LaunchedEffect(playingEpisode?.id, selectedSeasonNumber, seasonEpisodes.size) {
+        if (!hasAutoScrolledToActive.value && seasonEpisodes.isNotEmpty() && !episodeListState.isScrollInProgress) {
+            val targetIdx = seasonEpisodes.indexOfFirst { it.id == playingEpisode?.id }
+            if (targetIdx > 0) {
+                hasAutoScrolledToActive.value = true
+                episodeListState.scrollToItem(targetIdx)
+            }
+        }
+    }
+
+    val episodeListScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset = Offset.Zero
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                // Absorb all remaining boundary delta so the outer page never scrolls
+                return available
+            }
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                return available
+            }
+        }
     }
 
     // Synchronize season dropdown if filtered by season
     LaunchedEffect(currentEpisode.seasonNumber) {
         if (selectedSeasonNumber != currentEpisode.seasonNumber) {
             selectedSeasonNumber = currentEpisode.seasonNumber
-        }
-    }
-
-    // Smoothly scroll down so the active episode sits anchored flush at the top
-    LaunchedEffect(currentEpisode.id, displayedEpisodes) {
-        if (displayedEpisodes.isNotEmpty() && targetScrollIndex in displayedEpisodes.indices) {
-            episodeListState.animateScrollToItem(
-                index = targetScrollIndex,
-                scrollOffset = 0
-            )
         }
     }
 
@@ -762,11 +788,24 @@ fun DesktopSeriesDetailScreen(
                     }
                 }
 
-                // RIGHT COLUMN: Interactive Episode List
+                // RIGHT COLUMN: Episode List & Season Dropdown
                 Surface(
                     modifier = Modifier
                         .weight(0.33f)
-                        .fillMaxHeight(),
+                        .fillMaxHeight()
+                        // Absorb nested scroll boundary deltas
+                        .nestedScroll(episodeListScrollConnection)
+                        // Consume mouse wheel events on Main pass after inner LazyColumn processes them
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Main)
+                                    if (event.type == PointerEventType.Scroll) {
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                }
+                            }
+                        },
                     shape = RoundedCornerShape(16.dp),
                     color = Color(0xFF0C1018),
                     border = BorderStroke(1.dp, Color(0xFF18202F))
@@ -922,18 +961,15 @@ fun DesktopSeriesDetailScreen(
                         HorizontalDivider(color = Color(0xFF18202F), thickness = 1.dp)
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Interactive Scrollable List of Episodes
+                        // Scrollable List of Episodes
                         LazyColumn(
                             state = episodeListState,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .fillMaxWidth()
+                                .fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            itemsIndexed(
-                                items = displayedEpisodes,
-                                key = { _, ep -> ep.id }
-                            ) { index, ep ->
+                            items(seasonEpisodes, key = { it.id }) { ep ->
                                 val isCurrentlyPlaying = playingEpisode?.id == ep.id
                                 val isWatched = watchedEpisodeIds.contains(ep.id)
                                 val thumb = rememberDriveThumbnail(ep.thumbnailUrl, accessToken = accessToken, userEmail = userEmail)
@@ -1073,25 +1109,24 @@ private fun EpisodeListItemCard(
 
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.98f
-            isHovered -> 1.02f
+            isPressed -> 0.985f
+            isHovered -> 1.015f
             else -> 1.0f
         },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "ep_card_scale"
+        animationSpec = if (isPressed) FluidMotionKit.TactilePress 
+                        else FluidMotionKit.SilkSpring,
+        label = "episode_card_scale"
     )
 
     val borderColor by animateColorAsState(
         targetValue = when {
+            isCurrentlyPlaying -> Color(0xFF38BDF8)
             isPressed -> Color(0xFF00E5FF)
-            isCurrentlyPlaying -> Color(0xFF2563EB)
-            isHovered -> Color(0xFF38BDF8)
+            isHovered -> Color(0xFF00E5FF).copy(alpha = 0.6f)
             else -> Color(0xFF18202F)
         },
-        animationSpec = tween(200)
+        animationSpec = tween(180, easing = FluidMotionKit.CinemaDecel),
+        label = "episode_card_border"
     )
 
     Box(

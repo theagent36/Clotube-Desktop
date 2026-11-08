@@ -69,7 +69,6 @@ import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import com.clotube.desktop.ui.components.DesktopFramePacer
 import com.clotube.desktop.ui.motion.FluidEntranceContainer
-import com.clotube.desktop.ui.motion.fluidInteractiveCard
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -1317,14 +1316,12 @@ private fun ContinueWatchingCard(
 
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.96f
+            isPressed -> 0.965f
             isHovered -> 1.035f
             else -> 1.0f
         },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
+                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
         label = "continue_card_scale"
     )
 
@@ -1334,7 +1331,7 @@ private fun ContinueWatchingCard(
             isHovered -> Color(0xFF38BDF8)
             else -> Color(0xFF1E2838)
         },
-        animationSpec = tween(durationMillis = 200),
+        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
         label = "continue_card_border"
     )
 
@@ -1375,9 +1372,26 @@ private fun ContinueWatchingCard(
 
     Box(
         modifier = modifier
-            .fluidInteractiveCard(
-                cornerRadius = 10.dp,
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0F141F))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(
                 interactionSource = interactionSource,
+                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.45f)
@@ -1386,15 +1400,6 @@ private fun ContinueWatchingCard(
                     onClick()
                 }
             )
-            .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
-                shape = RoundedCornerShape(10.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
-            )
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF0F141F))
-            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (posterBitmap != null) {
@@ -2659,14 +2664,12 @@ private fun DesktopSeriesGridCard(
 
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.96f
+            isPressed -> 0.965f
             isHovered -> 1.035f
             else -> 1.0f
         },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress 
+                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
         label = "series_card_scale"
     )
 
@@ -2676,7 +2679,7 @@ private fun DesktopSeriesGridCard(
             isHovered -> Color(0xFF38BDF8)
             else -> Color(0xFF1A2233)
         },
-        animationSpec = tween(durationMillis = 200),
+        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
         label = "series_card_border"
     )
 
@@ -2688,7 +2691,6 @@ private fun DesktopSeriesGridCard(
         size = ThumbnailSize.CARD
     )
 
-    // Lookup cached seasons count for the badge
     val cachedSeries = remember(seriesItem.id, userEmail) {
         DesktopSeriesCache.get(userEmail, seriesItem.id)
     }
@@ -2696,9 +2698,26 @@ private fun DesktopSeriesGridCard(
 
     Box(
         modifier = modifier
-            .fluidInteractiveCard(
-                cornerRadius = 10.dp,
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0F141F))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(
                 interactionSource = interactionSource,
+                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.45f)
@@ -2707,15 +2726,6 @@ private fun DesktopSeriesGridCard(
                     onClick()
                 }
             )
-            .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
-                shape = RoundedCornerShape(10.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
-            )
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF0F141F))
-            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (posterBitmap != null) {
@@ -3009,14 +3019,12 @@ private fun RecentHistoryItemCard(
 
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.985f
-            isHovered -> 1.01f
+            isPressed -> 0.98f
+            isHovered -> 1.015f
             else -> 1.0f
         },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
+                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
         label = "recent_card_scale"
     )
 
@@ -3026,7 +3034,7 @@ private fun RecentHistoryItemCard(
             isHovered -> Color(0xFF38BDF8)
             else -> Color(0xFF18202F)
         },
-        animationSpec = tween(durationMillis = 200),
+        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
         label = "recent_card_border"
     )
 
@@ -3043,9 +3051,26 @@ private fun RecentHistoryItemCard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .fluidInteractiveCard(
-                cornerRadius = 10.dp,
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 12.dp else 2.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.15f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (isHovered) Color(0xFF131824) else Color(0xFF0F141F))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(
                 interactionSource = interactionSource,
+                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.4f)
@@ -3054,15 +3079,6 @@ private fun RecentHistoryItemCard(
                     onClick()
                 }
             )
-            .shadow(
-                elevation = if (isHovered) 12.dp else 2.dp,
-                shape = RoundedCornerShape(10.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.15f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
-            )
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (isHovered) Color(0xFF131824) else Color(0xFF0F141F))
-            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         Row(
             modifier = Modifier

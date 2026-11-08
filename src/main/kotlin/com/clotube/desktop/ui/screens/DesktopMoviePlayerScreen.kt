@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -14,12 +16,16 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -43,6 +49,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import com.clotube.desktop.ui.motion.FluidMotionKit
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -1299,61 +1307,118 @@ private fun BottomTransportBar(
     onToggleFullscreen: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var isTimelineHovered by remember { mutableStateOf(false) }
+    var hoverFraction by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+
+    val trackHeight by animateDpAsState(
+        targetValue = if (isTimelineHovered || isScrubbing) 6.dp else 3.5.dp,
+        animationSpec = FluidMotionKit.SilkSpringDp,
+        label = "scrubber_track_height"
+    )
+
+    val thumbSize by animateDpAsState(
+        targetValue = when {
+            isScrubbing -> 16.dp
+            isTimelineHovered -> 13.dp
+            else -> 9.dp
+        },
+        animationSpec = FluidMotionKit.SilkSpringDp,
+        label = "scrubber_thumb_size"
+    )
+
     Column(modifier = modifier) {
         // Scrubber Bar
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val density = LocalDensity.current
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(30.dp)
+        ) {
             val containerWidthPx = with(density) { maxWidth.toPx() }
+            val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
             val isSeekable = player.isFirstFrameRendered && player.totalDurationMs > 0L
+            val currentFraction = if (isScrubbing) activeFraction else {
+                if (player.totalDurationMs > 0L) (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
+            }
 
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(30.dp)
+                    .fillMaxSize()
                     .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
                     .pointerInput(isSeekable) {
                         if (!isSeekable) return@pointerInput
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            down.consume()
-                            val width = size.width.toFloat()
-                            if (width <= 0f) return@awaitEachGesture
-
-                            var lastFrac = (down.position.x / width).coerceIn(0f, 1f)
-                            onScrubStart(lastFrac)
-
-                            val pointerId = down.id
+                        awaitPointerEventScope {
                             while (true) {
                                 val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                if (!change.pressed) {
-                                    change.consume()
-                                    onScrubEnd(lastFrac)
-                                    break
-                                } else {
-                                    change.consume()
-                                    lastFrac = (change.position.x / width).coerceIn(0f, 1f)
-                                    onScrubbing(lastFrac)
+                                when (event.type) {
+                                    PointerEventType.Enter, PointerEventType.Move -> {
+                                        isTimelineHovered = true
+                                        val x = event.changes.firstOrNull()?.position?.x ?: 0f
+                                        hoverFraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
+                                    }
+                                    PointerEventType.Exit -> {
+                                        isTimelineHovered = false
+                                    }
                                 }
                             }
                         }
+                    }
+                    .pointerInput(isSeekable) {
+                        if (!isSeekable) return@pointerInput
+                        detectTapGestures(
+                            onPress = { offset ->
+                                val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                onScrubStart(frac)
+                                val released = tryAwaitRelease()
+                                if (released) onScrubEnd(frac)
+                            }
+                        )
+                    }
+                    .pointerInput(isSeekable) {
+                        if (!isSeekable) return@pointerInput
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                onScrubStart((offset.x / size.width.toFloat()).coerceIn(0f, 1f))
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                hoverFraction = frac
+                                onScrubbing(frac)
+                            },
+                            onDragEnd = { onScrubEnd(hoverFraction) },
+                            onDragCancel = { onScrubEnd(hoverFraction) }
+                        )
                     },
                 contentAlignment = Alignment.CenterStart
             ) {
+                // Background Track
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(3.5.dp)
-                        .clip(RoundedCornerShape(2.dp))
+                        .height(trackHeight)
+                        .clip(RoundedCornerShape(3.dp))
                         .background(Color(0x33FFFFFF))
                 )
 
-                if (activeFraction > 0f) {
+                // Hover Preview Buffer Line
+                if (isTimelineHovered && !isScrubbing) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(activeFraction)
-                            .height(3.5.dp)
-                            .clip(RoundedCornerShape(2.dp))
+                            .fillMaxWidth(hoverFraction)
+                            .height(trackHeight)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(Color(0x4D42A5F5))
+                    )
+                }
+
+                // Active Progress Track
+                if (currentFraction > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(currentFraction.coerceIn(0.001f, 1f))
+                            .height(trackHeight)
+                            .clip(RoundedCornerShape(3.dp))
                             .background(
                                 Brush.horizontalGradient(
                                     colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
@@ -1362,18 +1427,56 @@ private fun BottomTransportBar(
                     )
                 }
 
-                val thumbSize = if (isScrubbing) 15.dp else 12.dp
+                // Glowing Scrubber Thumb
                 Box(
                     modifier = Modifier
                         .offset {
-                            val xPos = (activeFraction * containerWidthPx) - with(density) { (thumbSize / 2).toPx() }
-                            IntOffset(xPos.roundToInt().coerceAtLeast(0), 0)
+                            val xPos = (currentFraction * containerWidthPx) - thumbRadiusPx
+                            IntOffset(
+                                xPos.toInt().coerceIn(0, (containerWidthPx - (thumbRadiusPx * 2)).toInt().coerceAtLeast(0)),
+                                0
+                            )
                         }
                         .size(thumbSize)
-                        .shadow(4.dp, CircleShape)
+                        .shadow(
+                            elevation = if (isScrubbing || isTimelineHovered) 10.dp else 4.dp,
+                            shape = CircleShape,
+                            spotColor = Color(0xFF42A5F5),
+                            ambientColor = Color(0xFF42A5F5).copy(alpha = 0.5f)
+                        )
                         .clip(CircleShape)
                         .background(Color(0xFF42A5F5))
                 )
+
+                // Floating Magnetic Timecode Tooltip Bubble
+                if ((isTimelineHovered || isScrubbing) && player.totalDurationMs > 0L) {
+                    val previewFraction = if (isScrubbing) currentFraction else hoverFraction
+                    val previewTimeMs = (previewFraction * player.totalDurationMs).toLong()
+                    val tooltipWidthPx = with(density) { 62.dp.toPx() }
+                    val tooltipOffsetXPx = (previewFraction * containerWidthPx) - (tooltipWidthPx / 2f)
+
+                    Box(
+                        modifier = Modifier
+                            .offset {
+                                IntOffset(
+                                    x = tooltipOffsetXPx.toInt().coerceIn(0, (containerWidthPx - tooltipWidthPx).toInt().coerceAtLeast(0)),
+                                    y = with(density) { (-28).dp.roundToPx() }
+                                )
+                            }
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(Color(0xE60A0E17))
+                            .border(1.dp, Color(0xFF263346), RoundedCornerShape(5.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = formatDuration(previewTimeMs),
+                            color = Color(0xFF42A5F5),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
             }
         }
 
@@ -1385,74 +1488,85 @@ private fun BottomTransportBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Left Controls: [Play/Pause] -> [Volume Group] -> [Timer Block]
+            // Left Controls: [Rewind] -> [Play/Pause] -> [Forward] -> [Volume Group] -> [Timer Block]
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                val seekSec = DesktopAppSettings.state.seekStepSeconds
+                val stepMs = seekSec * 1000L
+
                 // Rewind Button
-                IconButton(
+                FluidMovieTransportIconButton(
                     onClick = {
                         val currentMs = player.currentTimeMs
                         val totalMs = player.totalDurationMs
-                        val stepMs = DesktopAppSettings.state.seekStepSeconds * 1000L
                         if (player.isFirstFrameRendered && totalMs > 0L) {
                             player.seekToTime((currentMs - stepMs).coerceIn(0L, totalMs))
                         }
                     },
-                    modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                ) {
-                    val sec = DesktopAppSettings.state.seekStepSeconds
-                    Icon(
-                        imageVector = when (sec) {
-                            5 -> Icons.Rounded.Replay5
-                            30 -> Icons.Rounded.Replay30
-                            else -> Icons.Rounded.Replay10
-                        },
-                        contentDescription = "Rewind ${sec}s",
-                        tint = Color(0xFFCBD5E1),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    icon = when (seekSec) {
+                        5 -> Icons.Rounded.Replay5
+                        30 -> Icons.Rounded.Replay30
+                        else -> Icons.Rounded.Replay10
+                    },
+                    contentDescription = "Rewind ${seekSec}s",
+                    size = 28.dp,
+                    iconSize = 20.dp
+                )
+
+                // Tactile Play/Pause Button
+                val playInteraction = remember { MutableInteractionSource() }
+                val isPlayHovered by playInteraction.collectIsHoveredAsState()
+                val isPlayPressed by playInteraction.collectIsPressedAsState()
+                val playScale by animateFloatAsState(
+                    targetValue = when {
+                        isPlayPressed -> 0.88f
+                        isPlayHovered -> 1.15f
+                        else -> 1.0f
+                    },
+                    animationSpec = if (isPlayPressed) FluidMotionKit.TactilePress
+                                    else FluidMotionKit.SilkSpring,
+                    label = "play_btn_scale"
+                )
 
                 IconButton(
                     onClick = { player.togglePlayPause() },
+                    interactionSource = playInteraction,
                     modifier = Modifier
                         .size(32.dp)
+                        .graphicsLayer {
+                            scaleX = playScale
+                            scaleY = playScale
+                        }
                         .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = "Play/Pause",
-                        tint = Color.White,
+                        tint = if (isPlayHovered) Color(0xFF42A5F5) else Color.White,
                         modifier = Modifier.size(24.dp)
                     )
                 }
 
                 // Fast Forward Button
-                IconButton(
+                FluidMovieTransportIconButton(
                     onClick = {
                         val currentMs = player.currentTimeMs
                         val totalMs = player.totalDurationMs
-                        val stepMs = DesktopAppSettings.state.seekStepSeconds * 1000L
                         if (player.isFirstFrameRendered && totalMs > 0L) {
                             player.seekToTime((currentMs + stepMs).coerceIn(0L, totalMs))
                         }
                     },
-                    modifier = Modifier.size(28.dp).pointerHoverIcon(PointerIcon.Hand)
-                ) {
-                    val sec = DesktopAppSettings.state.seekStepSeconds
-                    Icon(
-                        imageVector = when (sec) {
-                            5 -> Icons.Rounded.Forward5
-                            30 -> Icons.Rounded.Forward30
-                            else -> Icons.Rounded.Forward10
-                        },
-                        contentDescription = "Forward ${sec}s",
-                        tint = Color(0xFFCBD5E1),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    icon = when (seekSec) {
+                        5 -> Icons.Rounded.Forward5
+                        30 -> Icons.Rounded.Forward30
+                        else -> Icons.Rounded.Forward10
+                    },
+                    contentDescription = "Forward ${seekSec}s",
+                    size = 28.dp,
+                    iconSize = 20.dp
+                )
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1507,34 +1621,24 @@ private fun BottomTransportBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // 1. Caption / Subtitles Button
-                IconButton(
+                FluidMovieTransportIconButton(
                     onClick = { onTogglePopup(PlayerPopupType.SUBTITLES) },
-                    modifier = Modifier
-                        .size(30.dp)
-                        .pointerHoverIcon(PointerIcon.Hand)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ClosedCaption,
-                        contentDescription = "Subtitles",
-                        tint = if (activePopup == PlayerPopupType.SUBTITLES) Color(0xFF42A5F5) else Color(0xFFCBD5E1),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    icon = Icons.Default.ClosedCaption,
+                    contentDescription = "Subtitles",
+                    active = activePopup == PlayerPopupType.SUBTITLES,
+                    size = 30.dp,
+                    iconSize = 20.dp
+                )
 
                 // 2. Audio Track Button
-                IconButton(
+                FluidMovieTransportIconButton(
                     onClick = { onTogglePopup(PlayerPopupType.AUDIO) },
-                    modifier = Modifier
-                        .size(30.dp)
-                        .pointerHoverIcon(PointerIcon.Hand)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Audiotrack,
-                        contentDescription = "Audio Tracks",
-                        tint = if (activePopup == PlayerPopupType.AUDIO) Color(0xFF42A5F5) else Color(0xFFCBD5E1),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    icon = Icons.Default.Audiotrack,
+                    contentDescription = "Audio Tracks",
+                    active = activePopup == PlayerPopupType.AUDIO,
+                    size = 30.dp,
+                    iconSize = 20.dp
+                )
 
                 // 3. Playback Speed Button / Chip
                 val speedLabel = if (currentSpeed % 1.0f == 0f) {
@@ -1542,11 +1646,32 @@ private fun BottomTransportBar(
                 } else {
                     "${currentSpeed}x"
                 }
+                val speedInteraction = remember { MutableInteractionSource() }
+                val isSpeedHovered by speedInteraction.collectIsHoveredAsState()
+                val isSpeedPressed by speedInteraction.collectIsPressedAsState()
+                val speedScale by animateFloatAsState(
+                    targetValue = when {
+                        isSpeedPressed -> 0.92f
+                        isSpeedHovered -> 1.08f
+                        else -> 1.0f
+                    },
+                    animationSpec = if (isSpeedPressed) FluidMotionKit.TactilePress
+                                    else FluidMotionKit.SilkSpring,
+                    label = "speed_badge_scale"
+                )
+
                 Surface(
                     shape = RoundedCornerShape(6.dp),
                     color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
                     modifier = Modifier
-                        .clickable { onTogglePopup(PlayerPopupType.SPEED) }
+                        .graphicsLayer {
+                            scaleX = speedScale
+                            scaleY = speedScale
+                        }
+                        .clickable(
+                            interactionSource = speedInteraction,
+                            indication = null
+                        ) { onTogglePopup(PlayerPopupType.SPEED) }
                         .pointerHoverIcon(PointerIcon.Hand)
                         .padding(horizontal = 2.dp)
                 ) {
@@ -1560,21 +1685,71 @@ private fun BottomTransportBar(
                 }
 
                 // 4. Fullscreen Toggle
-                IconButton(
+                FluidMovieTransportIconButton(
                     onClick = onToggleFullscreen,
-                    modifier = Modifier
-                        .size(30.dp)
-                        .pointerHoverIcon(PointerIcon.Hand)
-                ) {
-                    Icon(
-                        imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                        contentDescription = "Toggle Fullscreen",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                    contentDescription = "Toggle Fullscreen",
+                    size = 30.dp,
+                    iconSize = 20.dp
+                )
             }
         }
+    }
+}
+
+/**
+ * High-performance GPU-scaled transport icon button with silk spring physics.
+ */
+@Composable
+private fun FluidMovieTransportIconButton(
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    enabled: Boolean = true,
+    active: Boolean = false,
+    size: androidx.compose.ui.unit.Dp = 28.dp,
+    iconSize: androidx.compose.ui.unit.Dp = 18.dp,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = when {
+            !enabled -> 1.0f
+            isPressed -> 0.90f
+            isHovered -> 1.14f
+            else -> 1.0f
+        },
+        animationSpec = if (isPressed) FluidMotionKit.TactilePress
+                        else FluidMotionKit.SilkSpring,
+        label = "transport_btn_scale"
+    )
+
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        interactionSource = interactionSource,
+        modifier = modifier
+            .size(size)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = when {
+                !enabled -> Color(0x40FFFFFF)
+                active -> Color(0xFF42A5F5)
+                isHovered -> Color(0xFF42A5F5)
+                else -> Color(0xFFCBD5E1)
+            },
+            modifier = Modifier.size(iconSize)
+        )
     }
 }
 

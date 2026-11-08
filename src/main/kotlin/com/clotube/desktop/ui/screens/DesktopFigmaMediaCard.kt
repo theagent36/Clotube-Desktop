@@ -39,7 +39,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
-import com.clotube.desktop.ui.motion.fluidInteractiveCard
 import kotlinx.coroutines.launch
 
 @Composable
@@ -56,18 +55,16 @@ fun DesktopFigmaMediaCard(
 
     val clickFlashAlpha = remember { Animatable(0f) }
 
-    // Dynamic Physics: 1.0f (Idle) -> 1.035f (Hover) -> 0.96f (Click Press)
+    // Dynamic Physics: 1.0f (Idle) -> 1.035f (Hover) -> 0.965f (Click Press)
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.96f
+            isPressed -> 0.965f
             isHovered -> 1.035f
             else -> 1.0f
         },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "card_scale_anim"
+        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
+                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
+        label = "media_card_scale"
     )
 
     val borderColor by animateColorAsState(
@@ -76,8 +73,8 @@ fun DesktopFigmaMediaCard(
             isHovered -> Color(0xFF38BDF8)
             else -> Color(0xFF1B2333)
         },
-        animationSpec = tween(durationMillis = 200),
-        label = "card_border_anim"
+        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
+        label = "media_card_border"
     )
 
     val thumbnailBitmap = rememberThumbnailBitmap(
@@ -88,9 +85,26 @@ fun DesktopFigmaMediaCard(
 
     Box(
         modifier = modifier
-            .fluidInteractiveCard(
-                cornerRadius = 10.dp,
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0F1420))
+            .border(
+                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(
                 interactionSource = interactionSource,
+                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.45f)
@@ -99,15 +113,6 @@ fun DesktopFigmaMediaCard(
                     onClick()
                 }
             )
-            .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
-                shape = RoundedCornerShape(10.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
-            )
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF0F1420))
-            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         // Thumbnail Image Layer
         if (thumbnailBitmap != null) {
