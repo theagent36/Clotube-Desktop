@@ -668,54 +668,69 @@ private fun DesktopSeriesPlayerContent(
                     }
                 }
 
-                // Bottom Transport HUD
-                SeriesBottomTransportBar(
-                    player = player,
-                    activeFraction = activeFraction,
-                    displayTimeMs = displayTimeMs,
-                    isScrubbing = isScrubbing,
-                    isFullscreen = isFullscreen,
-                    currentSpeed = currentSpeed,
-                    activePopup = activePopup,
-                    onPreviousEpisode = onPreviousEpisode,
-                    onNextEpisode = onNextEpisode,
-                    hasPreviousEpisode = hasPreviousEpisode,
-                    hasNextEpisode = hasNextEpisode,
-                    onTogglePopup = { popup ->
-                        if (activePopup != popup && popup != SeriesPlayerPopupType.NONE) {
-                            if (popup == SeriesPlayerPopupType.SUBTITLES) {
-                                if (currentSubtitleId != -99) {
-                                    currentSubtitleId = player.getActiveSubtitleTrackId()
-                                }
-                            } else if (popup == SeriesPlayerPopupType.AUDIO) {
-                                currentAudioId = player.getActiveAudioTrackId()
-                            }
-                        }
-                        activePopup = if (activePopup == popup) SeriesPlayerPopupType.NONE else popup
-                    },
-                    onScrubStart = { frac ->
-                        isScrubbing = true
-                        scrubFraction = frac
-                    },
-                    onScrubbing = { frac ->
-                        scrubFraction = frac
-                    },
-                    onScrubEnd = { frac ->
-                        val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                        if (totalDur > 0L) {
-                            val target = (frac * totalDur).toLong()
-                            optimisticSeekMs = target
-                            player.seekToTime(target)
-                            onProgressUpdate?.invoke(target)
-                        }
-                        isScrubbing = false
-                    },
-                    onToggleFullscreen = onToggleFullscreen,
+                // -------------------------------------------------------------------------
+                // DOCKED BOTTOM TRANSPORT BAR (REVERTED FROM FLOATING CAPSULE)
+                // -------------------------------------------------------------------------
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 16.dp)
                         .align(Alignment.BottomCenter)
-                )
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color.Transparent,
+                                    Color(0xCC05070B),
+                                    Color(0xF205070B)
+                                )
+                            )
+                        )
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    SeriesBottomTransportBar(
+                        player = player,
+                        activeFraction = activeFraction,
+                        displayTimeMs = displayTimeMs,
+                        isScrubbing = isScrubbing,
+                        isFullscreen = isFullscreen,
+                        currentSpeed = currentSpeed,
+                        activePopup = activePopup,
+                        onPreviousEpisode = onPreviousEpisode,
+                        onNextEpisode = onNextEpisode,
+                        hasPreviousEpisode = hasPreviousEpisode,
+                        hasNextEpisode = hasNextEpisode,
+                        onTogglePopup = { popup ->
+                            if (activePopup != popup && popup != SeriesPlayerPopupType.NONE) {
+                                if (popup == SeriesPlayerPopupType.SUBTITLES) {
+                                    if (currentSubtitleId != -99) {
+                                        currentSubtitleId = player.getActiveSubtitleTrackId()
+                                    }
+                                } else if (popup == SeriesPlayerPopupType.AUDIO) {
+                                    currentAudioId = player.getActiveAudioTrackId()
+                                }
+                            }
+                            activePopup = if (activePopup == popup) SeriesPlayerPopupType.NONE else popup
+                        },
+                        onScrubStart = { frac ->
+                            isScrubbing = true
+                            scrubFraction = frac
+                        },
+                        onScrubbing = { frac ->
+                            scrubFraction = frac
+                        },
+                        onScrubEnd = { frac ->
+                            val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                            if (totalDur > 0L) {
+                                val target = (frac * totalDur).toLong()
+                                optimisticSeekMs = target
+                                player.seekToTime(target)
+                                onProgressUpdate?.invoke(target)
+                            }
+                            isScrubbing = false
+                        },
+                        onToggleFullscreen = onToggleFullscreen,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
 
@@ -1516,13 +1531,32 @@ private fun SeriesBottomTransportBar(
 
                 Spacer(modifier = Modifier.width(4.dp))
 
-                Text(
-                    text = "${formatDuration(displayTimeMs)} / ${formatDuration(player.totalDurationMs)}",
-                    color = Color.White.copy(alpha = 0.9f),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Medium
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = formatDuration(displayTimeMs),
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "/",
+                        color = Color(0xFF475569),
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Normal
+                    )
+                    Text(
+                        text = formatDuration(player.totalDurationMs),
+                        color = Color(0xFF64748B),
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
 
             // Right Controls: Subtitles, Audio, Speed, Fullscreen

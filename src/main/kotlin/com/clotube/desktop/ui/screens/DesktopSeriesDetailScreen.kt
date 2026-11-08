@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -198,7 +199,7 @@ fun DesktopSeriesDetailScreen(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(Color(0xFF07090E)),
+                .background(Color(0xFF06080C)),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -494,10 +495,47 @@ fun DesktopSeriesDetailScreen(
         return
     }
 
+    // Top-lit directional gradient borders simulating ambient overhead lighting
+    val topLitPanelBorder = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF243247), // Catches overhead light
+                Color(0xFF101724)  // Fades into shadow at the base
+            )
+        )
+    }
+
+    val topLitCardBorderDefault = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF1E2838),
+                Color(0xFF101622)
+            )
+        )
+    }
+
+    val topLitCardBorderHover = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF00E5FF).copy(alpha = 0.7f),
+                Color(0xFF2563EB).copy(alpha = 0.3f)
+            )
+        )
+    }
+
+    val topLitCardBorderSelected = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF38BDF8),
+                Color(0xFF0284C7)
+            )
+        )
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF07090E)),
+            .background(Color(0xFF06080C)),
         contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 12.dp, bottom = 48.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
@@ -539,11 +577,11 @@ fun DesktopSeriesDetailScreen(
             ) {
                 Column {
                     Text(
-                        text = "SERIES",
+                        text = "CLOTUBE ORIGINAL SERIES",
                         color = Color(0xFF38BDF8),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.4.sp
+                        letterSpacing = 1.6.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -563,11 +601,27 @@ fun DesktopSeriesDetailScreen(
                         series.genres
                     ).filter { it.isNotBlank() }
 
-                    Text(
-                        text = metaTokens.joinToString("  •  "),
-                        color = Color(0xFF94A3B8),
-                        fontSize = 12.sp
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        metaTokens.forEachIndexed { index, token ->
+                            if (index > 0) {
+                                Text(
+                                    text = "•",
+                                    color = Color(0xFF475569),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                text = token,
+                                color = Color(0xFF94A3B8),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -644,7 +698,7 @@ fun DesktopSeriesDetailScreen(
                             .weight(1f)
                             .clip(RoundedCornerShape(14.dp))
                             .background(Color.Black)
-                            .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(14.dp))
+                            .border(1.dp, topLitPanelBorder, RoundedCornerShape(14.dp))
                     ) {
                         if (player != null) {
                             DesktopSeriesPlayerScreen(
@@ -753,7 +807,7 @@ fun DesktopSeriesDetailScreen(
                                 color = Color(0xFF38BDF8),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp
+                                letterSpacing = 1.4.sp
                             )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -807,8 +861,8 @@ fun DesktopSeriesDetailScreen(
                             }
                         },
                     shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFF0C1018),
-                    border = BorderStroke(1.dp, Color(0xFF18202F))
+                    color = Color(0xFF0A0E17), // Stepped surface elevation
+                    border = BorderStroke(1.dp, topLitPanelBorder)
                 ) {
                     Column(
                         modifier = Modifier
@@ -826,14 +880,15 @@ fun DesktopSeriesDetailScreen(
                                     color = Color(0xFF38BDF8),
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.2.sp
+                                    letterSpacing = 1.5.sp
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = "${seasonEpisodes.size} episodes",
                                     color = Color.White,
                                     fontSize = 18.sp,
-                                    fontWeight = FontWeight.ExtraBold
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = (-0.2).sp
                                 )
                             }
 
@@ -970,44 +1025,267 @@ fun DesktopSeriesDetailScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             items(seasonEpisodes, key = { it.id }) { ep ->
-                                val isCurrentlyPlaying = playingEpisode?.id == ep.id
-                                val isWatched = watchedEpisodeIds.contains(ep.id)
-                                val thumb = rememberDriveThumbnail(ep.thumbnailUrl, accessToken = accessToken, userEmail = userEmail)
+                                val isSelected = playingEpisode?.id == ep.id
+                                val isWatched = watchedEpisodeIds.contains(ep.id) || DesktopWatchHistoryManager.isEpisodeWatched(userEmail, ep.id)
 
-                                EpisodeListItemCard(
-                                    episode = ep,
-                                    thumbnail = thumb,
-                                    isCurrentlyPlaying = isCurrentlyPlaying,
-                                    isPlayerPlaying = player?.isPlaying == true,
-                                    isWatched = isWatched,
-                                    onSelectEpisode = {
-                                        if (activeEpisode?.id != ep.id) {
-                                            saveActiveEpisodeProgress()
-                                            playingEpisode = ep
-                                        }
+                                val interactionSource = remember { MutableInteractionSource() }
+                                val isHovered by interactionSource.collectIsHoveredAsState()
+                                val isPressed by interactionSource.collectIsPressedAsState()
+
+                                val cardScale by animateFloatAsState(
+                                    targetValue = when {
+                                        isPressed -> 0.985f
+                                        isHovered -> 1.015f
+                                        else -> 1.0f
                                     },
-                                    onToggleWatched = {
-                                        val markWatched = !isWatched
-                                        watchedEpisodeIds = if (markWatched) {
-                                            watchedEpisodeIds + ep.id
-                                        } else {
-                                            watchedEpisodeIds - ep.id
+                                    animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
+                                                    else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
+                                    label = "episode_card_scale"
+                                )
+
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .graphicsLayer {
+                                            scaleX = cardScale
+                                            scaleY = cardScale
                                         }
-                                        coroutineScope.launch {
-                                            DesktopWatchHistoryManager.setEpisodeWatched(
-                                                email = userEmail,
-                                                fileId = ep.id,
-                                                isWatched = markWatched,
-                                                seriesId = series.id,
-                                                seasonNumber = ep.seasonNumber,
-                                                episodeNumber = ep.episodeNumber,
-                                                title = ep.title,
-                                                durationMs = ep.durationMs
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable(
+                                            interactionSource = interactionSource,
+                                            indication = null
+                                        ) {
+                                            if (playingEpisode?.id != ep.id) {
+                                                saveActiveEpisodeProgress()
+                                                playingEpisode = ep
+                                            }
+                                        }
+                                        .pointerHoverIcon(PointerIcon.Hand),
+                                    shape = RoundedCornerShape(10.dp),
+                                    // Deep cinema navy for selected state (No solid cyan fill)
+                                    color = when {
+                                        isSelected -> Color(0xFF132238)
+                                        isHovered -> Color(0xFF141C2B)
+                                        else -> Color(0xFF0E131E)
+                                    },
+                                    border = BorderStroke(
+                                        width = if (isSelected) 1.5.dp else 1.dp,
+                                        color = when {
+                                            isSelected -> Color(0xFF00E5FF)
+                                            isHovered -> Color(0xFF38BDF8).copy(alpha = 0.5f)
+                                            else -> Color(0xFF1E2838)
+                                        }
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        // 16:9 Thumbnail Box
+                                        Box(
+                                            modifier = Modifier
+                                                .width(96.dp)
+                                                .height(54.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF161E2E)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            val thumbnail = rememberThumbnailBitmap(
+                                                primaryUrl = ep.thumbnailUrl,
+                                                fallbackUrl = seriesItem.thumbnailUrl,
+                                                accessToken = accessToken,
+                                                userEmail = userEmail
                                             )
-                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                            if (thumbnail != null) {
+                                                Image(
+                                                    bitmap = thumbnail,
+                                                    contentDescription = ep.title,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            }
+
+                                            when {
+                                                isSelected -> {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(24.dp)
+                                                            .clip(CircleShape)
+                                                            .background(Color(0xFF2563EB)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.PlayArrow,
+                                                            contentDescription = null,
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(15.dp)
+                                                        )
+                                                    }
+                                                }
+                                                isHovered -> {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .background(Color.Black.copy(alpha = 0.45f)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .size(26.dp)
+                                                                .clip(CircleShape)
+                                                                .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
+                                                                .shadow(8.dp, CircleShape),
+                                                            contentAlignment = Alignment.Center
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.PlayArrow,
+                                                                contentDescription = null,
+                                                                tint = Color(0xFF090D14),
+                                                                modifier = Modifier.size(17.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                isWatched -> {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(22.dp)
+                                                            .clip(CircleShape)
+                                                            .background(Color(0xFF0F241F).copy(alpha = 0.95f))
+                                                            .border(1.dp, Color(0xFF00E5FF).copy(alpha = 0.7f), CircleShape),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Check,
+                                                            contentDescription = "Watched",
+                                                            tint = Color(0xFF00E5FF),
+                                                            modifier = Modifier.size(13.dp)
+                                                        )
+                                                    }
+                                                }
+                                                else -> {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(22.dp)
+                                                            .clip(CircleShape)
+                                                            .background(Color(0xCC000000)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            text = "${ep.episodeNumber}",
+                                                            color = Color(0xFF94A3B8),
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Episode Title & Runtime
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "EPISODE ${ep.episodeNumber}",
+                                                color = Color(0xFF38BDF8),
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                letterSpacing = 1.4.sp
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = ep.title,
+                                                color = if (isWatched && !isSelected) Color(0xFFCBD5E1).copy(alpha = 0.75f) else Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                            ) {
+                                                Text(
+                                                    text = ep.durationFormatted,
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Text(
+                                                    text = "•",
+                                                    color = Color(0xFF475569),
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = "Direct Stream",
+                                                    color = Color(0xFF64748B),
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            }
+                                        }
+
+                                        // Right End: Animated Soundwave and Watched Toggle Button
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (isSelected) {
+                                                PacedEqualizerBars(
+                                                    isPlaying = player?.isPlaying == true,
+                                                    barColor = Color(0xFF00E5FF)
+                                                )
+                                            }
+
+                                            IconButton(
+                                                onClick = {
+                                                    val markWatched = !isWatched
+                                                    watchedEpisodeIds = if (markWatched) {
+                                                        watchedEpisodeIds + ep.id
+                                                    } else {
+                                                        watchedEpisodeIds - ep.id
+                                                    }
+                                                    coroutineScope.launch {
+                                                        DesktopWatchHistoryManager.setEpisodeWatched(
+                                                            email = userEmail,
+                                                            fileId = ep.id,
+                                                            isWatched = markWatched,
+                                                            seriesId = series.id,
+                                                            seasonNumber = ep.seasonNumber,
+                                                            episodeNumber = ep.episodeNumber,
+                                                            title = ep.title,
+                                                            durationMs = ep.durationMs
+                                                        )
+                                                        DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                                    }
+                                                },
+                                                modifier = Modifier
+                                                    .size(28.dp)
+                                                    .pointerHoverIcon(PointerIcon.Hand)
+                                            ) {
+                                                if (isWatched) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.CheckCircle,
+                                                        contentDescription = "Watched",
+                                                        tint = Color(0xFF00E5FF),
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.RadioButtonUnchecked,
+                                                        contentDescription = "Mark watched",
+                                                        tint = if (isHovered) Color(0xFF94A3B8) else Color(0xFF475569),
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
-                                )
+                                }
                             }
                         }
 
@@ -1050,7 +1328,7 @@ fun DesktopSeriesDetailScreen(
                         color = Color(0xFF38BDF8),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.4.sp
+                        letterSpacing = 1.6.sp
                     )
                     Spacer(modifier = Modifier.height(6.dp))
 
@@ -1059,7 +1337,8 @@ fun DesktopSeriesDetailScreen(
                             text = series.tagline,
                             color = Color.White,
                             fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.3).sp
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                     }
@@ -1068,7 +1347,7 @@ fun DesktopSeriesDetailScreen(
                         text = series.synopsis.ifBlank { "No overview available for this series." },
                         color = Color(0xFF94A3B8),
                         fontSize = 13.sp,
-                        lineHeight = 20.sp
+                        lineHeight = 21.sp
                     )
                 }
 
@@ -1087,257 +1366,6 @@ fun DesktopSeriesDetailScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun EpisodeListItemCard(
-    episode: DesktopEpisode,
-    thumbnail: ImageBitmap?,
-    isCurrentlyPlaying: Boolean,
-    isPlayerPlaying: Boolean,
-    isWatched: Boolean,
-    onSelectEpisode: () -> Unit,
-    onToggleWatched: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val coroutineScope = rememberCoroutineScope()
-    val clickFlashAlpha = remember { Animatable(0f) }
-
-    val cardScale by animateFloatAsState(
-        targetValue = when {
-            isPressed -> 0.985f
-            isHovered -> 1.015f
-            else -> 1.0f
-        },
-        animationSpec = if (isPressed) FluidMotionKit.TactilePress 
-                        else FluidMotionKit.SilkSpring,
-        label = "episode_card_scale"
-    )
-
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isCurrentlyPlaying -> Color(0xFF38BDF8)
-            isPressed -> Color(0xFF00E5FF)
-            isHovered -> Color(0xFF00E5FF).copy(alpha = 0.6f)
-            else -> Color(0xFF18202F)
-        },
-        animationSpec = tween(180, easing = FluidMotionKit.CinemaDecel),
-        label = "episode_card_border"
-    )
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = cardScale
-                scaleY = cardScale
-            }
-            .shadow(
-                elevation = if (isHovered) 12.dp else if (isCurrentlyPlaying) 6.dp else 2.dp,
-                shape = RoundedCornerShape(10.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.35f)
-            )
-            .clip(RoundedCornerShape(10.dp))
-            .background(
-                when {
-                    isCurrentlyPlaying -> Color(0xFF121B2B)
-                    isHovered -> Color(0xFF151D2A)
-                    else -> Color(0xFF0F141F)
-                }
-            )
-            .border(
-                border = BorderStroke(if (isHovered || isPressed || isCurrentlyPlaying) 1.5.dp else 1.dp, borderColor),
-                shape = RoundedCornerShape(10.dp)
-            )
-            .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = {
-                    coroutineScope.launch {
-                        clickFlashAlpha.snapTo(0.45f)
-                        clickFlashAlpha.animateTo(0f, tween(260))
-                    }
-                    onSelectEpisode()
-                }
-            )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            // 16:9 Thumbnail Box
-            Box(
-                modifier = Modifier
-                    .width(96.dp)
-                    .height(54.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF161E2E)),
-                contentAlignment = Alignment.Center
-            ) {
-                if (thumbnail != null) {
-                    Image(
-                        bitmap = thumbnail,
-                        contentDescription = episode.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-
-                when {
-                    isCurrentlyPlaying -> {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF2563EB)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.PlayArrow,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(15.dp)
-                            )
-                        }
-                    }
-                    isHovered -> {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.45f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
-                                .shadow(8.dp, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = null,
-                                    tint = Color(0xFF090D14),
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-                        }
-                    }
-                    isWatched -> {
-                        Box(
-                            modifier = Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF0F241F).copy(alpha = 0.95f))
-                                .border(1.dp, Color(0xFF00E5FF).copy(alpha = 0.7f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = "Watched",
-                                tint = Color(0xFF00E5FF),
-                                modifier = Modifier.size(13.dp)
-                            )
-                        }
-                    }
-                    else -> {
-                        Box(
-                            modifier = Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xCC000000)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "${episode.episodeNumber}",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Episode Title & Runtime
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "EPISODE ${episode.episodeNumber}",
-                    color = Color(0xFF38BDF8),
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = episode.title,
-                    color = if (isWatched && !isCurrentlyPlaying) Color(0xFFCBD5E1).copy(alpha = 0.75f) else Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "${episode.durationFormatted} • Direct Stream",
-                    color = Color(0xFF64748B),
-                    fontSize = 10.sp
-                )
-            }
-
-            // Right End: Animated Soundwave and Watched Toggle Button
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (isCurrentlyPlaying) {
-                    PacedEqualizerBars(
-                        isPlaying = isPlayerPlaying,
-                        barColor = Color(0xFF00E5FF)
-                    )
-                }
-
-                IconButton(
-                    onClick = onToggleWatched,
-                    modifier = Modifier
-                        .size(28.dp)
-                        .pointerHoverIcon(PointerIcon.Hand)
-                ) {
-                    if (isWatched) {
-                        Icon(
-                            imageVector = Icons.Rounded.CheckCircle,
-                            contentDescription = "Watched",
-                            tint = Color(0xFF00E5FF),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Rounded.RadioButtonUnchecked,
-                            contentDescription = "Mark watched",
-                            tint = if (isHovered) Color(0xFF94A3B8) else Color(0xFF475569),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // Flash Ripple Layer Triggered on Click
-        if (clickFlashAlpha.value > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
-            )
         }
     }
 }
