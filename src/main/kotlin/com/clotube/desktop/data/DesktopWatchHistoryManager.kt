@@ -229,7 +229,7 @@ object DesktopWatchHistoryManager {
         return changed
     }
 
-    suspend fun recordPlaybackProgress(
+    fun recordPlaybackProgress(
         email: String,
         fileId: String,
         title: String,
@@ -239,11 +239,12 @@ object DesktopWatchHistoryManager {
         seriesId: String = "",
         seasonNumber: Int = 1,
         episodeNumber: Int = 1
-    ) = withContext(Dispatchers.IO) {
-        if (email.isBlank() || fileId.isBlank()) return@withContext
+    ) {
+        if (email.isBlank() || fileId.isBlank()) return
         val local = loadLocalSync(email)
         val now = System.currentTimeMillis()
-        val fraction = if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+        val effectiveDur = if (durationMs > 0L) durationMs else 45L * 60000L
+        val fraction = (positionMs.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f)
 
         synchronized(local) {
             // Check if episode is already watched so replaying from 00:00 preserves watched status
@@ -252,7 +253,7 @@ object DesktopWatchHistoryManager {
 
             local["${fileId}_title"] = TypedHistoryEntry("string", title)
             local["${fileId}_pos"] = TypedHistoryEntry("long", positionMs)
-            local["${fileId}_dur"] = TypedHistoryEntry("long", durationMs)
+            local["${fileId}_dur"] = TypedHistoryEntry("long", effectiveDur)
             local["${fileId}_fraction"] = TypedHistoryEntry("float", fraction)
             local["${fileId}_timestamp"] = TypedHistoryEntry("long", now)
             local["${fileId}_is_series"] = TypedHistoryEntry("boolean", isSeries)
@@ -269,16 +270,26 @@ object DesktopWatchHistoryManager {
                 local["${fileId}_season_num"] = TypedHistoryEntry("int", sNum)
                 local["${fileId}_episode_num"] = TypedHistoryEntry("int", eNum)
 
-                local["series_resume_${seriesId}_episode_id"] = TypedHistoryEntry("string", fileId)
-                local["series_resume_${seriesId}_season_num"] = TypedHistoryEntry("int", sNum)
-                local["series_resume_${seriesId}_episode_num"] = TypedHistoryEntry("int", eNum)
-                local["series_resume_${seriesId}_pos_ms"] = TypedHistoryEntry("long", positionMs)
-                local["series_resume_${seriesId}_dur_ms"] = TypedHistoryEntry("long", durationMs)
-                local["series_resume_${seriesId}_timestamp"] = TypedHistoryEntry("long", now)
+                // Update the series resume pointer only if meaningful progress was made (>= 2000ms),
+                // or if it's the same episode with progress > 0L, or if no pointer exists yet.
+                val currentResumeEpId = local["series_resume_${seriesId}_episode_id"]?.value as? String
+                val isSameEp = currentResumeEpId == fileId
+                val isMeaningfulProgress = positionMs >= 2000L
+                val hasNoExistingPointer = currentResumeEpId.isNullOrBlank()
+
+                if (isMeaningfulProgress || (isSameEp && positionMs > 0L) || (hasNoExistingPointer && positionMs > 0L)) {
+                    local["series_resume_${seriesId}_episode_id"] = TypedHistoryEntry("string", fileId)
+                    local["series_resume_${seriesId}_season_num"] = TypedHistoryEntry("int", sNum)
+                    local["series_resume_${seriesId}_episode_num"] = TypedHistoryEntry("int", eNum)
+                    local["series_resume_${seriesId}_pos_ms"] = TypedHistoryEntry("long", positionMs)
+                    local["series_resume_${seriesId}_dur_ms"] = TypedHistoryEntry("long", effectiveDur)
+                    local["series_resume_${seriesId}_timestamp"] = TypedHistoryEntry("long", now)
+                }
             }
         }
 
         saveLocal(email, local)
+        historyRevision.intValue++
     }
 
     fun getPlaybackPosition(email: String, fileId: String): Long {
@@ -430,12 +441,62 @@ object DesktopWatchHistoryManager {
     fun getSeriesResumeState(email: String, seriesId: String): SeriesResumeState? {
         if (email.isBlank() || seriesId.isBlank()) return null
         val local = loadLocalSync(email)
-        val epId = local["series_resume_${seriesId}_episode_id"]?.value as? String ?: return null
-        val sNum = (local["series_resume_${seriesId}_season_num"]?.value as? Number)?.toInt() ?: 1
-        val eNum = (local["series_resume_${seriesId}_episode_num"]?.value as? Number)?.toInt() ?: 1
-        val pos = (local["series_resume_${seriesId}_pos_ms"]?.value as? Number)?.toLong() ?: 0L
-        val dur = (local["series_resume_${seriesId}_dur_ms"]?.value as? Number)?.toLong() ?: 0L
-        val ts = (local["series_resume_${seriesId}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+        var epId = local["series_resume_${seriesId}_episode_id"]?.value as? String
+        var sNum = (local["series_resume_${seriesId}_season_num"]?.value as? Number)?.toInt() ?: 1
+        var eNum = (local["series_resume_${seriesId}_episode_num"]?.value as? Number)?.toInt() ?: 1
+        var pos = (local["series_resume_${seriesId}_pos_ms"]?.value as? Number)?.toLong() ?: 0L
+        var dur = (local["series_resume_${seriesId}_dur_ms"]?.value as? Number)?.toLong() ?: 0L
+        var ts = (local["series_resume_${seriesId}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+
+        // Self-heal: If pointer is missing or holds < 2000ms progress, look for candidate episodes in watch history
+        if (epId.isNullOrBlank() || pos < 2000L) {
+            var bestEpId: String? = null
+            var bestSNum = 1
+            var bestENum = 1
+            var bestPos = 0L
+            var bestDur = 0L
+            var bestTs = 0L
+
+            for ((k, v) in local) {
+                if (k.endsWith("_series_id") && (v.value as? String) == seriesId) {
+                    val candidateId = k.removeSuffix("_series_id")
+                    val cPos = (local["${candidateId}_pos"]?.value as? Number)?.toLong() ?: 0L
+                    val cDur = (local["${candidateId}_dur"]?.value as? Number)?.toLong() ?: 0L
+                    val cTs = (local["${candidateId}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+                    val cS = (local["${candidateId}_season_num"]?.value as? Number)?.toInt() ?: 1
+                    val cE = (local["${candidateId}_episode_num"]?.value as? Number)?.toInt() ?: 1
+
+                    if (cPos >= 2000L && cTs > bestTs) {
+                        bestEpId = candidateId
+                        bestSNum = cS
+                        bestENum = cE
+                        bestPos = cPos
+                        bestDur = cDur
+                        bestTs = cTs
+                    }
+                }
+            }
+
+            if (bestEpId != null) {
+                epId = bestEpId
+                sNum = bestSNum
+                eNum = bestENum
+                pos = bestPos
+                dur = bestDur
+                ts = bestTs
+
+                // Repair local resume pointer
+                local["series_resume_${seriesId}_episode_id"] = TypedHistoryEntry("string", epId)
+                local["series_resume_${seriesId}_season_num"] = TypedHistoryEntry("int", sNum)
+                local["series_resume_${seriesId}_episode_num"] = TypedHistoryEntry("int", eNum)
+                local["series_resume_${seriesId}_pos_ms"] = TypedHistoryEntry("long", pos)
+                local["series_resume_${seriesId}_dur_ms"] = TypedHistoryEntry("long", dur)
+                local["series_resume_${seriesId}_timestamp"] = TypedHistoryEntry("long", ts)
+                saveLocal(email, local)
+            }
+        }
+
+        if (epId.isNullOrBlank()) return null
 
         return SeriesResumeState(
             seriesId = seriesId,
@@ -466,7 +527,7 @@ object DesktopWatchHistoryManager {
                 ?: if (dur > 0L) (pos.toFloat() / dur.toFloat()) else 0f
             val ts = (local["${movie.id}_timestamp"]?.value as? Number)?.toLong() ?: 0L
 
-            if (pos >= 5000L && fraction in 0.01f..0.92f && ts > 0L) {
+            if (ts > 0L && pos >= 3000L && fraction in 0.005f..0.95f) {
                 items.add(
                     DesktopContinueWatchingItem(
                         mediaId = movie.id,
@@ -476,7 +537,7 @@ object DesktopWatchHistoryManager {
                         fallbackThumbnailUrl = movie.fallbackThumbnailUrl ?: "",
                         positionMs = pos,
                         durationMs = dur,
-                        progressFraction = fraction.coerceIn(0.02f, 1f),
+                        progressFraction = fraction.coerceIn(0.04f, 1f),
                         isSeries = false,
                         timestamp = ts
                     )
@@ -485,15 +546,16 @@ object DesktopWatchHistoryManager {
         }
 
         for (s in series) {
-            val epId = local["series_resume_${s.id}_episode_id"]?.value as? String ?: continue
+            val resume = getSeriesResumeState(email, s.id) ?: continue
+            val epId = resume.lastEpisodeId
             val isMarkedMovie = local["${epId}_is_series"]?.value == false
             if (movieIds.contains(epId) || isMarkedMovie) continue
 
-            val rawSNum = (local["series_resume_${s.id}_season_num"]?.value as? Number)?.toInt() ?: 1
-            val rawENum = (local["series_resume_${s.id}_episode_num"]?.value as? Number)?.toInt() ?: 1
-            val pos = (local["series_resume_${s.id}_pos_ms"]?.value as? Number)?.toLong() ?: 0L
-            val dur = (local["series_resume_${s.id}_dur_ms"]?.value as? Number)?.toLong() ?: 0L
-            val ts = (local["series_resume_${s.id}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+            val rawSNum = resume.seasonNumber
+            val rawENum = resume.episodeNumber
+            val pos = resume.positionMs
+            val dur = resume.durationMs
+            val ts = resume.lastWatchedTimestamp
 
             val cachedSeries = DesktopSeriesCache.get(email, s.id)
             val allEpisodes = cachedSeries?.seasons?.flatMap { it.episodes } ?: emptyList()
@@ -516,9 +578,7 @@ object DesktopWatchHistoryManager {
             val code = "S${sNum}E${eNum}"
             val subtitle = if (epTitle.isNotBlank()) "$code • $epTitle" else code
 
-            val isOngoing = fraction in 0.005f..0.95f || pos >= 5000L
-            val isQueuedNext = (pos == 0L && fraction == 0f)
-            if (ts > 0L && (isOngoing || isQueuedNext)) {
+            if (ts > 0L && pos >= 3000L && fraction in 0.005f..0.95f) {
                 items.add(
                     DesktopContinueWatchingItem(
                         mediaId = epId,
@@ -528,7 +588,7 @@ object DesktopWatchHistoryManager {
                         fallbackThumbnailUrl = s.fallbackThumbnailUrl ?: "",
                         positionMs = pos,
                         durationMs = effectiveDur,
-                        progressFraction = if (pos > 0L) fraction.coerceIn(0.04f, 1f) else 0.02f,
+                        progressFraction = fraction.coerceIn(0.04f, 1f),
                         isSeries = true,
                         seriesId = s.id,
                         seasonNumber = sNum,
@@ -574,6 +634,7 @@ object DesktopWatchHistoryManager {
             val eNum = (local["${fileId}_episode_num"]?.value as? Number)?.toInt()
 
             if (ts <= 0L) continue
+            if (pos < 2000L && rawFraction < 0.01f) continue
 
             val fraction = rawFraction.coerceIn(0f, 1f)
 
@@ -695,16 +756,17 @@ object DesktopWatchHistoryManager {
         var maxTs = -1L
 
         for (s in series) {
-            val epId = local["series_resume_${s.id}_episode_id"]?.value as? String ?: continue
-            val ts = (local["series_resume_${s.id}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+            val resume = getSeriesResumeState(email, s.id) ?: continue
+            val epId = resume.lastEpisodeId
+            val ts = resume.lastWatchedTimestamp
 
             if (local["${epId}_is_series"]?.value == false) continue
 
             if (ts > maxTs) {
-                val rawSNum = (local["series_resume_${s.id}_season_num"]?.value as? Number)?.toInt() ?: 1
-                val rawENum = (local["series_resume_${s.id}_episode_num"]?.value as? Number)?.toInt() ?: 1
-                val pos = (local["series_resume_${s.id}_pos_ms"]?.value as? Number)?.toLong() ?: 0L
-                val dur = (local["series_resume_${s.id}_dur_ms"]?.value as? Number)?.toLong() ?: 0L
+                val rawSNum = resume.seasonNumber
+                val rawENum = resume.episodeNumber
+                val pos = resume.positionMs
+                val dur = resume.durationMs
 
                 val cachedSeries = DesktopSeriesCache.get(email, s.id)
                 val allEpisodes = cachedSeries?.seasons?.flatMap { it.episodes } ?: emptyList()

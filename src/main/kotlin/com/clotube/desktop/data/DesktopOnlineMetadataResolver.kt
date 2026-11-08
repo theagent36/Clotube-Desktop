@@ -1,6 +1,7 @@
 package com.clotube.desktop.data
 
 import com.clotube.desktop.model.DesktopMediaItem
+import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -12,6 +13,22 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
+
+data class BatchSeriesMetadata(
+    val title: String,
+    val synopsis: String,
+    val genres: String,
+    val releaseYear: String,
+    val posterUrl: String,
+    val episodesBySeasonAndNum: Map<Pair<Int, Int>, BatchEpisodeMetadata>
+)
+
+data class BatchEpisodeMetadata(
+    val title: String,
+    val synopsis: String,
+    val durationMs: Long,
+    val thumbnailUrl: String
+)
 
 data class MovieMetadata(
     val officialTitle: String,
@@ -42,7 +59,10 @@ data class EpisodeOnlineMeta(
     val thumbnailUrl: String = "",
     val seasonNumber: Int = 1,
     val episodeNumber: Int = 1
-)
+) {
+    val title: String get() = officialTitle
+    val durationMs: Long get() = durationMinutes * 60_000L
+}
 
 typealias SeriesMetadata = SeriesOnlineMeta
 typealias EpisodeMetadata = EpisodeOnlineMeta
@@ -53,6 +73,105 @@ object DesktopOnlineMetadataResolver {
     private val seriesCache = ConcurrentHashMap<String, SeriesOnlineMeta>()
     private val episodeCache = ConcurrentHashMap<String, EpisodeOnlineMeta>()
     private val showEpisodesCache = ConcurrentHashMap<Long, Map<Pair<Int, Int>, EpisodeOnlineMeta>>()
+    private val gson = Gson()
+
+    /**
+     * Resolves the entire TV series catalog and all episode metadata in a SINGLE HTTP query (~300ms)
+     * instead of firing 150+ sequential HTTP requests.
+     */
+    fun resolveSeriesBatch(seriesTitle: String): BatchSeriesMetadata {
+        val sanitized = seriesTitle
+            .replace(Regex("(?i)\\b(season|s[0-9]+|complete|1080p|720p|hevc|x264|x265)\\b.*"), "")
+            .trim()
+        val encoded = URLEncoder.encode(sanitized, "UTF-8")
+        val endpoint = "https://api.tvmaze.com/singlesearch/shows?q=$encoded&embed=episodes"
+
+        try {
+            val url = URI(endpoint).toURL()
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4000
+                readTimeout = 4000
+                setRequestProperty("User-Agent", "Clotube-Windows/1.0")
+            }
+
+            if (conn.responseCode == 200) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = gson.fromJson(json, JsonObject::class.java)
+
+                val officialTitle = root.get("name")?.asString ?: seriesTitle
+                val rawSummary = root.get("summary")?.asString ?: ""
+                val cleanSummary = rawSummary.replace(Regex("<.*?>"), "").trim()
+
+                val genresArray = root.getAsJsonArray("genres")
+                val genres = genresArray?.mapNotNull { it.asString }?.joinToString(", ") ?: ""
+
+                val premiered = root.get("premiered")?.asString ?: ""
+                val releaseYear = premiered.take(4)
+
+                val imageObj = root.getAsJsonObject("image")
+                val posterUrl = imageObj?.get("original")?.asString
+                    ?: imageObj?.get("medium")?.asString
+                    ?: ""
+
+                val episodeMap = mutableMapOf<Pair<Int, Int>, BatchEpisodeMetadata>()
+                val embedded = root.getAsJsonObject("_embedded")
+                val episodesArray = embedded?.getAsJsonArray("episodes")
+
+                episodesArray?.forEach { epElem ->
+                    val epObj = epElem.asJsonObject
+                    val season = epObj.get("season")?.asInt ?: 1
+                    val number = epObj.get("number")?.asInt ?: 1
+                    val epName = epObj.get("name")?.asString ?: "Episode $number"
+                    val epSummary = (epObj.get("summary")?.asString ?: "").replace(Regex("<.*?>"), "").trim()
+                    val runtimeMin = epObj.get("runtime")?.asLong ?: 45L
+                    val epImageObj = epObj.getAsJsonObject("image")
+                    val epThumb = epImageObj?.get("original")?.asString
+                        ?: epImageObj?.get("medium")?.asString
+                        ?: ""
+
+                    episodeMap[Pair(season, number)] = BatchEpisodeMetadata(
+                        title = epName,
+                        synopsis = epSummary,
+                        durationMs = runtimeMin * 60_000L,
+                        thumbnailUrl = epThumb
+                    )
+                }
+
+                return BatchSeriesMetadata(
+                    title = officialTitle,
+                    synopsis = cleanSummary,
+                    genres = genres,
+                    releaseYear = releaseYear,
+                    posterUrl = posterUrl,
+                    episodesBySeasonAndNum = episodeMap
+                )
+            }
+        } catch (e: Exception) {
+            System.err.println("[MetadataResolver] Batch lookup error for $seriesTitle: ${e.message}")
+        }
+
+        return BatchSeriesMetadata(
+            title = seriesTitle,
+            synopsis = "",
+            genres = "TV Series",
+            releaseYear = "",
+            posterUrl = "",
+            episodesBySeasonAndNum = emptyMap()
+        )
+    }
+
+    fun parseSeasonNumber(name: String, fallback: Int = 1): Int {
+        val match = Regex("(?i)(?:season|s)\\s*([0-9]{1,2})").find(name)
+        return match?.groupValues?.get(1)?.toIntOrNull() ?: fallback
+    }
+
+    fun parseEpisodeNumber(name: String, fallback: Int = 1): Int {
+        val sXe = Regex("(?i)(?:s[0-9]{1,2}[. _-]*e|ep|episode|[0-9]{1,2}x)([0-9]{1,3})").find(name)
+        if (sXe != null) return sXe.groupValues[1].toIntOrNull() ?: fallback
+        val numMatch = Regex("(?<![0-9])([0-9]{1,3})(?![0-9])").find(name)
+        return numMatch?.groupValues?.get(1)?.toIntOrNull() ?: fallback
+    }
 
     // Curated title, genre, and language registry (posters are fetched dynamically from live APIs)
     private val CURATED_TITLES = mapOf(
@@ -907,6 +1026,19 @@ object DesktopOnlineMetadataResolver {
     /**
      * Resolves authentic episode title, duration, synopsis, and poster artwork from TVMaze.
      */
+    suspend fun resolveEpisode(
+        seriesTitle: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        rawFileName: String
+    ): EpisodeOnlineMeta = resolveEpisode(
+        seriesTitle = seriesTitle,
+        tvMazeId = -1L,
+        seasonNumber = seasonNumber,
+        episodeNumber = episodeNumber,
+        rawFileName = rawFileName
+    )
+
     suspend fun resolveEpisode(
         seriesTitle: String = "",
         tvMazeId: Long = -1L,

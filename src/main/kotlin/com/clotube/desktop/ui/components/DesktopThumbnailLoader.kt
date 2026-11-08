@@ -97,7 +97,7 @@ private fun getDiskCacheFile(key: String, userEmail: String): File {
     val dir = if (userEmail.isNotBlank()) {
         DesktopProfileManager.getThumbnailsDir(userEmail)
     } else {
-        File("cache", "thumbnails").apply { if (!exists()) mkdirs() }
+        File(DesktopProfileManager.appDataRoot, "cache/thumbnails").apply { if (!exists()) mkdirs() }
     }
     return File(dir, "$hash.png")
 }

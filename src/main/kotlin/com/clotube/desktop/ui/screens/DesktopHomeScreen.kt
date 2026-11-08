@@ -4,6 +4,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
@@ -490,8 +491,56 @@ fun DesktopHomeScreen(
                                 animationSpec = tween(180)
                             )
                         )
+                    } else if (initialState is DesktopActiveView.Library && targetState is DesktopActiveView.Library) {
+                        // DIRECTION-AWARE HORIZON SLIDE & DEPTH CROSS-DISSOLVE (Home <-> Movies <-> Series <-> Recents)
+                        val fromSection = (initialState as DesktopActiveView.Library).section
+                        val toSection = (targetState as DesktopActiveView.Library).section
+                        val isMovingForward = toSection.ordinal > fromSection.ordinal
+
+                        val slideOffset = 64 // Subtle 64px offset prevents motion sickness on wide desktop monitors
+
+                        if (isMovingForward) {
+                            (slideInHorizontally(
+                                initialOffsetX = { slideOffset },
+                                animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                            ) + fadeIn(
+                                animationSpec = tween(280)
+                            ) + scaleIn(
+                                initialScale = 0.985f,
+                                animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                            )).togetherWith(
+                                slideOutHorizontally(
+                                    targetOffsetX = { -slideOffset },
+                                    animationSpec = tween(220, easing = FastOutLinearInEasing)
+                                ) + fadeOut(
+                                    animationSpec = tween(180)
+                                ) + scaleOut(
+                                    targetScale = 0.985f,
+                                    animationSpec = tween(220)
+                                )
+                            )
+                        } else {
+                            (slideInHorizontally(
+                                initialOffsetX = { -slideOffset },
+                                animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                            ) + fadeIn(
+                                animationSpec = tween(280)
+                            ) + scaleIn(
+                                initialScale = 0.985f,
+                                animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                            )).togetherWith(
+                                slideOutHorizontally(
+                                    targetOffsetX = { slideOffset },
+                                    animationSpec = tween(220, easing = FastOutLinearInEasing)
+                                ) + fadeOut(
+                                    animationSpec = tween(180)
+                                ) + scaleOut(
+                                    targetScale = 0.985f,
+                                    animationSpec = tween(220)
+                                )
+                            )
+                        }
                     } else {
-                        // Section-to-section navigation within library (Home, Movies, Series, Recents)
                         (fadeIn(
                             animationSpec = tween(220)
                         ) + scaleIn(
@@ -511,42 +560,46 @@ fun DesktopHomeScreen(
             ) { viewState ->
                 when (viewState) {
                     is DesktopActiveView.Series -> {
-                        DesktopSeriesDetailScreen(
-                            seriesItem = viewState.series,
-                            accessToken = accessToken,
-                            userEmail = userEmail,
-                            initialEpisodeId = viewState.episodeId,
-                            isFullscreen = effectiveFullscreen,
-                            onToggleFullscreen = onToggleFullscreen,
-                            onBack = { 
-                                if (effectiveFullscreen) onToggleFullscreen() else {
-                                    selectedSeriesForDetail = null
-                                    targetedEpisodeId = null
-                                    watchHistoryRevision++
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        key(viewState.series.id) {
+                            DesktopSeriesDetailScreen(
+                                seriesItem = viewState.series,
+                                accessToken = accessToken,
+                                userEmail = userEmail,
+                                initialEpisodeId = viewState.episodeId,
+                                isFullscreen = effectiveFullscreen,
+                                onToggleFullscreen = onToggleFullscreen,
+                                onBack = { 
+                                    if (effectiveFullscreen) onToggleFullscreen() else {
+                                        selectedSeriesForDetail = null
+                                        targetedEpisodeId = null
+                                        watchHistoryRevision++
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                     }
                     is DesktopActiveView.Movie -> {
                         val movieResumePos = remember(viewState.movie.id, userEmail, watchHistoryRevision) {
                             com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, viewState.movie.id)
                         }
 
-                        DesktopMoviePlayerScreen(
-                            initialMovie = viewState.movie,
-                            allMovies = filteredMovies,
-                            accessToken = accessToken,
-                            userEmail = userEmail,
-                            initialSeekMs = movieResumePos,
-                            onBack = {
-                                if (effectiveFullscreen) onToggleFullscreen()
-                                selectedMovieForPlayer = null
-                                watchHistoryRevision++
-                            },
-                            isFullscreen = effectiveFullscreen,
-                            onToggleFullscreen = onToggleFullscreen
-                        )
+                        key(viewState.movie.id) {
+                            DesktopMoviePlayerScreen(
+                                initialMovie = viewState.movie,
+                                allMovies = filteredMovies,
+                                accessToken = accessToken,
+                                userEmail = userEmail,
+                                initialSeekMs = movieResumePos,
+                                onBack = {
+                                    if (effectiveFullscreen) onToggleFullscreen()
+                                    selectedMovieForPlayer = null
+                                    watchHistoryRevision++
+                                },
+                                isFullscreen = effectiveFullscreen,
+                                onToggleFullscreen = onToggleFullscreen
+                            )
+                        }
                     }
                     is DesktopActiveView.Library -> {
                         when (viewState.section) {

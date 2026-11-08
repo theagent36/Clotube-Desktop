@@ -35,6 +35,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +57,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 fun DesktopSeriesDetailScreen(
@@ -70,120 +74,133 @@ fun DesktopSeriesDetailScreen(
 ) {
     val coroutineScope = rememberCoroutineScope()
 
-    // 1. Frame-1 Cache Read
+    // 1. Frame-1 Cache Read Scoped to User Profile
     val cachedSeries = remember(seriesItem.id, userEmail) { 
         DesktopSeriesCache.get(userEmail, seriesItem.id) 
     }
     var seriesDetails by remember(seriesItem.id, userEmail) { mutableStateOf<DesktopSeries?>(cachedSeries) }
     var isLoading by remember(seriesItem.id, userEmail) { mutableStateOf(cachedSeries == null) }
 
-    // Resolve targeted episode if passed from Global Search or Series Resume Pointer
-    val allCachedEpisodes = remember(cachedSeries) {
-        cachedSeries?.seasons?.flatMap { it.episodes } ?: emptyList()
+    val initialResume = remember(seriesItem.id, userEmail) {
+        DesktopWatchHistoryManager.getSeriesResumeState(userEmail, seriesItem.id)
     }
-    val targetedCachedEp = remember(allCachedEpisodes, initialEpisodeId, userEmail) {
-        if (!initialEpisodeId.isNullOrBlank()) {
-            allCachedEpisodes.find { it.id == initialEpisodeId }
+    val targetEpisodeId = initialEpisodeId ?: initialResume?.lastEpisodeId
+
+    val initialTargetEpisode = remember(seriesItem.id, userEmail, targetEpisodeId) {
+        if (!targetEpisodeId.isNullOrBlank() && cachedSeries != null) {
+            cachedSeries.seasons.flatMap { it.episodes }.find { it.id == targetEpisodeId }
+                ?: cachedSeries.seasons.firstOrNull()?.episodes?.firstOrNull()
         } else {
-            val resumeState = DesktopWatchHistoryManager.getSeriesResumeState(userEmail, seriesItem.id)
-            if (resumeState != null) {
-                allCachedEpisodes.find { it.id == resumeState.lastEpisodeId }
-            } else null
+            cachedSeries?.seasons?.firstOrNull()?.episodes?.firstOrNull()
         }
     }
-
-    var playingEpisode by remember(seriesItem.id, userEmail, initialEpisodeId) {
-        mutableStateOf<DesktopEpisode?>(
-            targetedCachedEp ?: cachedSeries?.seasons?.firstOrNull()?.episodes?.firstOrNull()
-        )
+    val initialTargetSeasonNumber = remember(seriesItem.id, userEmail, initialTargetEpisode) {
+        initialTargetEpisode?.seasonNumber 
+            ?: cachedSeries?.seasons?.find { s -> s.episodes.any { it.id == initialTargetEpisode?.id } }?.seasonNumber
+            ?: cachedSeries?.seasons?.firstOrNull()?.seasonNumber ?: 1
     }
 
-    var selectedSeasonNumber by remember(seriesItem.id, userEmail, initialEpisodeId) {
-        mutableIntStateOf(
-            targetedCachedEp?.seasonNumber ?: cachedSeries?.seasons?.firstOrNull()?.seasonNumber ?: 1
-        )
+    var playingEpisode by remember(seriesItem.id, userEmail) {
+        mutableStateOf<DesktopEpisode?>(initialTargetEpisode)
     }
+    val browsingSeasonState = remember(seriesItem.id, userEmail) {
+        mutableIntStateOf(initialTargetSeasonNumber)
+    }
+    var browsingSeasonNumber by browsingSeasonState
+    var selectedSeasonNumber by browsingSeasonState
 
     var seasonDropdownExpanded by remember { mutableStateOf(false) }
 
-    // Observe global watch history revision so unchecking episodes on phone updates UI live
     val historyRev = DesktopWatchHistoryManager.historyRevision.intValue
     var watchedEpisodeIds by remember(userEmail, historyRev) {
         mutableStateOf(DesktopWatchHistoryManager.getWatchedEpisodeIds(userEmail))
     }
 
-    // 2. Stale-While-Revalidate Ingestion
-    LaunchedEffect(seriesItem.id, userEmail, initialEpisodeId) {
+    // 2. Off-Thread Drive Scanning (Runs strictly on Dispatchers.IO to never block the EDT)
+    LaunchedEffect(seriesItem.id, userEmail) {
+        yield()
         if (seriesDetails == null) {
             isLoading = true
-            val scanner = DesktopDriveScanner(accessToken)
-            val loaded = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
-            DesktopSeriesCache.save(userEmail, loaded)
-            seriesDetails = loaded
-
-            val allFreshEpisodes = loaded.seasons.flatMap { it.episodes }
-            // Validate initialEpisodeId: ensure it actually belongs to this series
-            val targetedFreshEp = if (!initialEpisodeId.isNullOrBlank()) {
-                allFreshEpisodes.find { it.id == initialEpisodeId }
-            } else {
-                val resumeState = DesktopWatchHistoryManager.getSeriesResumeState(userEmail, seriesItem.id)
-                if (resumeState != null) {
-                    allFreshEpisodes.find { it.id == resumeState.lastEpisodeId }
-                } else null
+            val loaded = withContext(Dispatchers.IO) {
+                try {
+                    val scanner = DesktopDriveScanner(accessToken)
+                    val result = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
+                    DesktopSeriesCache.save(userEmail, result)
+                    result
+                } catch (e: Exception) {
+                    System.err.println("[DesktopSeriesDetailScreen] Failed to scan series: ${e.message}")
+                    null
+                }
             }
 
-            if (targetedFreshEp != null) {
-                selectedSeasonNumber = targetedFreshEp.seasonNumber
-                playingEpisode = targetedFreshEp
-            } else {
-                val initialSeason = loaded.seasons.firstOrNull()
-                if (initialSeason != null) {
-                    selectedSeasonNumber = initialSeason.seasonNumber
-                    playingEpisode = initialSeason.episodes.firstOrNull()
+            if (loaded != null) {
+                withContext(Dispatchers.Main) {
+                    seriesDetails = loaded
+
+                    // Resume targeted episode if navigating from Continue Watching or resume state
+                    val latestResume = DesktopWatchHistoryManager.getSeriesResumeState(userEmail, seriesItem.id)
+                    val effectiveTargetId = initialEpisodeId ?: latestResume?.lastEpisodeId
+                    val matchedSeason = if (!effectiveTargetId.isNullOrBlank()) {
+                        loaded.seasons.find { s -> s.episodes.any { it.id == effectiveTargetId } }
+                    } else null
+                    val matchedEp = matchedSeason?.episodes?.find { it.id == effectiveTargetId }
+
+                    if (matchedSeason != null && matchedEp != null) {
+                        browsingSeasonNumber = matchedSeason.seasonNumber
+                        playingEpisode = matchedEp
+                    } else {
+                        val initialSeason = loaded.seasons.firstOrNull()
+                        if (initialSeason != null) {
+                            browsingSeasonNumber = initialSeason.seasonNumber
+                            playingEpisode = initialSeason.episodes.firstOrNull()
+                        }
+                    }
                 }
             }
             isLoading = false
         } else {
-            try {
-                val scanner = DesktopDriveScanner(accessToken)
-                val fresh = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
-                if (fresh.seasons.isNotEmpty()) {
-                    DesktopSeriesCache.save(userEmail, fresh)
-                    seriesDetails = fresh
-                    val allFreshEpisodes = fresh.seasons.flatMap { it.episodes }
-                    if (playingEpisode == null || allFreshEpisodes.none { it.id == playingEpisode?.id }) {
-                        val targetedFreshEp = if (!initialEpisodeId.isNullOrBlank()) {
-                            allFreshEpisodes.find { it.id == initialEpisodeId }
-                        } else null
-
-                        if (targetedFreshEp != null) {
-                            selectedSeasonNumber = targetedFreshEp.seasonNumber
-                            playingEpisode = targetedFreshEp
-                        } else {
-                            val initialSeason = fresh.seasons.firstOrNull()
-                            if (initialSeason != null) {
-                                selectedSeasonNumber = initialSeason.seasonNumber
-                                playingEpisode = initialSeason.episodes.firstOrNull()
-                            }
+            // Background quiet revalidation strictly on Dispatchers.IO
+            withContext(Dispatchers.IO) {
+                try {
+                    val scanner = DesktopDriveScanner(accessToken)
+                    val fresh = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
+                    if (fresh.seasons.isNotEmpty()) {
+                        DesktopSeriesCache.save(userEmail, fresh)
+                        withContext(Dispatchers.Main) {
+                            seriesDetails = fresh
                         }
                     }
+                } catch (e: Exception) {
+                    System.err.println("[DesktopSeriesDetailScreen] Background refresh error for ${seriesItem.title}:${e.message}")
                 }
-            } catch (e: Exception) {
-                System.err.println("[DesktopSeriesDetailScreen] Background refresh failed for ${seriesItem.title}: ${e.message}")
             }
         }
     }
 
+    // 3. IMMEDIATE LOADING SPINNER (Renders on Frame 1 while IO thread scans Drive)
     if (isLoading || seriesDetails == null) {
         Box(
-            modifier = modifier.fillMaxSize().background(Color(0xFF07090E)),
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color(0xFF07090E)),
             contentAlignment = Alignment.Center
         ) {
-            PacedLoadingSpinner(
-                color = Color(0xFF00E5FF),
-                modifier = Modifier.size(46.dp),
-                strokeWidth = 3.5.dp
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                CircularProgressIndicator(
+                    color = Color(0xFF00E5FF),
+                    strokeWidth = 3.5.dp,
+                    modifier = Modifier.size(46.dp)
+                )
+                Text(
+                    text = "Indexing series information from google drive takes time for the first time",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
         return
     }
@@ -270,61 +287,90 @@ fun DesktopSeriesDetailScreen(
         } else null
     }
 
+    val hasAppliedResume = remember(playingEpisode?.id) { AtomicBoolean(false) }
+
+    LaunchedEffect(playingEpisode?.id, player?.isFirstFrameRendered) {
+        val p = player ?: return@LaunchedEffect
+
+        // MID-STREAM GUARD: If the player is ALREADY playing (e.g. during fullscreen toggle), NEVER restart or seek!
+        if (p.currentTimeMs >= 1500L) {
+            hasAppliedResume.set(true)
+            return@LaunchedEffect
+        }
+
+        val shouldResume = DesktopAppSettings.state.resumePlayback
+        if (shouldResume && savedPos > 1500L && hasAppliedResume.compareAndSet(false, true)) {
+            var attempts = 0
+            while (attempts < 30 && (!p.isFirstFrameRendered || p.totalDurationMs <= 0L)) {
+                delay(100L)
+                attempts++
+            }
+            if (p.currentTimeMs < 1500L) {
+                p.seekToTime(savedPos)
+                println("[SeriesPlayer] Applied initial resume at ${savedPos}ms")
+            }
+        }
+    }
+
     val progressSaveScope = remember { kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()) }
 
+    val currentPlayingEpisode by rememberUpdatedState(playingEpisode)
+    val currentPlayer by rememberUpdatedState(player)
+
     // 2. Periodic Progress Recording
-    val saveSeriesProgress = {
-        val ep = activeEpisode
-        val p = player
-        if (ep != null && p != null && userEmail.isNotBlank()) {
-            val curPos = p.currentTimeMs
-            val dur = if (ep.durationMs > 0L) ep.durationMs else p.totalDurationMs
-            if (curPos > 1000L) {
-                progressSaveScope.launch {
-                    try {
-                        com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
-                            email = userEmail,
-                            fileId = ep.id,
-                            title = ep.title,
-                            positionMs = curPos,
-                            durationMs = dur,
-                            isSeries = true,
-                            seriesId = seriesItem.id,
-                            seasonNumber = ep.seasonNumber,
-                            episodeNumber = ep.episodeNumber
-                        )
-                        if (accessToken.isNotBlank()) {
-                            com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-                        }
-                    } catch (t: Throwable) {
-                        System.err.println("[SeriesPlayer] Failed to save watch progress: ${t.message}")
+    val saveActiveEpisodeProgress = {
+        val ep = currentPlayingEpisode
+        val p = currentPlayer
+        if (ep != null && userEmail.isNotBlank()) {
+            val curPos = p?.currentTimeMs ?: 0L
+            val totalDur = if (ep.durationMs > 0L) ep.durationMs else (p?.totalDurationMs ?: 0L)
+
+            // Guard write: only persist meaningful progress (>= 2000ms) or when near completion (>= 90%)
+            if (curPos >= 2000L || (totalDur > 0L && curPos >= totalDur * 0.90f)) {
+                // Record progress synchronously to in-memory/disk store
+                com.clotube.desktop.data.DesktopWatchHistoryManager.recordPlaybackProgress(
+                    email = userEmail,
+                    fileId = ep.id,
+                    title = ep.title,
+                    positionMs = curPos,
+                    durationMs = totalDur,
+                    isSeries = true,
+                    seriesId = seriesItem.id,
+                    seasonNumber = ep.seasonNumber,
+                    episodeNumber = ep.episodeNumber
+                )
+
+                // Asynchronously sync to Google Drive
+                if (accessToken.isNotBlank()) {
+                    progressSaveScope.launch {
+                        com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
                     }
                 }
             }
         }
     }
-    val saveActiveEpisodeProgress = saveSeriesProgress
+    val saveSeriesProgress = saveActiveEpisodeProgress
 
     LaunchedEffect(player?.isPlaying, activeEpisode?.id, userEmail) {
         if (player?.isPlaying == true && activeEpisode != null && userEmail.isNotBlank()) {
             while (isActive) {
                 delay(5000L)
-                saveSeriesProgress()
+                saveActiveEpisodeProgress()
             }
         } else if (player?.isPlaying == false && activeEpisode != null && userEmail.isNotBlank()) {
-            saveSeriesProgress()
+            saveActiveEpisodeProgress()
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            saveSeriesProgress()
+            saveActiveEpisodeProgress()
         }
     }
 
     DisposableEffect(player) {
         onDispose {
-            saveSeriesProgress()
+            saveActiveEpisodeProgress()
             player?.release()
         }
     }
@@ -344,20 +390,22 @@ fun DesktopSeriesDetailScreen(
             onInitialSeekApplied = null,
             onProgressUpdate = { currentPos ->
                 playingEpisode?.let { ep ->
-                    progressSaveScope.launch {
-                        DesktopWatchHistoryManager.recordPlaybackProgress(
-                            email = userEmail,
-                            fileId = ep.id,
-                            title = ep.title,
-                            positionMs = currentPos,
-                            durationMs = ep.durationMs,
-                            isSeries = true,
-                            seriesId = series.id,
-                            seasonNumber = ep.seasonNumber,
-                            episodeNumber = ep.episodeNumber
-                        )
-                        // Quiet background sync to Drive
-                        DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                        email = userEmail,
+                        fileId = ep.id,
+                        title = ep.title,
+                        positionMs = currentPos,
+                        durationMs = ep.durationMs,
+                        isSeries = true,
+                        seriesId = series.id,
+                        seasonNumber = ep.seasonNumber,
+                        episodeNumber = ep.episodeNumber
+                    )
+                    // Quiet background sync to Drive
+                    if (accessToken.isNotBlank()) {
+                        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                        }
                     }
                 }
             },
@@ -586,20 +634,22 @@ fun DesktopSeriesDetailScreen(
                                 onInitialSeekApplied = null,
                                 onProgressUpdate = { currentPos ->
                                     playingEpisode?.let { ep ->
-                                        progressSaveScope.launch {
-                                            DesktopWatchHistoryManager.recordPlaybackProgress(
-                                                email = userEmail,
-                                                fileId = ep.id,
-                                                title = ep.title,
-                                                positionMs = currentPos,
-                                                durationMs = ep.durationMs,
-                                                isSeries = true,
-                                                seriesId = series.id,
-                                                seasonNumber = ep.seasonNumber,
-                                                episodeNumber = ep.episodeNumber
-                                            )
-                                            // Quiet background sync to Drive
-                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                                        DesktopWatchHistoryManager.recordPlaybackProgress(
+                                            email = userEmail,
+                                            fileId = ep.id,
+                                            title = ep.title,
+                                            positionMs = currentPos,
+                                            durationMs = ep.durationMs,
+                                            isSeries = true,
+                                            seriesId = series.id,
+                                            seasonNumber = ep.seasonNumber,
+                                            episodeNumber = ep.episodeNumber
+                                        )
+                                        // Quiet background sync to Drive
+                                        if (accessToken.isNotBlank()) {
+                                            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
+                                            }
                                         }
                                     }
                                 },

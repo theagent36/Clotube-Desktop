@@ -631,7 +631,7 @@ private fun DesktopSeriesPlayerContent(
             modifier = Modifier.fillMaxSize()
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Top Cinema Header (Back Arrow & Title)
+                // Top Cinema Header (Title & Episode Info)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -639,29 +639,11 @@ private fun DesktopSeriesPlayerContent(
                         .align(Alignment.TopCenter),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
-                        onClick = {
-                            if (isFullscreen) onToggleFullscreen() else onNavigateBack()
-                        },
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.5f))
-                            .pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(14.dp))
                     Column {
                         Text(
                             text = seriesTitle,
                             color = Color.White,
-                            fontSize = 17.sp,
+                            fontSize = 18.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -671,7 +653,7 @@ private fun DesktopSeriesPlayerContent(
                         Text(
                             text = subline,
                             color = Color(0xFF42A5F5),
-                            fontSize = 12.sp,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
