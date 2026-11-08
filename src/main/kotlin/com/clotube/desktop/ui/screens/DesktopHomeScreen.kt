@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -67,6 +68,8 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import com.clotube.desktop.ui.components.DesktopFramePacer
+import com.clotube.desktop.ui.motion.FluidEntranceContainer
+import com.clotube.desktop.ui.motion.fluidInteractiveCard
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -1282,14 +1285,16 @@ private fun ContinueWatchingShelf(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            displayItems.forEach { item ->
-                ContinueWatchingCard(
-                    item = item,
-                    userEmail = userEmail,
-                    accessToken = accessToken,
-                    onClick = { onItemClick(item) },
-                    modifier = Modifier.width(248.dp).height(142.dp)
-                )
+            displayItems.forEachIndexed { index, item ->
+                FluidEntranceContainer(index = index) {
+                    ContinueWatchingCard(
+                        item = item,
+                        userEmail = userEmail,
+                        accessToken = accessToken,
+                        onClick = { onItemClick(item) },
+                        modifier = Modifier.width(248.dp).height(142.dp)
+                    )
+                }
             }
         }
     }
@@ -1370,26 +1375,9 @@ private fun ContinueWatchingCard(
 
     Box(
         modifier = modifier
-            .graphicsLayer {
-                scaleX = cardScale
-                scaleY = cardScale
-            }
-            .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
-                shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
-            )
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF0F141F))
-            .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
-                shape = RoundedCornerShape(12.dp)
-            )
-            .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(
+            .fluidInteractiveCard(
+                cornerRadius = 10.dp,
                 interactionSource = interactionSource,
-                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.45f)
@@ -1398,6 +1386,15 @@ private fun ContinueWatchingCard(
                     onClick()
                 }
             )
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(10.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF0F141F))
+            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (posterBitmap != null) {
@@ -1917,7 +1914,7 @@ private fun FigmaMoviesContent(
 
         // 5-Column Movies Grid
         val rows = filteredMovies.chunked(5)
-        items(rows, key = { row -> row.joinToString { it.id } }) { rowItems ->
+        itemsIndexed(rows, key = { _, row -> row.joinToString { it.id } }) { rowIndex, rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
@@ -1925,13 +1922,19 @@ private fun FigmaMoviesContent(
                 for (i in 0 until 5) {
                     val item = rowItems.getOrNull(i)
                     if (item != null) {
-                        DesktopSeriesGridCard(
-                            seriesItem = item,
-                            userEmail = userEmail,
-                            accessToken = accessToken,
-                            onClick = { onMovieClick(item) },
-                            modifier = Modifier.weight(1f).aspectRatio(16f / 9.5f)
-                        )
+                        val index = rowIndex * 5 + i
+                        FluidEntranceContainer(
+                            index = index,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            DesktopSeriesGridCard(
+                                seriesItem = item,
+                                userEmail = userEmail,
+                                accessToken = accessToken,
+                                onClick = { onMovieClick(item) },
+                                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
+                            )
+                        }
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
                     }
@@ -2349,7 +2352,7 @@ private fun FigmaSeriesContent(
 
         // 5-Column Series Grid
         val rows = filteredSeries.chunked(5)
-        items(rows, key = { row -> row.joinToString { it.id } }) { rowItems ->
+        itemsIndexed(rows, key = { _, row -> row.joinToString { it.id } }) { rowIndex, rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
@@ -2357,13 +2360,19 @@ private fun FigmaSeriesContent(
                 for (i in 0 until 5) {
                     val item = rowItems.getOrNull(i)
                     if (item != null) {
-                        DesktopSeriesGridCard(
-                            seriesItem = item,
-                            userEmail = userEmail,
-                            accessToken = accessToken,
-                            onClick = { onSeriesClick(item, null) },
-                            modifier = Modifier.weight(1f).aspectRatio(16f / 9.5f)
-                        )
+                        val index = rowIndex * 5 + i
+                        FluidEntranceContainer(
+                            index = index,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            DesktopSeriesGridCard(
+                                seriesItem = item,
+                                userEmail = userEmail,
+                                accessToken = accessToken,
+                                onClick = { onSeriesClick(item, null) },
+                                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
+                            )
+                        }
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
                     }
@@ -2687,26 +2696,9 @@ private fun DesktopSeriesGridCard(
 
     Box(
         modifier = modifier
-            .graphicsLayer {
-                scaleX = cardScale
-                scaleY = cardScale
-            }
-            .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
-                shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
-            )
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF0F141F))
-            .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
-                shape = RoundedCornerShape(12.dp)
-            )
-            .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(
+            .fluidInteractiveCard(
+                cornerRadius = 10.dp,
                 interactionSource = interactionSource,
-                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.45f)
@@ -2715,6 +2707,15 @@ private fun DesktopSeriesGridCard(
                     onClick()
                 }
             )
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(10.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF0F141F))
+            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (posterBitmap != null) {
@@ -2958,32 +2959,34 @@ private fun FigmaRecentsContent(
             }
         } else {
             // 3. Watched Items List
-            items(historyItems, key = { it.mediaId }) { item ->
-                RecentHistoryItemCard(
-                    item = item,
-                    userEmail = userEmail,
-                    accessToken = accessToken,
-                    onClick = {
-                        if (item.isSeries && !item.seriesId.isNullOrBlank()) {
-                            val matched = series.find { it.id == item.seriesId }
-                            if (matched != null) {
-                                onSeriesEpisodeClick(matched, item.mediaId)
+            itemsIndexed(historyItems, key = { _, it -> it.mediaId }) { index, item ->
+                FluidEntranceContainer(index = index) {
+                    RecentHistoryItemCard(
+                        item = item,
+                        userEmail = userEmail,
+                        accessToken = accessToken,
+                        onClick = {
+                            if (item.isSeries && !item.seriesId.isNullOrBlank()) {
+                                val matched = series.find { it.id == item.seriesId }
+                                if (matched != null) {
+                                    onSeriesEpisodeClick(matched, item.mediaId)
+                                }
+                            } else {
+                                val matched = movies.find { it.id == item.mediaId }
+                                if (matched != null) {
+                                    onMovieClick(matched)
+                                }
                             }
-                        } else {
-                            val matched = movies.find { it.id == item.mediaId }
-                            if (matched != null) {
-                                onMovieClick(matched)
+                        },
+                        onRemove = {
+                            coroutineScope.launch {
+                                com.clotube.desktop.data.DesktopWatchHistoryManager.removeHistoryItem(userEmail, item.mediaId)
+                                com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                onHistoryChanged()
                             }
                         }
-                    },
-                    onRemove = {
-                        coroutineScope.launch {
-                            com.clotube.desktop.data.DesktopWatchHistoryManager.removeHistoryItem(userEmail, item.mediaId)
-                            com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
-                            onHistoryChanged()
-                        }
-                    }
-                )
+                    )
+                }
             }
         }
     }
@@ -3040,26 +3043,9 @@ private fun RecentHistoryItemCard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = cardScale
-                scaleY = cardScale
-            }
-            .shadow(
-                elevation = if (isHovered) 12.dp else 2.dp,
-                shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.15f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
-            )
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (isHovered) Color(0xFF131824) else Color(0xFF0F141F))
-            .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
-                shape = RoundedCornerShape(12.dp)
-            )
-            .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(
+            .fluidInteractiveCard(
+                cornerRadius = 10.dp,
                 interactionSource = interactionSource,
-                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.4f)
@@ -3068,6 +3054,15 @@ private fun RecentHistoryItemCard(
                     onClick()
                 }
             )
+            .shadow(
+                elevation = if (isHovered) 12.dp else 2.dp,
+                shape = RoundedCornerShape(10.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.15f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
+            )
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isHovered) Color(0xFF131824) else Color(0xFF0F141F))
+            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         Row(
             modifier = Modifier
@@ -3926,15 +3921,17 @@ private fun FigmaCarouselSection(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            items(items, key = { it.id }) { item ->
-                DesktopFigmaMediaCard(
-                    item = item,
-                    accessToken = accessToken,
-                    onClick = { onItemClick(item) },
-                    modifier = Modifier
-                        .width(248.dp)
-                        .height(144.dp)
-                )
+            itemsIndexed(items, key = { _, it -> it.id }) { index, item ->
+                FluidEntranceContainer(index = index) {
+                    DesktopFigmaMediaCard(
+                        item = item,
+                        accessToken = accessToken,
+                        onClick = { onItemClick(item) },
+                        modifier = Modifier
+                            .width(248.dp)
+                            .height(144.dp)
+                    )
+                }
             }
         }
     }

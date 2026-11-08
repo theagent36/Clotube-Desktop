@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.ui.motion.fluidInteractiveCard
 import kotlinx.coroutines.launch
 
 @Composable
@@ -87,26 +88,9 @@ fun DesktopFigmaMediaCard(
 
     Box(
         modifier = modifier
-            .graphicsLayer {
-                scaleX = cardScale
-                scaleY = cardScale
-            }
-            .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
-                shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
-            )
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF0F1420))
-            .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
-                shape = RoundedCornerShape(12.dp)
-            )
-            .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(
+            .fluidInteractiveCard(
+                cornerRadius = 10.dp,
                 interactionSource = interactionSource,
-                indication = null,
                 onClick = {
                     coroutineScope.launch {
                         clickFlashAlpha.snapTo(0.45f)
@@ -115,6 +99,15 @@ fun DesktopFigmaMediaCard(
                     onClick()
                 }
             )
+            .shadow(
+                elevation = if (isHovered) 16.dp else 4.dp,
+                shape = RoundedCornerShape(10.dp),
+                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+            )
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF0F1420))
+            .pointerHoverIcon(PointerIcon.Hand)
     ) {
         // Thumbnail Image Layer
         if (thumbnailBitmap != null) {
