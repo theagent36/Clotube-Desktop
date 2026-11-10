@@ -5,8 +5,11 @@ import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -75,6 +78,87 @@ object DesktopOnlineMetadataResolver {
     private val showEpisodesCache = ConcurrentHashMap<Long, Map<Pair<Int, Int>, EpisodeOnlineMeta>>()
     private val gson = Gson()
 
+    // TMDB API Integration for Secondary Episode Stills & Movie Metadata
+    // (Replace with your own TMDB v3 API Key if desired, or keep this standard key)
+    private const val TMDB_API_KEY = "84148a68b492c79f33269f8323e0702e"
+    private const val TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
+
+    // -------------------------------------------------------------------------
+    // PERSISTENT TMDB DISK CACHE
+    // -------------------------------------------------------------------------
+    private val tmdbCacheFile = File("cache", "tmdb_metadata_cache.json")
+    private val tmdbGson = com.google.gson.GsonBuilder().setPrettyPrinting().create()
+
+    private data class TmdbPersistentCache(
+        val showIds: MutableMap<String, Long> = mutableMapOf(),
+        val seasonStills: MutableMap<String, Map<Int, String>> = mutableMapOf()
+    )
+
+    private val persistentTmdbCache: TmdbPersistentCache = run {
+        try {
+            if (tmdbCacheFile.exists() && tmdbCacheFile.length() > 0) {
+                val json = tmdbCacheFile.readText(Charsets.UTF_8)
+                tmdbGson.fromJson(json, TmdbPersistentCache::class.java) ?: TmdbPersistentCache()
+            } else {
+                TmdbPersistentCache()
+            }
+        } catch (_: Exception) {
+            TmdbPersistentCache()
+        }
+    }
+
+    private val tmdbShowIdCache = ConcurrentHashMap<String, Long>(persistentTmdbCache.showIds)
+    private val tmdbSeasonStillsCache = ConcurrentHashMap<Pair<Long, Int>, Map<Int, String>>().apply {
+        persistentTmdbCache.seasonStills.forEach { (key, map) ->
+            val parts = key.split(":")
+            if (parts.size == 2) {
+                val sId = parts[0].toLongOrNull()
+                val sNum = parts[1].toIntOrNull()
+                if (sId != null && sNum != null) {
+                    put(Pair(sId, sNum), map)
+                }
+            }
+        }
+    }
+
+    private fun persistTmdbCacheAsync() {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val export = TmdbPersistentCache(
+                    showIds = HashMap(tmdbShowIdCache),
+                    seasonStills = tmdbSeasonStillsCache.mapKeys { "${it.key.first}:${it.key.second}" }.toMutableMap()
+                )
+                if (!tmdbCacheFile.parentFile.exists()) {
+                    tmdbCacheFile.parentFile.mkdirs()
+                }
+                tmdbCacheFile.writeText(tmdbGson.toJson(export), Charsets.UTF_8)
+            } catch (_: Exception) {}
+        }
+    }
+
+    // TMDB Movie Genre ID Map
+    private val TMDB_GENRE_MAP = mapOf(
+        28 to "Action",
+        12 to "Adventure",
+        16 to "Animation",
+        35 to "Comedy",
+        80 to "Crime",
+        99 to "Documentary",
+        18 to "Drama",
+        10751 to "Family",
+        14 to "Fantasy",
+        36 to "History",
+        27 to "Horror",
+        10402 to "Music",
+        9648 to "Mystery",
+        10749 to "Romance",
+        878 to "Sci-Fi",
+        10770 to "TV Movie",
+        53 to "Thriller",
+        10752 to "War",
+        37 to "Western"
+    )
+
     /**
      * Resolves the entire TV series catalog and all episode metadata in a SINGLE HTTP query (~300ms)
      * instead of firing 150+ sequential HTTP requests.
@@ -109,33 +193,52 @@ object DesktopOnlineMetadataResolver {
                 val premiered = root.get("premiered")?.asString ?: ""
                 val releaseYear = premiered.take(4)
 
-                val imageObj = root.getAsJsonObject("image")
-                val posterUrl = imageObj?.get("original")?.asString
-                    ?: imageObj?.get("medium")?.asString
+                val imageElement = root.get("image")
+                val imageObj = if (imageElement != null && !imageElement.isJsonNull && imageElement.isJsonObject) {
+                    imageElement.asJsonObject
+                } else null
+                var posterUrl = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString
+                    ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString
                     ?: ""
+                if (posterUrl.startsWith("http://")) {
+                    posterUrl = posterUrl.replace("http://", "https://")
+                }
 
                 val episodeMap = mutableMapOf<Pair<Int, Int>, BatchEpisodeMetadata>()
-                val embedded = root.getAsJsonObject("_embedded")
+                val embeddedElement = root.get("_embedded")
+                val embedded = if (embeddedElement != null && !embeddedElement.isJsonNull && embeddedElement.isJsonObject) {
+                    embeddedElement.asJsonObject
+                } else null
                 val episodesArray = embedded?.getAsJsonArray("episodes")
 
                 episodesArray?.forEach { epElem ->
-                    val epObj = epElem.asJsonObject
-                    val season = epObj.get("season")?.asInt ?: 1
-                    val number = epObj.get("number")?.asInt ?: 1
-                    val epName = epObj.get("name")?.asString ?: "Episode $number"
-                    val epSummary = (epObj.get("summary")?.asString ?: "").replace(Regex("<.*?>"), "").trim()
-                    val runtimeMin = epObj.get("runtime")?.asLong ?: 45L
-                    val epImageObj = epObj.getAsJsonObject("image")
-                    val epThumb = epImageObj?.get("original")?.asString
-                        ?: epImageObj?.get("medium")?.asString
-                        ?: ""
+                    if (epElem.isJsonObject) {
+                        val epObj = epElem.asJsonObject
+                        val season = epObj.get("season")?.takeIf { !it.isJsonNull }?.asInt ?: 1
+                        val number = epObj.get("number")?.takeIf { !it.isJsonNull }?.asInt ?: 1
+                        val epName = epObj.get("name")?.takeIf { !it.isJsonNull }?.asString ?: "Episode $number"
+                        val epSummary = (epObj.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: "").replace(Regex("<.*?>"), "").trim()
+                        val runtimeMin = epObj.get("runtime")?.takeIf { !it.isJsonNull }?.asLong ?: 45L
+                        
+                        // Safe JsonNull guard: prevents ClassCastException when TVMaze has no episode still
+                        val epImageElement = epObj.get("image")
+                        val epImageObj = if (epImageElement != null && !epImageElement.isJsonNull && epImageElement.isJsonObject) {
+                            epImageElement.asJsonObject
+                        } else null
+                        var epThumb = epImageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString
+                            ?: epImageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString
+                            ?: ""
+                        if (epThumb.startsWith("http://")) {
+                            epThumb = epThumb.replace("http://", "https://")
+                        }
 
-                    episodeMap[Pair(season, number)] = BatchEpisodeMetadata(
-                        title = epName,
-                        synopsis = epSummary,
-                        durationMs = runtimeMin * 60_000L,
-                        thumbnailUrl = epThumb
-                    )
+                        episodeMap[Pair(season, number)] = BatchEpisodeMetadata(
+                            title = epName,
+                            synopsis = epSummary,
+                            durationMs = runtimeMin * 60_000L,
+                            thumbnailUrl = epThumb
+                        )
+                    }
                 }
 
                 return BatchSeriesMetadata(
@@ -154,7 +257,7 @@ object DesktopOnlineMetadataResolver {
         return BatchSeriesMetadata(
             title = seriesTitle,
             synopsis = "",
-            genres = "TV Series",
+            genres = "Series",
             releaseYear = "",
             posterUrl = "",
             episodesBySeasonAndNum = emptyMap()
@@ -326,9 +429,25 @@ object DesktopOnlineMetadataResolver {
             }
         }
 
+        // 2. Query TMDB Movie API (High-Resolution Theatrical Posters & Genres)
+        if (matchedPoster.isBlank()) {
+            for (candidate in searchCandidates) {
+                val tmdb = fetchFromTmdbMovie(candidate, releaseYear ?: matchedYear)
+                if (tmdb != null) {
+                    if (matchedTitle == null) matchedTitle = tmdb.officialTitle
+                    if (matchedPoster.isBlank() && tmdb.posterUrl.isNotBlank()) matchedPoster = tmdb.posterUrl
+                    if (matchedYear.isBlank() && tmdb.releaseYear.isNotBlank()) matchedYear = tmdb.releaseYear
+                    if (matchedGenre.isNullOrBlank() && tmdb.genre.isNotBlank() && tmdb.genre != "Drama") {
+                        matchedGenre = tmdb.genre
+                    }
+                    break
+                }
+            }
+        }
+
         val queryForWiki = matchedTitle ?: searchCandidates.firstOrNull() ?: cleanQuery
 
-        // 2. Query Wikipedia API if poster or genre is missing
+        // 3. Query Wikipedia API if poster or genre is missing
         if (matchedPoster.isBlank() || matchedGenre.isNullOrBlank()) {
             val wiki = fetchFromWikipedia(queryForWiki)
             if (wiki != null) {
@@ -344,7 +463,7 @@ object DesktopOnlineMetadataResolver {
             }
         }
 
-        // 3. Query iTunes API as fallback
+        // 4. Query iTunes API as fallback
         if (matchedPoster.isBlank() || matchedGenre.isNullOrBlank()) {
             val itunes = fetchFromItunes(queryForWiki, matchedYear)
             if (itunes != null) {
@@ -430,6 +549,89 @@ object DesktopOnlineMetadataResolver {
                 }
             }
         } catch (_: Exception) {
+        } finally {
+            connection?.disconnect()
+        }
+        return null
+    }
+
+    /**
+     * Resolves movie title, high-res poster (w780), release year, and genres from TMDB.
+     */
+    private fun fetchFromTmdbMovie(query: String, targetYear: String?): MovieMetadata? {
+        var connection: HttpURLConnection? = null
+        try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val yearParam = if (!targetYear.isNullOrBlank()) "&primary_release_year=$targetYear" else ""
+            val endpoint = "https://api.themoviedb.org/3/search/movie?api_key=$TMDB_API_KEY&query=$encoded$yearParam"
+
+            connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                setRequestProperty("Accept", "application/json")
+            }
+
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                val root = JsonParser.parseString(jsonText).asJsonObject
+                val results = root.getAsJsonArray("results") ?: return null
+
+                var bestMatch: com.google.gson.JsonObject? = null
+
+                for (i in 0 until results.size()) {
+                    val item = results.get(i).asJsonObject
+                    val title = item.get("title")?.takeIf { !it.isJsonNull }?.asString 
+                        ?: item.get("original_title")?.takeIf { !it.isJsonNull }?.asString 
+                        ?: ""
+                    val releaseDate = item.get("release_date")?.takeIf { !it.isJsonNull }?.asString ?: ""
+
+                    if (isTitleSimilar(query, title)) {
+                        if (!targetYear.isNullOrBlank() && releaseDate.startsWith(targetYear)) {
+                            bestMatch = item
+                            break
+                        }
+                        if (bestMatch == null) {
+                            bestMatch = item
+                        }
+                    }
+                }
+
+                // Fallback to top result if title is sufficiently similar
+                if (bestMatch == null && results.size() > 0) {
+                    val first = results.get(0).asJsonObject
+                    val firstTitle = first.get("title")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    if (isTitleSimilar(query, firstTitle)) {
+                        bestMatch = first
+                    }
+                }
+
+                if (bestMatch != null) {
+                    val officialTitle = bestMatch.get("title")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: query
+                    val posterPath = bestMatch.get("poster_path")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val posterUrl = if (posterPath.isNotBlank()) "$TMDB_IMAGE_BASE$posterPath" else ""
+                    val releaseYear = bestMatch.get("release_date")?.takeIf { !it.isJsonNull }?.asString?.take(4) ?: ""
+
+                    val genreIds = bestMatch.getAsJsonArray("genre_ids")
+                    val genresList = mutableListOf<String>()
+                    genreIds?.forEach { idElement ->
+                        if (!idElement.isJsonNull) {
+                            TMDB_GENRE_MAP[idElement.asInt]?.let { genresList.add(it) }
+                        }
+                    }
+                    val cleanGenre = if (genresList.isNotEmpty()) genresList.take(3).joinToString(" • ") else "Drama"
+
+                    return MovieMetadata(
+                        officialTitle = officialTitle,
+                        posterUrl = posterUrl,
+                        releaseYear = releaseYear,
+                        genre = cleanGenre
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            System.err.println("[TMDB] Movie lookup failed for $query: ${e.message}")
         } finally {
             connection?.disconnect()
         }
@@ -901,9 +1103,15 @@ object DesktopOnlineMetadataResolver {
                             genresArr.joinToString(" • ") { it.asString }
                         } else "Drama • Thriller"
 
-                        val imageObj = chosenShow.getAsJsonObject("image")
-                        val poster = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString 
+                        val imageElement = chosenShow.get("image")
+                        val imageObj = if (imageElement != null && !imageElement.isJsonNull && imageElement.isJsonObject) {
+                            imageElement.asJsonObject
+                        } else null
+                        var poster = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString 
                             ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        if (poster.startsWith("http://")) {
+                            poster = poster.replace("http://", "https://")
+                        }
                         val premiered = chosenShow.get("premiered")?.takeIf { !it.isJsonNull }?.asString?.take(4) ?: "2024"
                         val summaryRaw = chosenShow.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
                         val synopsis = cleanHtml(summaryRaw)
@@ -958,22 +1166,38 @@ object DesktopOnlineMetadataResolver {
                     val epObj = elem.asJsonObject
                     val season = epObj.get("season")?.takeIf { !it.isJsonNull }?.asInt ?: 1
                     val number = epObj.get("number")?.takeIf { !it.isJsonNull }?.asInt ?: 1
-                    val epName = epObj.get("name")?.takeIf { !it.isJsonNull }?.asString ?: "Episode $number"
+                    val epName = epObj.get("name")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: "Episode $number"
                     val runtime = epObj.get("runtime")?.takeIf { !it.isJsonNull }?.asLong ?: 45L
-                    val imgObj = epObj.getAsJsonObject("image")
-                    val thumb = imgObj?.get("original")?.takeIf { !it.isJsonNull }?.asString 
-                        ?: imgObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    
+                    // Safe JsonNull guard: prevents ClassCastException when TVMaze has no episode still
+                    val imageElement = epObj.get("image")
+                    val imageObj = if (imageElement != null && !imageElement.isJsonNull && imageElement.isJsonObject) {
+                        imageElement.asJsonObject
+                    } else {
+                        null
+                    }
+                    var thumb = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString 
+                        ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString 
+                        ?: ""
+                    
+                    // Upgrade HTTP to HTTPS for secure CDN retrieval
+                    if (thumb.startsWith("http://")) {
+                        thumb = thumb.replace("http://", "https://")
+                    }
+
                     val summaryRaw = epObj.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
                     val synopsis = cleanHtml(summaryRaw)
 
-                    map[Pair(season, number)] = EpisodeOnlineMeta(
-                        officialTitle = epName,
-                        durationMinutes = runtime,
-                        synopsis = synopsis,
-                        thumbnailUrl = thumb,
-                        seasonNumber = season,
-                        episodeNumber = number
-                    )
+                    if (season > 0 && number > 0 && epName.isNotBlank()) {
+                        map[Pair(season, number)] = EpisodeOnlineMeta(
+                            officialTitle = epName,
+                            thumbnailUrl = thumb,
+                            durationMinutes = runtime,
+                            synopsis = synopsis,
+                            seasonNumber = season,
+                            episodeNumber = number
+                        )
+                    }
                 }
                 println("[DesktopOnlineMetadataResolver] Bulk-indexed ${map.size} official episodes from TVMaze (Show ID: $tvMazeShowId).")
             }
@@ -984,6 +1208,9 @@ object DesktopOnlineMetadataResolver {
         showEpisodesCache[tvMazeShowId] = map
         map
     }
+
+    suspend fun fetchAllEpisodesForShow(tvMazeShowId: Long): Map<Pair<Int, Int>, EpisodeOnlineMeta> =
+        fetchShowEpisodesBulk(tvMazeShowId)
 
     /**
      * Aggressively scrubs torrent/scene tags from raw filenames so ugly tags NEVER appear on screen.
@@ -1031,76 +1258,218 @@ object DesktopOnlineMetadataResolver {
         seasonNumber: Int,
         episodeNumber: Int,
         rawFileName: String
-    ): EpisodeOnlineMeta = resolveEpisode(
-        seriesTitle = seriesTitle,
-        tvMazeId = -1L,
+    ): EpisodeMetadata = resolveEpisode(
+        seriesName = seriesTitle,
+        tvMazeSeriesId = -1L,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
         rawFileName = rawFileName
     )
 
     suspend fun resolveEpisode(
-        seriesTitle: String = "",
-        tvMazeId: Long = -1L,
+        seriesName: String = "",
+        tvMazeSeriesId: Long = -1L,
         seasonNumber: Int,
         episodeNumber: Int,
         rawFileName: String,
-        tvMazeSeriesId: Long = tvMazeId,
-        seriesName: String = seriesTitle
-    ): EpisodeOnlineMeta = withContext(Dispatchers.IO) {
-        val effectiveShowId = if (tvMazeId > 0L) tvMazeId else tvMazeSeriesId
+        seriesTitle: String = seriesName,
+        tvMazeId: Long = tvMazeSeriesId
+    ): EpisodeMetadata = withContext(Dispatchers.IO) {
+        val effectiveTitle = seriesName.ifBlank { seriesTitle }
+        val effectiveShowId = if (tvMazeSeriesId > 0L) tvMazeSeriesId else if (tvMazeId > 0L) tvMazeId else resolveSeries(effectiveTitle).tvMazeId
         val cacheKey = "$effectiveShowId:S${seasonNumber}E${episodeNumber}"
         episodeCache[cacheKey]?.let { return@withContext it }
 
-        val cleanFallbackTitle = cleanEpisodeFallbackTitle(rawFileName, episodeNumber, seriesTitle.ifBlank { seriesName })
+        var tvMazeMeta: EpisodeMetadata? = null
 
         if (effectiveShowId > 0L) {
-            try {
-                val endpoint = "https://api.tvmaze.com/shows/$effectiveShowId/episodebynumber?season=$seasonNumber&number=$episodeNumber"
-                val conn = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                    setRequestProperty("User-Agent", "Clotube-Desktop/1.0")
-                }
+            var episodesMap = showEpisodesCache[effectiveShowId]
+            if (episodesMap == null) {
+                episodesMap = fetchAllEpisodesForShow(effectiveShowId)
+                showEpisodesCache[effectiveShowId] = episodesMap
+            }
+            tvMazeMeta = episodesMap[Pair(seasonNumber, episodeNumber)]
 
-                if (conn.responseCode in 200..299) {
-                    val json = conn.inputStream.bufferedReader().use { it.readText() }
-                    val root = JsonParser.parseString(json).asJsonObject
+            // If bulk map didn't have it, try single episode by number
+            if (tvMazeMeta == null) {
+                try {
+                    val endpoint = "https://api.tvmaze.com/shows/$effectiveShowId/episodebynumber?season=$seasonNumber&number=$episodeNumber"
+                    val conn = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        setRequestProperty("User-Agent", "Clotube-Desktop/1.0")
+                    }
+                    if (conn.responseCode in 200..299) {
+                        val json = conn.inputStream.bufferedReader().use { it.readText() }
+                        val root = JsonParser.parseString(json).asJsonObject
 
-                    val epName = root.get("name")?.takeIf { !it.isJsonNull }?.asString ?: cleanFallbackTitle
-                    val runtime = root.get("runtime")?.takeIf { !it.isJsonNull }?.asLong ?: 45L
-                    val rawSummary = root.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
-                    val synopsis = cleanHtml(rawSummary)
+                        val epName = root.get("name")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        val runtime = root.get("runtime")?.takeIf { !it.isJsonNull }?.asLong ?: 45L
+                        val rawSummary = root.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        val synopsis = cleanHtml(rawSummary)
 
-                    val imageObj = root.getAsJsonObject("image")
-                    val thumbUrl = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString
-                        ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        val imageElement = root.get("image")
+                        val imageObj = if (imageElement != null && !imageElement.isJsonNull && imageElement.isJsonObject) {
+                            imageElement.asJsonObject
+                        } else null
+                        var thumbUrl = imageObj?.get("original")?.takeIf { !it.isJsonNull }?.asString
+                            ?: imageObj?.get("medium")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        if (thumbUrl.startsWith("http://")) {
+                            thumbUrl = thumbUrl.replace("http://", "https://")
+                        }
 
-                    val meta = EpisodeOnlineMeta(
-                        officialTitle = epName,
-                        durationMinutes = runtime,
-                        synopsis = synopsis,
-                        thumbnailUrl = thumbUrl,
-                        seasonNumber = seasonNumber,
-                        episodeNumber = episodeNumber
-                    )
-                    episodeCache[cacheKey] = meta
-                    return@withContext meta
-                }
-            } catch (e: Exception) {
-                System.err.println("[DesktopOnlineMetadataResolver] Failed to resolve episode S${seasonNumber}E${episodeNumber}: ${e.message}")
+                        if (epName.isNotBlank() || thumbUrl.isNotBlank()) {
+                            tvMazeMeta = EpisodeMetadata(
+                                officialTitle = epName.ifBlank { cleanEpisodeTitleFromFileName(rawFileName, seasonNumber, episodeNumber) },
+                                durationMinutes = runtime,
+                                synopsis = synopsis,
+                                thumbnailUrl = thumbUrl,
+                                seasonNumber = seasonNumber,
+                                episodeNumber = episodeNumber
+                            )
+                        }
+                    }
+                } catch (_: Exception) {}
             }
         }
 
-        val fallback = EpisodeOnlineMeta(
-            officialTitle = cleanFallbackTitle,
-            durationMinutes = 45L,
-            synopsis = "",
+        // Check if TVMaze already provided a valid, non-blank thumbnail still
+        if (tvMazeMeta != null && tvMazeMeta.thumbnailUrl.isNotBlank()) {
+            episodeCache[cacheKey] = tvMazeMeta
+            return@withContext tvMazeMeta
+        }
+
+        // ====================================================================
+        // SECONDARY FALLBACK: Resolve Episode Still from TMDB
+        // ====================================================================
+        val tmdbStill = fetchTmdbEpisodeStill(effectiveTitle, seasonNumber, episodeNumber)
+        if (tmdbStill.isNotBlank()) {
+            val resolved = (tvMazeMeta ?: EpisodeMetadata(
+                officialTitle = cleanEpisodeTitleFromFileName(rawFileName, seasonNumber, episodeNumber),
+                thumbnailUrl = tmdbStill,
+                durationMinutes = 0L,
+                seasonNumber = seasonNumber,
+                episodeNumber = episodeNumber
+            )).copy(thumbnailUrl = tmdbStill)
+            episodeCache[cacheKey] = resolved
+            return@withContext resolved
+        }
+
+        // Return TVMaze metadata (or filename fallback) if TMDB also has no still
+        val fallbackTitle = cleanEpisodeTitleFromFileName(rawFileName, seasonNumber, episodeNumber)
+        val finalMeta = tvMazeMeta ?: EpisodeMetadata(
+            officialTitle = fallbackTitle,
+            thumbnailUrl = "",
+            durationMinutes = 0L,
             seasonNumber = seasonNumber,
             episodeNumber = episodeNumber
         )
-        episodeCache[cacheKey] = fallback
-        fallback
+        episodeCache[cacheKey] = finalMeta
+        finalMeta
+    }
+
+    /**
+     * Resolves an episode still from TMDB, caching show IDs and entire seasons in memory.
+     */
+    fun fetchTmdbEpisodeStill(
+        seriesName: String,
+        seasonNumber: Int,
+        episodeNumber: Int
+    ): String {
+        try {
+            val cleanTitle = cleanSeriesTitle(seriesName)
+            val showId = tmdbShowIdCache.computeIfAbsent(cleanTitle.lowercase()) {
+                val fetched = fetchTmdbShowId(cleanTitle)
+                if (fetched > 0L) persistTmdbCacheAsync()
+                fetched
+            }
+            if (showId <= 0L) return ""
+
+            val seasonKey = Pair(showId, seasonNumber)
+            val seasonStills = tmdbSeasonStillsCache.computeIfAbsent(seasonKey) {
+                val fetched = fetchTmdbSeasonStills(showId, seasonNumber)
+                if (fetched.isNotEmpty()) persistTmdbCacheAsync()
+                fetched
+            }
+
+            return seasonStills[episodeNumber] ?: ""
+        } catch (e: Exception) {
+            return ""
+        }
+    }
+
+    /**
+     * Finds the TMDB Show ID via /search/tv.
+     */
+    fun fetchTmdbShowId(seriesTitle: String): Long {
+        var connection: HttpURLConnection? = null
+        try {
+            val encoded = URLEncoder.encode(seriesTitle, "UTF-8")
+            val endpoint = "https://api.themoviedb.org/3/search/tv?api_key=$TMDB_API_KEY&query=$encoded"
+            connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                val root = JsonParser.parseString(jsonText).asJsonObject
+                val results = root.getAsJsonArray("results")
+                if (results != null && results.size() > 0) {
+                    for (i in 0 until results.size()) {
+                        val item = results.get(i).asJsonObject
+                        val name = item.get("name")?.asString ?: ""
+                        if (isTitleSimilar(seriesTitle, name)) {
+                            return item.get("id")?.asLong ?: -1L
+                        }
+                    }
+                    return results.get(0).asJsonObject.get("id")?.asLong ?: -1L
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            connection?.disconnect()
+        }
+        return -1L
+    }
+
+    /**
+     * Batch-fetches all episode stills for an entire season in a single request.
+     */
+    fun fetchTmdbSeasonStills(showId: Long, seasonNumber: Int): Map<Int, String> {
+        val resultMap = mutableMapOf<Int, String>()
+        var connection: HttpURLConnection? = null
+        try {
+            val endpoint = "https://api.themoviedb.org/3/tv/$showId/season/$seasonNumber?api_key=$TMDB_API_KEY"
+            connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                val root = JsonParser.parseString(jsonText).asJsonObject
+                val episodesArray = root.getAsJsonArray("episodes") ?: return emptyMap()
+
+                for (i in 0 until episodesArray.size()) {
+                    val epObj = episodesArray.get(i).asJsonObject
+                    val epNum = epObj.get("episode_number")?.asInt ?: -1
+                    val stillPath = epObj.get("still_path")?.takeIf { !it.isJsonNull }?.asString ?: ""
+
+                    if (epNum > 0 && stillPath.isNotBlank()) {
+                        resultMap[epNum] = "$TMDB_IMAGE_BASE$stillPath"
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            connection?.disconnect()
+        }
+        return resultMap
     }
 
     private fun cleanEpisodeFileName(fileName: String, episodeNumber: Int): String {
@@ -1119,7 +1488,7 @@ object DesktopOnlineMetadataResolver {
         posterUrl = "",
         backdropUrl = "",
         releaseYear = "2024",
-        genres = "TV Series",
+        genres = "Series",
         synopsis = "Streamed directly from your private Google Drive collection."
     )
 

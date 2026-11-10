@@ -54,6 +54,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,12 +88,13 @@ private data class SearchEpisodeMatch(
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
     MOVIES("Movies", Icons.Rounded.Movie),
-    TV_SERIES("TV Series", Icons.Rounded.Tv),
+    SERIES("Series", Icons.Rounded.Tv),
     RECENTS("Recents", Icons.Rounded.History),
     SETTINGS("Settings", Icons.Rounded.Settings);
 
     companion object {
-        val SERIES get() = TV_SERIES
+        // Compatibility alias so legacy DesktopNavSection.TV_SERIES calls resolve to SERIES
+        val TV_SERIES: DesktopNavSection get() = SERIES
     }
 }
 
@@ -322,7 +324,7 @@ fun DesktopHomeScreen(
                                     if (matchedSeries.isNotEmpty()) {
                                         item(key = "hdr_series") {
                                             Text(
-                                                text = "TV SERIES",
+                                                text = "SERIES",
                                                 color = Color(0xFF38BDF8),
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
@@ -653,7 +655,7 @@ fun DesktopHomeScreen(
                                     }
                                 )
                             }
-                            DesktopNavSection.TV_SERIES -> {
+                            DesktopNavSection.SERIES -> {
                                 FigmaSeriesContent(
                                     series = filteredSeries,
                                     userEmail = userEmail,
@@ -733,7 +735,7 @@ private fun SearchResultRowCard(
 
     val borderColor by animateColorAsState(
         targetValue = when {
-            isHovered -> Color(0xFF38BDF8)
+            isHovered -> Color(0xFF334155)
             else -> Color(0xFF1E2838)
         },
         animationSpec = tween(180),
@@ -750,8 +752,8 @@ private fun SearchResultRowCard(
             .shadow(
                 elevation = if (isHovered) 8.dp else 0.dp,
                 shape = RoundedCornerShape(8.dp),
-                spotColor = Color(0xFF00E5FF).copy(alpha = 0.25f),
-                ambientColor = Color(0xFF38BDF8).copy(alpha = 0.2f)
+                spotColor = Color(0x99000000),
+                ambientColor = Color(0x40000000)
             )
             .clip(RoundedCornerShape(8.dp))
             .background(if (isHovered) Color(0xFF171F30) else Color(0xFF131824))
@@ -783,7 +785,7 @@ private fun SearchResultRowCard(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+                    .background(Color.White.copy(alpha = clickFlashAlpha.value * 0.35f))
             )
         }
     }
@@ -801,103 +803,196 @@ private fun DesktopFigmaSidebar(
             .background(Color(0xFF090C12))
             .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 24.dp)
     ) {
+        // Brand Logo Row
         Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp)
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Image(
-                painter = androidx.compose.ui.res.painterResource("app_icon.png"),
-                contentDescription = "Clotube Logo",
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(RoundedCornerShape(8.dp))
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                com.clotube.desktop.ui.components.ClotubeGlyphIcon(size = 32.dp)
+                Text(
+                    text = "Clotube",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = (-0.3).sp
+                )
+            }
 
-            Text(
-                text = "Clotube",
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 0.5.sp
+            Icon(
+                imageVector = Icons.Rounded.Menu,
+                contentDescription = "Menu",
+                tint = Color(0xFF64748B),
+                modifier = Modifier.size(18.dp)
             )
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(28.dp))
 
+        // BROWSE SECTION OVERLINE
         Text(
             text = "BROWSE",
-            color = Color(0xFF475569),
+            color = Color(0xFF64748B),
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 1.4.sp,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            letterSpacing = 1.6.sp,
+            modifier = Modifier.padding(horizontal = 12.dp)
         )
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        DesktopNavSection.entries.filter { it != DesktopNavSection.SETTINGS }.forEach { section ->
-            val isSelected = activeSection == section
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 3.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onSelectSection(section) }
-                    .pointerHoverIcon(PointerIcon.Hand),
-                shape = RoundedCornerShape(10.dp),
-                color = if (isSelected) Color(0xFF101D30) else Color.Transparent,
-                border = if (isSelected) BorderStroke(1.dp, Color(0xFF1D3557)) else null
-            ) {
-                Row(
+        // Main Navigation List
+        val navItems = listOf(
+            DesktopNavSection.HOME,
+            DesktopNavSection.MOVIES,
+            DesktopNavSection.SERIES,
+            DesktopNavSection.RECENTS
+        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            navItems.forEach { section ->
+                val isSelected = activeSection == section
+                val interactionSource = remember { MutableInteractionSource() }
+                val isHovered by interactionSource.collectIsHoveredAsState()
+
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(
+                            interactionSource = interactionSource,
+                            indication = null
+                        ) { onSelectSection(section) }
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    shape = RoundedCornerShape(10.dp),
+                    color = when {
+                        isSelected -> Color(0xFF131824)
+                        isHovered -> Color(0xFF0E131D)
+                        else -> Color.Transparent
+                    },
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isSelected) Color(0xFF1E283A) else Color.Transparent
+                    )
                 ) {
-                    Icon(
-                        imageVector = section.icon,
-                        contentDescription = section.label,
-                        tint = if (isSelected) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = section.label,
-                        color = if (isSelected) Color.White else Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Left 3dp Accent Indicator Pill for selected item
+                        Box(
+                            modifier = Modifier
+                                .width(3.dp)
+                                .height(16.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(if (isSelected) Color(0xFF60A5FA) else Color.Transparent)
+                        )
+
+                        Spacer(modifier = Modifier.width(9.dp))
+
+                        Icon(
+                            imageVector = section.icon,
+                            contentDescription = section.label,
+                            tint = when {
+                                isSelected -> Color(0xFF60A5FA)
+                                isHovered -> Color(0xFFCBD5E1)
+                                else -> Color(0xFF64748B)
+                            },
+                            modifier = Modifier.size(18.dp)
+                        )
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Text(
+                            text = section.label,
+                            color = when {
+                                isSelected -> Color.White
+                                isHovered -> Color(0xFFE2E8F0)
+                                else -> Color(0xFF94A3B8)
+                            },
+                            fontSize = 13.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
+                        )
+                    }
                 }
             }
         }
 
         Spacer(modifier = Modifier.weight(1f))
 
+        // Bottom Settings Navigation Item
         val isSettingsSelected = activeSection == DesktopNavSection.SETTINGS
-        Row(
+        val settingsInteraction = remember { MutableInteractionSource() }
+        val isSettingsHovered by settingsInteraction.collectIsHoveredAsState()
+
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(if (isSettingsSelected) Color(0xFF101D30) else Color.Transparent)
-                .clickable { onSelectSection(DesktopNavSection.SETTINGS) }
-                .pointerHoverIcon(PointerIcon.Hand)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                .clickable(
+                    interactionSource = settingsInteraction,
+                    indication = null
+                ) { onSelectSection(DesktopNavSection.SETTINGS) }
+                .pointerHoverIcon(PointerIcon.Hand),
+            shape = RoundedCornerShape(10.dp),
+            color = when {
+                isSettingsSelected -> Color(0xFF131824)
+                isSettingsHovered -> Color(0xFF0E131D)
+                else -> Color.Transparent
+            },
+            border = BorderStroke(
+                width = 1.dp,
+                color = if (isSettingsSelected) Color(0xFF1E283A) else Color.Transparent
+            )
         ) {
-            Icon(
-                imageVector = Icons.Rounded.Settings,
-                contentDescription = "Settings",
-                tint = if (isSettingsSelected) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                modifier = Modifier.size(18.dp)
-            )
-            Text(
-                text = "Settings",
-                color = if (isSettingsSelected) Color.White else Color(0xFF94A3B8),
-                fontSize = 13.sp,
-                fontWeight = if (isSettingsSelected) FontWeight.Bold else FontWeight.Medium
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(16.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(if (isSettingsSelected) Color(0xFF60A5FA) else Color.Transparent)
+                )
+
+                Spacer(modifier = Modifier.width(9.dp))
+
+                Icon(
+                    imageVector = Icons.Rounded.Settings,
+                    contentDescription = "Settings",
+                    tint = when {
+                        isSettingsSelected -> Color(0xFF60A5FA)
+                        isSettingsHovered -> Color(0xFFCBD5E1)
+                        else -> Color(0xFF64748B)
+                    },
+                    modifier = Modifier.size(18.dp)
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Text(
+                    text = "Settings",
+                    color = when {
+                        isSettingsSelected -> Color.White
+                        isSettingsHovered -> Color(0xFFE2E8F0)
+                        else -> Color(0xFF94A3B8)
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = if (isSettingsSelected) FontWeight.SemiBold else FontWeight.Medium
+                )
+            }
         }
     }
 }
@@ -932,13 +1027,14 @@ private fun DesktopFigmaTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
+        // Search Input Pill
         Surface(
             modifier = Modifier
                 .width(420.dp)
                 .height(40.dp),
             shape = RoundedCornerShape(20.dp),
-            color = Color(0xFF10141F),
-            border = BorderStroke(1.dp, Color(0xFF1E2638))
+            color = Color(0xFF0E121B),
+            border = BorderStroke(1.dp, Color(0xFF1A2230))
         ) {
             Row(
                 modifier = Modifier
@@ -964,14 +1060,13 @@ private fun DesktopFigmaTopBar(
                         singleLine = true,
                         textStyle = androidx.compose.ui.text.TextStyle(
                             color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
+                            fontSize = 13.sp
                         ),
-                        modifier = Modifier.weight(1f).focusRequester(searchFocusRequester),
+                        modifier = Modifier.fillMaxWidth().focusRequester(searchFocusRequester),
                         decorationBox = { innerTextField ->
                             if (searchQuery.isEmpty()) {
                                 Text(
-                                    text = "Search movies, series, episodes...",
+                                    text = "Search movies, series...",
                                     color = Color(0xFF64748B),
                                     fontSize = 13.sp
                                 )
@@ -995,8 +1090,8 @@ private fun DesktopFigmaTopBar(
                 } else {
                     Surface(
                         shape = RoundedCornerShape(5.dp),
-                        color = Color(0xFF192030),
-                        border = BorderStroke(1.dp, Color(0xFF283248))
+                        color = Color(0xFF141924),
+                        border = BorderStroke(1.dp, Color(0xFF222B3D))
                     ) {
                         Text(
                             text = "⌘ K",
@@ -1010,17 +1105,19 @@ private fun DesktopFigmaTopBar(
             }
         }
 
+        // Right Actions (Restrained Online Status Pill + Account)
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // STUDIO ONLINE STATUS PILL (Non-fluorescent)
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = Color(0xFF091F14),
-                border = BorderStroke(1.dp, Color(0xFF134E2F))
+                color = Color(0xFF0E131C),
+                border = BorderStroke(1.dp, Color(0xFF1B2433))
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
@@ -1028,151 +1125,92 @@ private fun DesktopFigmaTopBar(
                         modifier = Modifier
                             .size(6.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF22C55E))
+                            .background(Color(0xFF10B981)) // Quiet emerald status dot
                     )
                     Icon(
                         imageVector = Icons.Rounded.Wifi,
                         contentDescription = "Online",
-                        tint = Color(0xFF22C55E),
-                        modifier = Modifier.size(14.dp)
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(13.dp)
                     )
                     Text(
                         text = "Online",
-                        color = Color(0xFF22C55E),
+                        color = Color(0xFFCBD5E1),
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.Medium
                     )
                 }
             }
 
             Box {
-                Box(
+                Row(
                     modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.linearGradient(
-                                listOf(Color(0xFF4F46E5), Color(0xFF7C3AED))
-                            )
-                        )
-                        .border(1.5.dp, Color(0xFF38BDF8), CircleShape)
+                        .clip(RoundedCornerShape(24.dp))
                         .clickable { showAccountMenu = true }
-                        .pointerHoverIcon(PointerIcon.Hand),
-                    contentAlignment = Alignment.Center
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (avatarBitmap != null) {
-                        Image(
-                            bitmap = avatarBitmap,
-                            contentDescription = userName,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (avatarBitmap != null) {
+                            Image(
+                                bitmap = avatarBitmap,
+                                contentDescription = userName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Text(
+                                text = initials,
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Column {
                         Text(
-                            text = initials,
+                            text = userName,
                             color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "Google account",
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            maxLines = 1
                         )
                     }
+
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = "Account menu",
+                        tint = Color(0xFF64748B),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
 
                 DropdownMenu(
                     expanded = showAccountMenu,
                     onDismissRequest = { showAccountMenu = false },
                     modifier = Modifier
-                        .background(Color(0xFF10141F))
-                        .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(12.dp))
-                        .widthIn(min = 240.dp)
+                        .background(Color(0xFF0E131C))
+                        .border(1.dp, Color(0xFF1E2838), RoundedCornerShape(8.dp))
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(42.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        Brush.linearGradient(
-                                            listOf(Color(0xFF4F46E5), Color(0xFF7C3AED))
-                                        )
-                                    )
-                                    .border(1.5.dp, Color(0xFF38BDF8), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (avatarBitmap != null) {
-                                    Image(
-                                        bitmap = avatarBitmap,
-                                        contentDescription = userName,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                } else {
-                                    Text(
-                                        text = initials,
-                                        color = Color.White,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = userName,
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = userEmail,
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF161F2E),
-                            border = BorderStroke(1.dp, Color(0xFF23324A))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF22C55E))
-                                )
-                                Text(
-                                    text = "Google Account Connected",
-                                    color = Color(0xFF38BDF8),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(color = Color(0xFF1E2838), thickness = 1.dp)
-
                     DropdownMenuItem(
                         text = {
                             Row(
@@ -1182,7 +1220,7 @@ private fun DesktopFigmaTopBar(
                                 Icon(
                                     imageVector = Icons.Rounded.Settings,
                                     contentDescription = "Settings",
-                                    tint = Color(0xFF38BDF8),
+                                    tint = Color(0xFF94A3B8),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(
@@ -1198,9 +1236,7 @@ private fun DesktopFigmaTopBar(
                             onOpenSettings()
                         }
                     )
-
                     HorizontalDivider(color = Color(0xFF1E2838), thickness = 1.dp)
-
                     DropdownMenuItem(
                         text = {
                             Row(
@@ -1210,12 +1246,12 @@ private fun DesktopFigmaTopBar(
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Rounded.Logout,
                                     contentDescription = "Sign Out",
-                                    tint = Color(0xFFF87171),
+                                    tint = Color(0xFFFB7185),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = "Sign Out",
-                                    color = Color(0xFFF87171),
+                                    text = "Sign Out ($userEmail)",
+                                    color = Color(0xFFFB7185),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -1260,14 +1296,14 @@ private fun ContinueWatchingShelf(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFF00E5FF))
+                        .background(Color(0xFF94A3B8))
                 )
                 Text(
                     text = "CONTINUE WATCHING",
-                    color = Color(0xFF38BDF8),
-                    fontSize = 11.sp,
+                    color = Color(0xFF94A3B8),
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.3.sp
+                    letterSpacing = 1.6.sp
                 )
             }
 
@@ -1278,13 +1314,26 @@ private fun ContinueWatchingShelf(
             )
         }
 
-        Row(
+        // CAROUSEL LAZYROW WITH 16.dp OVERDRAW BUFFER
+        LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
+                .layout { measurable, constraints ->
+                    // Expand measurable width by 16dp on left and right so scaled cards never hit the clip boundary
+                    val overdraw = 16.dp.roundToPx()
+                    val placeable = measurable.measure(
+                        constraints.copy(
+                            maxWidth = if (constraints.hasBoundedWidth) constraints.maxWidth + (overdraw * 2) else constraints.maxWidth
+                        )
+                    )
+                    layout(constraints.maxWidth, placeable.height) {
+                        placeable.placeRelative(-overdraw, 0)
+                    }
+                },
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            displayItems.forEachIndexed { index, item ->
+            itemsIndexed(displayItems, key = { _, it -> it.mediaId }) { index, item ->
                 FluidEntranceContainer(index = index) {
                     ContinueWatchingCard(
                         item = item,
@@ -1316,24 +1365,32 @@ private fun ContinueWatchingCard(
 
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.965f
-            isHovered -> 1.035f
+            isPressed -> 0.97f
+            isHovered -> 1.03f
             else -> 1.0f
         },
-        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
-                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
+        animationSpec = com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
         label = "continue_card_scale"
     )
 
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isPressed -> Color(0xFF00E5FF)
-            isHovered -> Color(0xFF38BDF8)
-            else -> Color(0xFF1E2838)
-        },
-        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
-        label = "continue_card_border"
-    )
+    // Studio Top-Lit Glass Border (Replaces cyan rectangle box)
+    val hoveredBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0x55FFFFFF), // Subtle top rim light
+                Color(0x14FFFFFF)  // Fades softly into shadow at bottom
+            )
+        )
+    }
+
+    val defaultBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF222B3D),
+                Color(0xFF131824)
+            )
+        )
+    }
 
     val posterBitmap = rememberThumbnailBitmap(
         primaryUrl = item.thumbnailUrl,
@@ -1375,17 +1432,21 @@ private fun ContinueWatchingCard(
             .graphicsLayer {
                 scaleX = cardScale
                 scaleY = cardScale
+                clip = false
             }
             .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
+                elevation = if (isHovered) 14.dp else 3.dp,
                 shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+                ambientColor = Color(0x40000000),
+                spotColor = Color(0x99000000)
             )
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF0F141F))
             .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                border = BorderStroke(
+                    width = 1.dp,
+                    brush = if (isHovered || isPressed) hoveredBorderBrush else defaultBorderBrush
+                ),
                 shape = RoundedCornerShape(12.dp)
             )
             .pointerHoverIcon(PointerIcon.Hand)
@@ -1418,7 +1479,7 @@ private fun ContinueWatchingCard(
                 ) {
                     Text(
                         text = item.title.take(1),
-                        color = Color(0xFF38BDF8),
+                        color = Color(0xFF94A3B8),
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -1457,7 +1518,7 @@ private fun ContinueWatchingCard(
                 ) {
                     Text(
                         text = badgeText,
-                        color = Color(0xFF00E5FF),
+                        color = Color(0xFFCBD5E1),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
@@ -1481,23 +1542,29 @@ private fun ContinueWatchingCard(
                 }
             }
 
-            // Hover Play Overlay
+            // Studio Frosted Glass Play Button on Hover (Replaces cyan blob)
             if (isHovered) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xCC00E5FF))
-                        .shadow(12.dp, CircleShape),
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = "Play",
-                        tint = Color.Black,
-                        modifier = Modifier.size(28.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xD90A0E17))
+                            .border(1.dp, Color(0x33FFFFFF), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
             }
 
@@ -1528,12 +1595,12 @@ private fun ContinueWatchingCard(
                     }
                 }
 
-                // Bottom 3dp Progress Bar
+                // Bottom Progress Bar: Clean Ice-to-Cobalt Gradient (Restrained)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(3.dp)
-                        .background(Color(0x551E2838))
+                        .background(Color(0x331E2838))
                 ) {
                     Box(
                         modifier = Modifier
@@ -1541,7 +1608,7 @@ private fun ContinueWatchingCard(
                             .fillMaxWidth(item.progressFraction.coerceIn(0.02f, 1f))
                             .background(
                                 Brush.horizontalGradient(
-                                    listOf(Color(0xFF00E5FF), Color(0xFF2563EB))
+                                    listOf(Color(0xFF2563EB), Color(0xFF60A5FA))
                                 )
                             )
                     )
@@ -1553,7 +1620,7 @@ private fun ContinueWatchingCard(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+                        .background(Color.White.copy(alpha = clickFlashAlpha.value * 0.4f))
                 )
             }
         }
@@ -1730,8 +1797,8 @@ private fun FigmaHomeContent(
             )
         } else if (continueWatching.isNotEmpty()) {
             FigmaCarouselSection(
-                overline = "PICK UP WHERE YOU LEFT OFF",
-                title = "Continue watching",
+                overline = "CONTINUE WATCHING",
+                title = "Continue Watching",
                 actionLabel = "View all",
                 items = continueWatching.take(5),
                 accessToken = accessToken,
@@ -1759,9 +1826,58 @@ private fun FigmaHomeContent(
                 actionLabel = "View all",
                 items = series.take(5),
                 accessToken = accessToken,
-                onActionClick = { onNavigateSection(DesktopNavSection.TV_SERIES) },
+                onActionClick = { onNavigateSection(DesktopNavSection.SERIES) },
                 onItemClick = onSeriesClick
             )
+        }
+    }
+}
+
+@Composable
+private fun StudioCategoryChip(
+    title: String,
+    count: Int,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .clickable { onClick() }
+            .pointerHoverIcon(PointerIcon.Hand),
+        shape = RoundedCornerShape(20.dp),
+        color = if (isSelected) Color(0xFFE2E8F0) else Color(0xFF12151E),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isSelected) Color(0xFFE2E8F0) else Color(0xFF1E2433)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = title,
+                color = if (isSelected) Color(0xFF090A0F) else Color(0xFF94A3B8),
+                fontSize = 12.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+            )
+
+            // Embedded Item Count Pill
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isSelected) Color(0x26000000) else Color(0xFF1A202C))
+                    .padding(horizontal = 6.dp, vertical = 1.dp)
+            ) {
+                Text(
+                    text = "$count",
+                    color = if (isSelected) Color(0xFF090A0F) else Color(0xFF64748B),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -1813,10 +1929,10 @@ private fun FigmaMoviesContent(
                 Column {
                     Text(
                         text = "EXPLORE THE COLLECTION",
-                        color = Color(0xFF38BDF8),
+                        color = Color(0xFF94A3B8),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.4.sp
+                        letterSpacing = 1.6.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -1878,40 +1994,12 @@ private fun FigmaMoviesContent(
                             else movies.count { it.genre.contains(genre, ignoreCase = true) }
                         }
 
-                        Surface(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .clickable { selectedGenre = genre }
-                                .pointerHoverIcon(PointerIcon.Hand),
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (isSelected) Color(0xFF2563EB) else Color(0xFF111622),
-                            border = if (isSelected) null else BorderStroke(1.dp, Color(0xFF1E2638))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(7.dp)
-                            ) {
-                                Text(
-                                    text = genre,
-                                    color = if (isSelected) Color.White else Color(0xFF94A3B8),
-                                    fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                )
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected) Color(0x33000000) else Color(0xFF1A2232)
-                                ) {
-                                    Text(
-                                        text = "$count",
-                                        color = if (isSelected) Color.White.copy(alpha = 0.95f) else Color(0xFF64748B),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
+                        StudioCategoryChip(
+                            title = genre,
+                            count = count,
+                            isSelected = isSelected,
+                            onClick = { selectedGenre = genre }
+                        )
                     }
                 }
             }
@@ -2037,14 +2125,14 @@ private fun MovieHeroBillboard(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isResume) Color(0xFF00E5FF) else Color(0xFF38BDF8))
+                        .background(Color(0xFF94A3B8))
                 )
                 Text(
                     text = if (isResume) "RESUME WATCHING" else "FEATURED MOVIE",
-                    color = Color(0xFF38BDF8),
+                    color = Color(0xFF94A3B8),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.4.sp
+                    letterSpacing = 1.6.sp
                 )
             }
 
@@ -2077,17 +2165,17 @@ private fun MovieHeroBillboard(
                 }
                 Text(
                     text = movieItem.genre.ifBlank { "Action • Drama" },
-                    color = Color(0xFF38BDF8),
+                    color = Color(0xFFCBD5E1),
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Medium
                 )
                 if (isResume && resumeItem?.subtitle?.contains("left", ignoreCase = true) == true) {
                     Text(text = "•", color = Color(0xFF64748B), fontSize = 12.sp)
                     Text(
                         text = resumeItem.subtitle.substringAfterLast("•").trim(),
-                        color = Color(0xFF00E5FF),
+                        color = Color(0xFFCBD5E1),
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Medium
                     )
                 }
             }
@@ -2118,20 +2206,23 @@ private fun MovieHeroBillboard(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = onPlayClick,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF090A0F)
+                    ),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.height(38.dp).pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = Color(0xFF090A0F),
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (isResume) "Resume watching" else "Watch now",
-                        color = Color.White,
+                        color = Color(0xFF090A0F),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -2144,8 +2235,8 @@ private fun MovieHeroBillboard(
                         .clickable { }
                         .pointerHoverIcon(PointerIcon.Hand),
                     shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF131824).copy(alpha = 0.85f),
-                    border = BorderStroke(1.dp, Color(0xFF263346))
+                    color = Color(0x1FFFFFFF),
+                    border = BorderStroke(1.dp, Color(0x26FFFFFF))
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp),
@@ -2184,7 +2275,7 @@ private fun MovieHeroBillboard(
                         .fillMaxWidth(resumeItem.progressFraction.coerceIn(0.02f, 1f))
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFF00E5FF), Color(0xFF2563EB))
+                                listOf(Color(0xFF2563EB), Color(0xFF60A5FA))
                             )
                         )
                 )
@@ -2247,10 +2338,10 @@ private fun FigmaSeriesContent(
                 Column {
                     Text(
                         text = "STORIES THAT KEEP GOING",
-                        color = Color(0xFF38BDF8),
+                        color = Color(0xFF94A3B8),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.4.sp
+                        letterSpacing = 1.6.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -2316,40 +2407,12 @@ private fun FigmaSeriesContent(
                             }
                         }
 
-                        Surface(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .clickable { selectedGenre = genre }
-                                .pointerHoverIcon(PointerIcon.Hand),
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (isSelected) Color(0xFF2563EB) else Color(0xFF111622),
-                            border = if (isSelected) null else BorderStroke(1.dp, Color(0xFF1E2638))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(7.dp)
-                            ) {
-                                Text(
-                                    text = genre,
-                                    color = if (isSelected) Color.White else Color(0xFF94A3B8),
-                                    fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                )
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected) Color(0x33000000) else Color(0xFF1A2232)
-                                ) {
-                                    Text(
-                                        text = "$count",
-                                        color = if (isSelected) Color.White.copy(alpha = 0.95f) else Color(0xFF64748B),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
+                        StudioCategoryChip(
+                            title = genre,
+                            count = count,
+                            isSelected = isSelected,
+                            onClick = { selectedGenre = genre }
+                        )
                     }
                 }
             }
@@ -2476,14 +2539,14 @@ private fun SeriesHeroBillboard(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isResume) Color(0xFF00E5FF) else Color(0xFF38BDF8))
+                        .background(Color(0xFF94A3B8))
                 )
                 Text(
                     text = if (isResume) "RESUME EPISODE" else "FEATURED SERIES",
-                    color = Color(0xFF38BDF8),
+                    color = Color(0xFF94A3B8),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.4.sp
+                    letterSpacing = 1.6.sp
                 )
             }
 
@@ -2505,7 +2568,7 @@ private fun SeriesHeroBillboard(
                 val epCode = "S${resumeItem.seasonNumber}E${resumeItem.episodeNumber}"
                 Text(
                     text = "$epCode • ${resumeItem.episodeTitle}",
-                    color = Color(0xFF00E5FF),
+                    color = Color(0xFFCBD5E1),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
@@ -2568,14 +2631,17 @@ private fun SeriesHeroBillboard(
                             onViewEpisodes()
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF090A0F)
+                    ),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.height(38.dp).pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = Color(0xFF090A0F),
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
@@ -2585,7 +2651,7 @@ private fun SeriesHeroBillboard(
                         } else {
                             "View Episodes"
                         },
-                        color = Color.White,
+                        color = Color(0xFF090A0F),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -2598,8 +2664,8 @@ private fun SeriesHeroBillboard(
                         .clickable { onViewEpisodes() }
                         .pointerHoverIcon(PointerIcon.Hand),
                     shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF131824).copy(alpha = 0.85f),
-                    border = BorderStroke(1.dp, Color(0xFF263346))
+                    color = Color(0x1FFFFFFF),
+                    border = BorderStroke(1.dp, Color(0x26FFFFFF))
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp),
@@ -2638,7 +2704,7 @@ private fun SeriesHeroBillboard(
                         .fillMaxWidth(resumeItem.progressFraction.coerceIn(0.02f, 1f))
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFF00E5FF), Color(0xFF2563EB))
+                                listOf(Color(0xFF2563EB), Color(0xFF60A5FA))
                             )
                         )
                 )
@@ -2648,7 +2714,7 @@ private fun SeriesHeroBillboard(
 }
 
 @Composable
-private fun DesktopSeriesGridCard(
+fun DesktopSeriesGridCard(
     seriesItem: DesktopMediaItem,
     userEmail: String,
     accessToken: String,
@@ -2658,30 +2724,29 @@ private fun DesktopSeriesGridCard(
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
     val isPressed by interactionSource.collectIsPressedAsState()
-    val coroutineScope = rememberCoroutineScope()
-
-    val clickFlashAlpha = remember { Animatable(0f) }
 
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.965f
-            isHovered -> 1.035f
+            isPressed -> 0.97f
+            isHovered -> 1.03f
             else -> 1.0f
         },
-        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress 
-                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
+        animationSpec = com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
         label = "series_card_scale"
     )
 
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isPressed -> Color(0xFF00E5FF)
-            isHovered -> Color(0xFF38BDF8)
-            else -> Color(0xFF1A2233)
-        },
-        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
-        label = "series_card_border"
-    )
+    // Studio Top-Lit Glass Border (Replaces cyan rectangle box)
+    val hoveredBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(Color(0x55FFFFFF), Color(0x14FFFFFF))
+        )
+    }
+
+    val defaultBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(Color(0xFF222B3D), Color(0xFF131824))
+        )
+    }
 
     val posterBitmap = rememberThumbnailBitmap(
         primaryUrl = seriesItem.thumbnailUrl,
@@ -2701,30 +2766,28 @@ private fun DesktopSeriesGridCard(
             .graphicsLayer {
                 scaleX = cardScale
                 scaleY = cardScale
+                clip = false
             }
             .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
+                elevation = if (isHovered) 14.dp else 3.dp,
                 shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+                ambientColor = Color(0x40000000),
+                spotColor = Color(0x99000000)
             )
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF0F141F))
             .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                border = BorderStroke(
+                    width = 1.dp,
+                    brush = if (isHovered || isPressed) hoveredBorderBrush else defaultBorderBrush
+                ),
                 shape = RoundedCornerShape(12.dp)
             )
             .pointerHoverIcon(PointerIcon.Hand)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
-                onClick = {
-                    coroutineScope.launch {
-                        clickFlashAlpha.snapTo(0.45f)
-                        clickFlashAlpha.animateTo(0f, tween(260))
-                    }
-                    onClick()
-                }
+                onClick = onClick
             )
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -2744,14 +2807,14 @@ private fun DesktopSeriesGridCard(
                 ) {
                     Text(
                         text = seriesItem.title.take(1),
-                        color = Color(0xFF38BDF8),
+                        color = Color(0xFF94A3B8),
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
             }
 
-            // Dark gradient overlay for bottom text
+            // Dark vignette overlay
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -2766,19 +2829,19 @@ private fun DesktopSeriesGridCard(
                     )
             )
 
-            // Season Count Badge (Top Right)
+            // Season Count / Movie Badge
             if (seasonCount > 0) {
                 Surface(
                     shape = RoundedCornerShape(4.dp),
                     color = Color(0xD90C111C),
-                    border = BorderStroke(1.dp, Color(0xFF1E2838)),
+                    border = BorderStroke(1.dp, Color(0xFF242E40)),
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(10.dp)
                 ) {
                     Text(
-                        text = "$seasonCount ${if (seasonCount == 1) "Season" else "Seasons"}",
-                        color = Color(0xFF00E5FF),
+                        text = "$seasonCount${if (seasonCount == 1) "Season" else "Seasons"}",
+                        color = Color(0xFFCBD5E1),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
@@ -2786,27 +2849,27 @@ private fun DesktopSeriesGridCard(
                 }
             }
 
-            // Hover Action: Play Button Beacon Overlay
+            // Frosted Obsidian Play Disc on Hover
             if (isHovered) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .size(46.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
-                        .background(Color(0xCC00E5FF))
-                        .shadow(12.dp, CircleShape),
+                        .background(Color(0xD90A0E17))
+                        .border(1.dp, Color(0x33FFFFFF), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = "Browse Series",
-                        tint = Color.Black,
-                        modifier = Modifier.size(28.dp)
+                        contentDescription = "Play",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
 
-            // Bottom Title & Genres
+            // Card Bottom Details
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -2815,27 +2878,18 @@ private fun DesktopSeriesGridCard(
                 Text(
                     text = seriesItem.title,
                     color = Color.White,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = seriesItem.genre.ifBlank { "TV Series" },
+                    text = seriesItem.genre.ifBlank { "Series" },
                     color = Color(0xFF94A3B8),
                     fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            // Flash Ripple Layer Triggered on Click
-            if (clickFlashAlpha.value > 0f) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
                 )
             }
         }
@@ -2846,12 +2900,12 @@ private fun DesktopSeriesGridCard(
 private fun FigmaRecentsContent(
     userEmail: String,
     accessToken: String,
-    movies: List<DesktopMediaItem>,
-    series: List<DesktopMediaItem>,
+    movies: List<DesktopMediaItem> = emptyList(),
+    series: List<DesktopMediaItem> = emptyList(),
     watchHistoryRevision: Int,
     onMovieClick: (DesktopMediaItem) -> Unit,
-    onSeriesEpisodeClick: (DesktopMediaItem, String) -> Unit,
-    onHistoryChanged: () -> Unit
+    onSeriesEpisodeClick: (DesktopMediaItem, String) -> Unit = { _, _ -> },
+    onHistoryChanged: () -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
     var isClearing by remember { mutableStateOf(false) }
@@ -2861,117 +2915,139 @@ private fun FigmaRecentsContent(
         DesktopWatchHistoryManager.getAllWatchHistory(userEmail, movies, series)
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 12.dp, bottom = 64.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 28.dp, vertical = 8.dp)
     ) {
-        // 1. Header Section
-        item(key = "recents_header") {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Bottom
-            ) {
-                Column {
-                    Text(
-                        text = "YOUR WATCH HISTORY",
-                        color = Color(0xFF38BDF8),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.4.sp
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Recents",
-                        color = Color.White,
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        letterSpacing = (-0.5).sp
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Jump back into what you've watched.",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 12.sp
-                    )
-                }
+        // ----------------------------------------------------
+        // HEADER BLOCK
+        // ----------------------------------------------------
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Column {
+                Text(
+                    text = "YOUR WATCH HISTORY",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.6.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Recents",
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = (-0.4).sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Jump back into what you've watched.",
+                    color = Color(0xFF64748B),
+                    fontSize = 12.sp
+                )
+            }
 
-                if (historyItems.isNotEmpty()) {
-                    Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable(enabled = !isClearing) {
-                                isClearing = true
-                                coroutineScope.launch {
-                                    com.clotube.desktop.data.DesktopWatchHistoryManager.clearAllHistory(userEmail)
-                                    com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
-                                    onHistoryChanged()
-                                    isClearing = false
-                                }
+            if (historyItems.isNotEmpty()) {
+                val clearInteraction = remember { MutableInteractionSource() }
+                val isClearHovered by clearInteraction.collectIsHoveredAsState()
+
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(
+                            interactionSource = clearInteraction,
+                            indication = null,
+                            enabled = !isClearing
+                        ) {
+                            isClearing = true
+                            coroutineScope.launch {
+                                DesktopWatchHistoryManager.clearAllHistory(userEmail)
+                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                onHistoryChanged()
+                                isClearing = false
                             }
-                            .pointerHoverIcon(PointerIcon.Hand),
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFF131824),
-                        border = BorderStroke(1.dp, Color(0xFF263346))
+                        }
+                        .pointerHoverIcon(if (!isClearing) PointerIcon.Hand else PointerIcon.Default),
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (isClearHovered) Color(0x1AE11D48) else Color(0xFF121622),
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isClearHovered) Color(0x33FB7185) else Color(0xFF1E2838)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DeleteSweep,
+                            contentDescription = "Clear watch history",
+                            tint = if (isClearHovered) Color(0xFFFB7185) else Color(0xFF94A3B8),
+                            modifier = Modifier.size(15.dp)
+                        )
                         Text(
                             text = if (isClearing) "Clearing..." else "Clear watch history",
-                            color = Color.White,
+                            color = if (isClearHovered) Color(0xFFFB7185) else Color(0xFFCBD5E1),
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }
             }
         }
 
-        // 2. Empty State
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // ----------------------------------------------------
+        // RECENT ITEMS LIST OR EMPTY STATE
+        // ----------------------------------------------------
         if (historyItems.isEmpty()) {
-            item(key = "recents_empty_state") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 96.dp),
-                    contentAlignment = Alignment.Center
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(340.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF0B0E16))
+                    .border(1.dp, Color(0xFF161D2B), RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF131824)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.History,
-                                contentDescription = null,
-                                tint = Color(0xFF64748B),
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "No Watch History Yet",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Movies and series you watch on desktop or mobile will appear here.",
-                            color = Color(0xFF64748B),
-                            fontSize = 13.sp
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Rounded.HistoryToggleOff,
+                        contentDescription = null,
+                        tint = Color(0xFF475569),
+                        modifier = Modifier.size(42.dp)
+                    )
+                    Text(
+                        text = "No watch history",
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Movies and series you watch will appear here.",
+                        color = Color(0xFF64748B),
+                        fontSize = 12.sp
+                    )
                 }
             }
         } else {
-            // 3. Watched Items List
-            itemsIndexed(historyItems, key = { _, it -> it.mediaId }) { index, item ->
-                FluidEntranceContainer(index = index) {
-                    RecentHistoryItemCard(
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(bottom = 64.dp)
+            ) {
+                items(historyItems, key = { it.mediaId }) { item ->
+                    DesktopRecentHistoryCard(
                         item = item,
                         userEmail = userEmail,
                         accessToken = accessToken,
@@ -2980,18 +3056,34 @@ private fun FigmaRecentsContent(
                                 val matched = series.find { it.id == item.seriesId }
                                 if (matched != null) {
                                     onSeriesEpisodeClick(matched, item.mediaId)
+                                } else {
+                                    val dummyMedia = DesktopMediaItem(
+                                        id = item.seriesId,
+                                        title = item.title,
+                                        genre = "Series",
+                                        streamUrl = ""
+                                    )
+                                    onSeriesEpisodeClick(dummyMedia, item.mediaId)
                                 }
                             } else {
                                 val matched = movies.find { it.id == item.mediaId }
                                 if (matched != null) {
                                     onMovieClick(matched)
+                                } else {
+                                    val dummyMovie = DesktopMediaItem(
+                                        id = item.mediaId,
+                                        title = item.title,
+                                        genre = item.subtitle.ifBlank { "Movie" },
+                                        streamUrl = ""
+                                    )
+                                    onMovieClick(dummyMovie)
                                 }
                             }
                         },
                         onRemove = {
                             coroutineScope.launch {
-                                com.clotube.desktop.data.DesktopWatchHistoryManager.removeHistoryItem(userEmail, item.mediaId)
-                                com.clotube.desktop.data.DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                DesktopWatchHistoryManager.removeHistoryItem(userEmail, item.mediaId)
+                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
                                 onHistoryChanged()
                             }
                         }
@@ -3003,108 +3095,96 @@ private fun FigmaRecentsContent(
 }
 
 @Composable
-private fun RecentHistoryItemCard(
-    item: com.clotube.desktop.data.DesktopContinueWatchingItem,
+private fun DesktopRecentHistoryCard(
+    item: DesktopContinueWatchingItem,
     userEmail: String,
     accessToken: String,
     onClick: () -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val coroutineScope = rememberCoroutineScope()
+    var isHovered by remember { mutableStateOf(false) }
 
-    val clickFlashAlpha = remember { Animatable(0f) }
+    val hoveredBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(Color(0x55FFFFFF), Color(0x14FFFFFF))
+        )
+    }
 
-    val cardScale by animateFloatAsState(
-        targetValue = when {
-            isPressed -> 0.98f
-            isHovered -> 1.015f
-            else -> 1.0f
-        },
-        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
-                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
-        label = "recent_card_scale"
-    )
+    val defaultBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(Color(0xFF222B3D), Color(0xFF131824))
+        )
+    }
 
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isPressed -> Color(0xFF00E5FF)
-            isHovered -> Color(0xFF38BDF8)
-            else -> Color(0xFF18202F)
-        },
-        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
-        label = "recent_card_border"
-    )
-
-    val posterBitmap = rememberThumbnailBitmap(
-        primaryUrl = item.thumbnailUrl,
-        fallbackUrl = item.fallbackThumbnailUrl,
-        accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
-    )
-
-    val percentWatched = (item.progressFraction * 100).toInt().coerceIn(0, 100)
-
-    Box(
-        modifier = Modifier
+    Surface(
+        modifier = modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = cardScale
-                scaleY = cardScale
-            }
-            .shadow(
-                elevation = if (isHovered) 12.dp else 2.dp,
-                shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.15f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
-            )
+            .height(84.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(if (isHovered) Color(0xFF131824) else Color(0xFF0F141F))
-            .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
-                shape = RoundedCornerShape(12.dp)
-            )
+            .clickable { onClick() }
             .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = {
-                    coroutineScope.launch {
-                        clickFlashAlpha.snapTo(0.4f)
-                        clickFlashAlpha.animateTo(0f, tween(260))
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        when (event.type) {
+                            PointerEventType.Enter -> isHovered = true
+                            PointerEventType.Exit -> isHovered = false
+                        }
                     }
-                    onClick()
                 }
-            )
+            },
+        shape = RoundedCornerShape(12.dp),
+        color = if (isHovered) Color(0xFF141C2B) else Color(0xFF0F141F),
+        border = BorderStroke(
+            width = 1.dp,
+            brush = if (isHovered) hoveredBorderBrush else defaultBorderBrush
+        )
     ) {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(18.dp)
+                .fillMaxSize()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Thumbnail
+            // ----------------------------------------------------
+            // THUMBNAIL CONTAINER WITH HOVER PLAY DISC
+            // ----------------------------------------------------
             Box(
                 modifier = Modifier
-                    .width(124.dp)
-                    .height(68.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF161E2E)),
-                contentAlignment = Alignment.Center
+                    .width(114.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF0A0D14))
             ) {
-                if (posterBitmap != null) {
+                val thumb = rememberThumbnailBitmap(
+                    primaryUrl = item.thumbnailUrl,
+                    fallbackUrl = item.fallbackThumbnailUrl,
+                    accessToken = accessToken,
+                    userEmail = userEmail
+                )
+                if (thumb != null) {
                     Image(
-                        bitmap = posterBitmap,
+                        bitmap = thumb,
                         contentDescription = item.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
 
+                // Vignette
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Color(0x66000000))
+                            )
+                        )
+                )
+
+                // Frosted Play Disc on Hover
                 if (isHovered) {
                     Box(
                         modifier = Modifier
@@ -3114,108 +3194,114 @@ private fun RecentHistoryItemCard(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(30.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF00E5FF).copy(alpha = 0.9f))
-                                .shadow(8.dp, CircleShape),
+                                .background(Color(0xD90A0E17))
+                                .border(1.dp, Color(0x33FFFFFF), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.PlayArrow,
                                 contentDescription = null,
-                                tint = Color(0xFF090D14),
-                                modifier = Modifier.size(20.dp)
+                                tint = Color.White,
+                                modifier = Modifier.size(17.dp)
                             )
                         }
                     }
                 }
             }
 
-            // Title & Subtitle Info
-            Column(
-                modifier = Modifier.widthIn(min = 180.dp, max = 280.dp),
-                verticalArrangement = Arrangement.Center
-            ) {
+            Spacer(modifier = Modifier.width(16.dp))
+
+            // ----------------------------------------------------
+            // TITLE & SUBTITLE
+            // ----------------------------------------------------
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.title,
                     color = Color.White,
-                    fontSize = 15.sp,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = item.subtitle,
+                    text = item.subtitle.ifBlank { if (item.isSeries) "Series Episode" else "Feature Film" },
                     color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.width(20.dp))
 
-            // Percentage & Progress Line
+            // ----------------------------------------------------
+            // PROGRESS BAR & STATUS
+            // ----------------------------------------------------
             Column(
-                modifier = Modifier.weight(2f),
-                verticalArrangement = Arrangement.Center
+                modifier = Modifier.width(200.dp),
+                horizontalAlignment = Alignment.End
             ) {
+                val percent = (item.progressFraction * 100).toInt()
                 Text(
-                    text = "$percentWatched% watched",
-                    color = Color(0xFF94A3B8),
+                    text = if (percent > 0) "$percent% watched" else "Not started",
+                    color = if (percent > 0) Color(0xFFCBD5E1) else Color(0xFF64748B),
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = if (percent > 0) FontWeight.Medium else FontWeight.Normal
                 )
-
                 Spacer(modifier = Modifier.height(6.dp))
-
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(3.dp)
+                        .height(3.5.dp)
                         .clip(RoundedCornerShape(2.dp))
-                        .background(Color(0xFF1E2838))
+                        .background(Color(0x331E2838))
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .fillMaxWidth(item.progressFraction.coerceIn(0.01f, 1f))
-                            .background(
-                                Brush.horizontalGradient(
-                                    listOf(Color(0xFF2563EB), Color(0xFF38BDF8))
+                    if (percent > 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(item.progressFraction.coerceIn(0.02f, 1f))
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color(0xFF2563EB), Color(0xFF60A5FA))
+                                    )
                                 )
-                            )
-                    )
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(16.dp))
 
-            // Delete item button (✕)
-            IconButton(
-                onClick = onRemove,
+            // ----------------------------------------------------
+            // REMOVE ITEM GHOST BUTTON
+            // ----------------------------------------------------
+            val removeInteraction = remember { MutableInteractionSource() }
+            val isRemoveHovered by removeInteraction.collectIsHoveredAsState()
+
+            Box(
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(30.dp)
                     .clip(CircleShape)
-                    .pointerHoverIcon(PointerIcon.Hand)
+                    .background(if (isRemoveHovered) Color(0x1AE11D48) else Color.Transparent)
+                    .clickable(
+                        interactionSource = removeInteraction,
+                        indication = null,
+                        onClick = onRemove
+                    )
+                    .pointerHoverIcon(PointerIcon.Hand),
+                contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Close,
                     contentDescription = "Remove from history",
-                    tint = if (isHovered) Color.White else Color(0xFF64748B),
-                    modifier = Modifier.size(17.dp)
+                    tint = if (isRemoveHovered) Color(0xFFFB7185) else Color(0xFF64748B),
+                    modifier = Modifier.size(16.dp)
                 )
             }
-        }
-
-        // Flash Ripple Layer Triggered on Click
-        if (clickFlashAlpha.value > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
-            )
         }
     }
 }
@@ -3307,14 +3393,14 @@ private fun HeroSlideCardContent(
                     modifier = Modifier
                         .width(3.dp)
                         .height(12.dp)
-                        .background(Color(0xFF42A5F5))
+                        .background(Color(0xFF94A3B8)) // Studio Ice Slate
                 )
                 Text(
                     text = if (isSeries) "FEATURED SERIES IN YOUR DRIVE" else "FEATURED IN YOUR DRIVE",
-                    color = Color(0xFFCBD5E1),
+                    color = Color(0xFF94A3B8), // Non-fluorescent muted slate
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.5.sp
+                    letterSpacing = 1.6.sp
                 )
             }
 
@@ -3323,9 +3409,9 @@ private fun HeroSlideCardContent(
             Text(
                 text = item.title.uppercase(),
                 color = Color.White,
-                fontSize = 40.sp,
+                fontSize = 38.sp,
                 fontWeight = FontWeight.Black,
-                letterSpacing = 0.5.sp,
+                letterSpacing = (-0.3).sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
@@ -3340,26 +3426,27 @@ private fun HeroSlideCardContent(
                     Text(
                         text = formatDuration(item.durationMs),
                         color = Color(0xFFCBD5E1),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
-                    Text(text = "•", color = Color(0xFF64748B), fontSize = 13.sp)
+                    Text(text = "•", color = Color(0xFF475569), fontSize = 12.sp)
                 }
 
                 Text(
-                    text = item.genre.ifBlank { if (isSeries) "TV Series • Drama" else "Action • Drama" },
-                    color = Color(0xFF42A5F5),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    text = item.genre.ifBlank { if (isSeries) "Series" else "Movie" },
+                    color = Color(0xFFCBD5E1), // Clean neutral silver
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
                 )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            // Genre Badges
             val genreTokens = remember(item.genre) {
                 item.genre.split("•", ",")
                     .map { it.trim() }
-                    .filter { it.isNotBlank() && !it.equals("Movie", ignoreCase = true) }
+                    .filter { it.isNotBlank() && !it.equals("Movie", ignoreCase = true) && !it.equals("TV Series", ignoreCase = true) && !it.equals("Series", ignoreCase = true) }
             }
 
             if (genreTokens.isNotEmpty()) {
@@ -3370,64 +3457,69 @@ private fun HeroSlideCardContent(
                     genreTokens.take(4).forEach { genreTag ->
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0x99131D2D),
-                            border = BorderStroke(1.dp, Color(0x661E3A5F))
+                            color = Color(0x331E293B),
+                            border = BorderStroke(1.dp, Color(0x33475569))
                         ) {
                             Text(
                                 text = genreTag,
-                                color = Color(0xFFE2E8F0),
+                                color = Color(0xFFCBD5E1),
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Medium,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(22.dp))
             } else {
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(18.dp))
             }
 
-            // Action Buttons
+            // Professional Action CTAs
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // High-Contrast Pure White Primary CTA
                 Button(
                     onClick = {
                         if (isSeries) onSeriesClick(item)
                         else onMovieClick(item)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF090A0F)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
                     modifier = Modifier
-                        .height(42.dp)
+                        .height(40.dp)
                         .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = Color(0xFF090A0F),
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (isSeries) "View series" else "Resume watching",
-                        color = Color.White,
+                        color = Color(0xFF090A0F),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
+                // Frosted Glass Secondary CTA
                 Surface(
                     modifier = Modifier
-                        .height(42.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(8.dp))
                         .clickable { }
                         .pointerHoverIcon(PointerIcon.Hand),
-                    shape = RoundedCornerShape(10.dp),
-                    color = Color(0x991E2636),
-                    border = BorderStroke(1.dp, Color(0xFF334155))
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0x1FFFFFFF),
+                    border = BorderStroke(1.dp, Color(0x26FFFFFF))
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 16.dp),
@@ -3581,7 +3673,7 @@ fun FigmaHeroSlideshowBanner(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
-                .height(3.5.dp)
+                .height(3.dp)
                 .background(Color(0x26FFFFFF))
                 .drawWithContent {
                     drawContent()
@@ -3589,7 +3681,7 @@ fun FigmaHeroSlideshowBanner(
                     if (progress > 0f) {
                         drawRect(
                             brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
-                                colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                                colors = listOf(Color(0x80FFFFFF), Color.White)
                             ),
                             size = androidx.compose.ui.geometry.Size(
                                 width = size.width * progress.coerceIn(0f, 1f),
@@ -3628,6 +3720,7 @@ fun FigmaHeroSlideshowBanner(
                     )
                 }
 
+                // Slide Dots: Clean White Active Pill instead of neon cyan
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -3637,9 +3730,9 @@ fun FigmaHeroSlideshowBanner(
                         Box(
                             modifier = Modifier
                                 .width(if (isSelected) 18.dp else 6.dp)
-                                .height(6.dp)
+                                .height(5.dp)
                                 .clip(RoundedCornerShape(3.dp))
-                                .background(if (isSelected) Color(0xFF42A5F5) else Color(0x66FFFFFF))
+                                .background(if (isSelected) Color.White else Color(0x40FFFFFF))
                                 .clickable {
                                     if (!isTransitioning && currentIndex != index) {
                                         isMovingForward = index > currentIndex
@@ -3736,14 +3829,14 @@ private fun FigmaHeroBanner(
                     modifier = Modifier
                         .width(3.dp)
                         .height(12.dp)
-                        .background(Color(0xFF00E5FF))
+                        .background(Color(0xFF94A3B8))
                 )
                 Text(
                     text = overline,
-                    color = Color(0xFFCBD5E1),
+                    color = Color(0xFF94A3B8),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.5.sp
+                    letterSpacing = 1.6.sp
                 )
             }
 
@@ -3777,9 +3870,9 @@ private fun FigmaHeroBanner(
 
                 Text(
                     text = item.genre.ifBlank { "Action • Drama" },
-                    color = Color(0xFF38BDF8),
+                    color = Color(0xFFCBD5E1),
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Medium
                 )
             }
 
@@ -3799,14 +3892,14 @@ private fun FigmaHeroBanner(
                     genreTokens.forEach { genreTag ->
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0x99131D2D),
-                            border = BorderStroke(1.dp, Color(0x661E3A5F))
+                            color = Color(0x331E293B),
+                            border = BorderStroke(1.dp, Color(0x33475569))
                         ) {
                             Text(
                                 text = genreTag,
-                                color = Color(0xFFE2E8F0),
+                                color = Color(0xFFCBD5E1),
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Medium,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
                         }
@@ -3820,22 +3913,25 @@ private fun FigmaHeroBanner(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = onPrimaryClick,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF090A0F)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
                     modifier = Modifier
-                        .height(42.dp)
+                        .height(40.dp)
                         .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = Color(0xFF090A0F),
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = primaryButtonText,
-                        color = Color.White,
+                        color = Color(0xFF090A0F),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -3843,13 +3939,13 @@ private fun FigmaHeroBanner(
 
                 Surface(
                     modifier = Modifier
-                        .height(42.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(8.dp))
                         .clickable { }
                         .pointerHoverIcon(PointerIcon.Hand),
-                    shape = RoundedCornerShape(10.dp),
-                    color = Color(0x991E2636),
-                    border = BorderStroke(1.dp, Color(0xFF334155))
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0x1FFFFFFF),
+                    border = BorderStroke(1.dp, Color(0x26FFFFFF))
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 16.dp),
@@ -3894,17 +3990,18 @@ private fun FigmaCarouselSection(
             Column {
                 Text(
                     text = overline,
-                    color = Color(0xFF38BDF8),
+                    color = Color(0xFF94A3B8),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.3.sp
+                    letterSpacing = 1.6.sp
                 )
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = title,
                     color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = (-0.3).sp
                 )
             }
 
@@ -3933,9 +4030,24 @@ private fun FigmaCarouselSection(
 
         Spacer(modifier = Modifier.height(14.dp))
 
+        // CAROUSEL LAZYROW WITH 16.dp OVERDRAW BUFFER
         LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .layout { measurable, constraints ->
+                    // Expand measurable width by 16dp on left and right so scaled cards never hit the clip boundary
+                    val overdraw = 16.dp.roundToPx()
+                    val placeable = measurable.measure(
+                        constraints.copy(
+                            maxWidth = if (constraints.hasBoundedWidth) constraints.maxWidth + (overdraw * 2) else constraints.maxWidth
+                        )
+                    )
+                    layout(constraints.maxWidth, placeable.height) {
+                        placeable.placeRelative(-overdraw, 0)
+                    }
+                },
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             itemsIndexed(items, key = { _, it -> it.id }) { index, item ->
                 FluidEntranceContainer(index = index) {

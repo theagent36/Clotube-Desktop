@@ -582,7 +582,7 @@ private fun DesktopSeriesPlayerContent(
                 contentAlignment = Alignment.Center
             ) {
                 PacedLoadingSpinner(
-                    color = Color(0xFF00E5FF),
+                    color = Color(0xFF38BDF8),
                     modifier = Modifier.size(46.dp),
                     strokeWidth = 3.5.dp
                 )
@@ -905,7 +905,7 @@ private fun SeriesSeekFeedbackIndicator(
         Surface(
             shape = CircleShape,
             color = Color(0xB30C111C),
-            border = BorderStroke(1.dp, Color(0x6642A5F5)),
+            border = BorderStroke(1.dp, Color(0xFF222B3D)),
             elevation = 12.dp
         ) {
             Column(
@@ -918,7 +918,7 @@ private fun SeriesSeekFeedbackIndicator(
                 Icon(
                     imageVector = if (direction == SeriesSeekFeedbackDirection.REWIND) Icons.Default.FastRewind else Icons.Default.FastForward,
                     contentDescription = null,
-                    tint = Color(0xFF42A5F5),
+                    tint = Color(0xFF60A5FA),
                     modifier = Modifier.size(24.dp)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
@@ -979,12 +979,11 @@ private fun SeriesInPlayerSettingsPopup(
     ) {
         Surface(
             shape = RoundedCornerShape(12.dp),
-            color = Color(0xFF0F1624),
-            border = BorderStroke(1.dp, Color(0xFF26354D)),
+            color = Color(0xF20B0E16), // Frosted obsidian glass
+            border = BorderStroke(1.dp, Color(0xFF1E2838)),
             elevation = 16.dp,
             modifier = Modifier
-                .widthIn(min = 220.dp, max = 320.dp)
-                .shadow(24.dp, RoundedCornerShape(12.dp))
+                .widthIn(min = 220.dp, max = 290.dp)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
@@ -998,8 +997,13 @@ private fun SeriesInPlayerSettingsPopup(
                             color = Color(0xFF64748B),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
+                            letterSpacing = 1.5.sp,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                        Divider(
+                            color = Color(0xFF161D2B),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
 
                         // 1. Add External Subtitle File (VLC Action)
@@ -1020,18 +1024,22 @@ private fun SeriesInPlayerSettingsPopup(
                             Icon(
                                 imageVector = Icons.Default.Add,
                                 contentDescription = "Add Subtitle File",
-                                tint = Color(0xFF00E5FF),
+                                tint = Color(0xFF60A5FA),
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
                                 text = "Add Subtitle File...",
-                                color = Color(0xFF00E5FF),
+                                color = Color(0xFF60A5FA),
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
 
-                        Divider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 4.dp))
+                        Divider(
+                            color = Color(0xFF161D2B),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                        )
 
                         // 2. Active External Subtitle Entry (if loaded)
                         player.externalSubtitleName?.let { extName ->
@@ -1070,14 +1078,14 @@ private fun SeriesInPlayerSettingsPopup(
                     SeriesPlayerPopupType.AUDIO -> {
                         Text(
                             text = "AUDIO TRACK",
-                            color = Color(0xFF38BDF8),
-                            fontSize = 11.sp,
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.2.sp,
+                            letterSpacing = 1.5.sp,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
                         )
                         Divider(
-                            color = Color(0xFF1E2838),
+                            color = Color(0xFF161D2B),
                             thickness = 1.dp,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
@@ -1103,14 +1111,14 @@ private fun SeriesInPlayerSettingsPopup(
                     SeriesPlayerPopupType.SPEED -> {
                         Text(
                             text = "PLAYBACK SPEED",
-                            color = Color(0xFF38BDF8),
-                            fontSize = 11.sp,
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.2.sp,
+                            letterSpacing = 1.5.sp,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
                         )
                         Divider(
-                            color = Color(0xFF1E2838),
+                            color = Color(0xFF161D2B),
                             thickness = 1.dp,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
@@ -1137,56 +1145,45 @@ private fun SeriesMenuOptionItem(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
-    var isHovered by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
 
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = when {
-            isSelected -> Color(0xFF162032)
-            isHovered -> Color(0xFF1A2333)
-            else -> Color.Transparent
-        },
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 6.dp, vertical = 2.dp)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val e = awaitPointerEvent()
-                        when (e.type) {
-                            PointerEventType.Enter -> isHovered = true
-                            PointerEventType.Exit -> isHovered = false
-                        }
-                    }
-                }
-            }
-            .pointerHoverIcon(PointerIcon.Hand)
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = label,
-                color = if (isSelected) Color.White else Color(0xFFCBD5E1),
-                fontSize = 13.sp,
-                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
             )
-            if (isSelected) {
-                Icon(
-                    imageVector = Icons.Rounded.Check,
-                    contentDescription = "Selected",
-                    tint = Color(0xFF00E5FF),
-                    modifier = Modifier.size(16.dp)
-                )
-            }
+            .background(
+                when {
+                    isSelected -> Color(0xFF141C2B)
+                    isHovered -> Color(0xFF0F1522)
+                    else -> Color.Transparent
+                }
+            )
+            .pointerHoverIcon(PointerIcon.Hand)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = if (isSelected) Color(0xFF60A5FA) else if (isHovered) Color(0xFFE2E8F0) else Color(0xFFCBD5E1),
+            fontSize = 13.sp,
+            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            modifier = Modifier.weight(1f)
+        )
+        if (isSelected) {
+            Text(
+                text = "✓",
+                color = Color(0xFF60A5FA),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
         }
     }
 }
@@ -1317,7 +1314,7 @@ private fun SeriesBottomTransportBar(
                             .fillMaxWidth(hoverFraction)
                             .height(trackHeight)
                             .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0x4D38BDF8))
+                            .background(Color(0x3394A3B8))
                     )
                 }
 
@@ -1329,12 +1326,12 @@ private fun SeriesBottomTransportBar(
                         .clip(RoundedCornerShape(3.dp))
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFF0284C7), Color(0xFF00E5FF))
+                                listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
                             )
                         )
                 )
 
-                // Glowing Scrubber Thumb
+                // Scrubber Thumb (Restrained Studio Ice Blue)
                 Box(
                     modifier = Modifier
                         .offset {
@@ -1345,17 +1342,12 @@ private fun SeriesBottomTransportBar(
                             )
                         }
                         .size(thumbSize)
-                        .shadow(
-                            elevation = if (isScrubbing || isTimelineHovered) 10.dp else 4.dp,
-                            shape = CircleShape,
-                            spotColor = Color(0xFF00E5FF),
-                            ambientColor = Color(0xFF00E5FF).copy(alpha = 0.5f)
-                        )
+                        .shadow(4.dp, CircleShape, spotColor = Color(0x66000000))
                         .clip(CircleShape)
-                        .background(Color(0xFF00E5FF))
+                        .background(Color(0xFF60A5FA))
                 )
 
-                // Floating Magnetic Timecode Tooltip Bubble
+                // Floating Magnetic Timecode Tooltip Bubble (High-contrast glass)
                 if ((isTimelineHovered || isScrubbing) && player.totalDurationMs > 0L) {
                     val previewFraction = if (isScrubbing) currentFraction else hoverFraction
                     val previewTimeMs = (previewFraction * player.totalDurationMs).toLong()
@@ -1371,13 +1363,13 @@ private fun SeriesBottomTransportBar(
                                 )
                             }
                             .clip(RoundedCornerShape(5.dp))
-                            .background(Color(0xE60A0E17))
-                            .border(1.dp, Color(0xFF263346), RoundedCornerShape(5.dp))
+                            .background(Color(0xE60D121C))
+                            .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(5.dp))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
                             text = formatDuration(previewTimeMs),
-                            color = Color(0xFF00E5FF),
+                            color = Color(0xFFE2E8F0),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
@@ -1461,7 +1453,7 @@ private fun SeriesBottomTransportBar(
                     Icon(
                         imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = "Play/Pause",
-                        tint = if (isPlayHovered) Color(0xFF00E5FF) else Color.White,
+                        tint = Color.White,
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -1603,7 +1595,8 @@ private fun SeriesBottomTransportBar(
 
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = if (activePopup == SeriesPlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
+                    color = Color(0xFF141924),
+                    border = BorderStroke(1.dp, Color(0xFF222B3D)),
                     modifier = Modifier
                         .graphicsLayer {
                             scaleX = speedScale
@@ -1618,7 +1611,7 @@ private fun SeriesBottomTransportBar(
                 ) {
                     Text(
                         text = seriesSpeedLabel,
-                        color = if (activePopup == SeriesPlayerPopupType.SPEED) Color(0xFF00E5FF) else Color.White,
+                        color = Color(0xFFCBD5E1),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
@@ -1683,10 +1676,10 @@ private fun FluidTransportIconButton(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = when {
-                !enabled -> Color(0x40FFFFFF)
-                active -> Color(0xFF00E5FF)
-                isHovered -> Color(0xFF00E5FF)
-                else -> Color(0xFFCBD5E1)
+                !enabled -> Color(0xFF475569)
+                active -> Color(0xFF60A5FA)
+                isHovered -> Color(0xFFF1F5F9)
+                else -> Color(0xFF94A3B8)
             },
             modifier = Modifier.size(iconSize)
         )
@@ -1759,7 +1752,7 @@ private fun SeriesSlickVolumeSlider(
                 .clip(RoundedCornerShape(2.dp))
                 .background(
                     Brush.horizontalGradient(
-                        colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                        colors = listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
                     )
                 )
         )
@@ -1780,7 +1773,7 @@ private fun SeriesSlickVolumeSlider(
                 .size(thumbSize)
                 .shadow(3.dp, CircleShape)
                 .clip(CircleShape)
-                .background(Color(0xFF42A5F5))
+                .background(Color.White)
         )
     }
 }

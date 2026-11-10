@@ -525,15 +525,33 @@ class DesktopDriveScanner(
                             val epId = resolveTargetId(epFile)
                             val rawEpName = epFile.name ?: "Episode ${epIndex + 1}"
                             val epNum = DesktopOnlineMetadataResolver.parseEpisodeNumber(rawEpName, epIndex + 1)
-                            val driveThumb = epFile.thumbnailLink?.replace("s220", "s800") ?: ""
+                            val driveThumb = epFile.thumbnailLink?.replace("s220", "s800")
+                                ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800"
                             val durMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
 
                             // Instant O(1) in-memory metadata resolution
                             val batchMeta = seriesMeta.episodesBySeasonAndNum[Pair(sNum, epNum)]
-                            val title = batchMeta?.title ?: rawEpName.substringBeforeLast(".")
-                            val synopsis = batchMeta?.synopsis ?: ""
-                            val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: 45L * 60_000L)
-                            val thumb = if (driveThumb.isNotBlank()) driveThumb else (batchMeta?.thumbnailUrl ?: "")
+                            val epMeta = if (batchMeta == null || batchMeta.thumbnailUrl.isBlank()) {
+                                DesktopOnlineMetadataResolver.resolveEpisode(
+                                    seriesName = seriesTitle,
+                                    seasonNumber = sNum,
+                                    episodeNumber = epNum,
+                                    rawFileName = rawEpName
+                                )
+                            } else null
+
+                            val title = batchMeta?.title?.ifBlank { null }
+                                ?: epMeta?.officialTitle?.ifBlank { null }
+                                ?: rawEpName.substringBeforeLast(".")
+                            val synopsis = batchMeta?.synopsis?.ifBlank { null }
+                                ?: epMeta?.synopsis
+                                ?: ""
+                            val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: (epMeta?.durationMinutes?.times(60_000L) ?: 45L * 60_000L))
+
+                            // Priority: 1. Official TVMaze episode still -> 2. Google Drive video frame snapshot
+                            val officialStill = batchMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                                ?: epMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                            val resolvedThumbnail = officialStill ?: driveThumb
 
                             DesktopEpisode(
                                 id = epId,
@@ -546,7 +564,7 @@ class DesktopDriveScanner(
                                 durationMs = effectiveDur,
                                 durationFormatted = "${(effectiveDur / 60000L).coerceAtLeast(1L)} min",
                                 streamUrl = "",
-                                thumbnailUrl = thumb
+                                thumbnailUrl = resolvedThumbnail
                             )
                         }.sortedBy { it.episodeNumber }
 
@@ -563,8 +581,30 @@ class DesktopDriveScanner(
                     val rawEpName = epFile.name ?: "Episode ${epIndex + 1}"
                     val epNum = DesktopOnlineMetadataResolver.parseEpisodeNumber(rawEpName, epIndex + 1)
                     val durMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
-                    val driveThumb = epFile.thumbnailLink?.replace("s220", "s800") ?: ""
+                    val driveThumb = epFile.thumbnailLink?.replace("s220", "s800")
+                        ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800"
                     val batchMeta = seriesMeta.episodesBySeasonAndNum[Pair(1, epNum)]
+                    val epMeta = if (batchMeta == null || batchMeta.thumbnailUrl.isBlank()) {
+                        DesktopOnlineMetadataResolver.resolveEpisode(
+                            seriesName = seriesTitle,
+                            seasonNumber = 1,
+                            episodeNumber = epNum,
+                            rawFileName = rawEpName
+                        )
+                    } else null
+
+                    val title = batchMeta?.title?.ifBlank { null }
+                        ?: epMeta?.officialTitle?.ifBlank { null }
+                        ?: rawEpName.substringBeforeLast(".")
+                    val synopsis = batchMeta?.synopsis?.ifBlank { null }
+                        ?: epMeta?.synopsis
+                        ?: ""
+                    val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: (epMeta?.durationMinutes?.times(60_000L) ?: 45L * 60_000L))
+
+                    // Priority: 1. Official TVMaze episode still -> 2. Google Drive video frame snapshot
+                    val officialStill = batchMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                        ?: epMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                    val resolvedThumbnail = officialStill ?: driveThumb
 
                     DesktopEpisode(
                         id = epId,
@@ -572,12 +612,12 @@ class DesktopDriveScanner(
                         seriesTitle = seriesMeta.title.ifBlank { seriesTitle },
                         seasonNumber = 1,
                         episodeNumber = epNum,
-                        title = batchMeta?.title ?: rawEpName.substringBeforeLast("."),
-                        synopsis = batchMeta?.synopsis ?: "",
-                        durationMs = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: 45L * 60_000L),
-                        durationFormatted = "${((durMs.takeIf { it > 0 } ?: 2700000L) / 60000L)} min",
+                        title = title,
+                        synopsis = synopsis,
+                        durationMs = effectiveDur,
+                        durationFormatted = "${((effectiveDur.takeIf { it > 0 } ?: 2700000L) / 60000L)} min",
                         streamUrl = "",
-                        thumbnailUrl = driveThumb.ifBlank { batchMeta?.thumbnailUrl ?: "" }
+                        thumbnailUrl = resolvedThumbnail
                     )
                 }.sortedBy { it.episodeNumber }
 
@@ -592,7 +632,7 @@ class DesktopDriveScanner(
             posterUrl = seriesMeta.posterUrl,
             tagline = "",
             synopsis = seriesMeta.synopsis,
-            genres = seriesMeta.genres.ifBlank { "TV Series" },
+            genres = seriesMeta.genres.ifBlank { "Series" },
             releaseYear = seriesMeta.releaseYear,
             seasons = seasons
         )

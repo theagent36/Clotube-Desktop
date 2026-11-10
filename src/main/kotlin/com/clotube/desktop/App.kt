@@ -13,6 +13,7 @@ import com.clotube.desktop.auth.DesktopAuthManager
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopProfileManager
+import com.clotube.desktop.data.DesktopThumbnailPrefetcher
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
@@ -157,6 +158,18 @@ fun App(
             }
         } else {
             isScanning = false
+        }
+    }
+
+    // Silently pre-cache library thumbnails one by one in the background
+    LaunchedEffect(movies, series, authState.accessToken) {
+        if (authState.accessToken.isNotBlank() && (movies.isNotEmpty() || series.isNotEmpty())) {
+            DesktopThumbnailPrefetcher.enqueueAll(
+                movies = movies,
+                series = series,
+                accessToken = authState.accessToken,
+                userEmail = authState.userEmail
+            )
         }
     }
 

@@ -48,6 +48,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import com.clotube.desktop.ui.motion.FluidMotionKit
@@ -62,6 +63,7 @@ import com.clotube.desktop.ui.components.PacedBufferingSpinner
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -408,7 +410,7 @@ fun DesktopMoviePlayerScreen(
 
                 if (!player.isFirstFrameRendered || player.isBuffering) {
                     PacedBufferingSpinner(
-                        color = Color(0xFF00E5FF),
+                        color = Color(0xFF38BDF8),
                         size = 46.dp,
                         modifier = Modifier.align(Alignment.Center)
                     )
@@ -556,35 +558,71 @@ fun DesktopMoviePlayerScreen(
                     .fillMaxSize()
                     .padding(horizontal = 28.dp, vertical = 18.dp)
             ) {
-                // Top "Back to Collection" Header
+                // Top "Back to Collection" Header & Status Pill
+                val backInteraction = remember { MutableInteractionSource() }
+                val isBackHovered by backInteraction.collectIsHoveredAsState()
+
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = {
-                                saveMovieProgress()
-                                player.release()
-                                onBack()
-                            }
-                        )
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .padding(bottom = 16.dp)
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Back to Collection",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(
+                                interactionSource = backInteraction,
+                                indication = null,
+                                onClick = {
+                                    saveMovieProgress()
+                                    player.release()
+                                    onBack()
+                                }
+                            )
+                            .pointerHoverIcon(PointerIcon.Hand)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = if (isBackHovered) Color.White else Color(0xFF94A3B8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Back to Collection",
+                            color = if (isBackHovered) Color.White else Color(0xFF94A3B8),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = Color(0xFF0E131C),
+                        border = BorderStroke(1.dp, Color(0xFF1B2433))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF10B981)) // Quiet Emerald dot
+                            )
+                            Text(
+                                text = "Hardware Direct Stream Active",
+                                color = Color(0xFFCBD5E1),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
                 }
 
                 Row(
@@ -644,7 +682,7 @@ fun DesktopMoviePlayerScreen(
 
                                 if (!player.isFirstFrameRendered || player.isBuffering) {
                                     PacedBufferingSpinner(
-                                        color = Color(0xFF00E5FF),
+                                        color = Color(0xFF38BDF8),
                                         size = 46.dp,
                                         modifier = Modifier.align(Alignment.Center)
                                     )
@@ -813,23 +851,49 @@ fun DesktopMoviePlayerScreen(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
+                        // Scrollable Movie List
                         LazyColumn(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
                             items(allMovies) { movie ->
                                 val isSelected = movie.id == currentPlayingMovie.id
-                                Card(
-                                    shape = RoundedCornerShape(8.dp),
-                                    backgroundColor = if (isSelected) Color(0xFF132238) else Color(0xFF0E131E),
+                                val interactionSource = remember { MutableInteractionSource() }
+                                val isHovered by interactionSource.collectIsHoveredAsState()
+
+                                val hoveredBorderBrush = remember {
+                                    Brush.verticalGradient(
+                                        colors = listOf(Color(0x55FFFFFF), Color(0x14FFFFFF))
+                                    )
+                                }
+
+                                val defaultBorderBrush = remember {
+                                    Brush.verticalGradient(
+                                        colors = listOf(Color(0xFF222B3D), Color(0xFF131824))
+                                    )
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = when {
+                                        isSelected -> Color(0xFF121D2F)
+                                        isHovered -> Color(0xFF141C2B)
+                                        else -> Color(0xFF0F141F)
+                                    },
                                     border = BorderStroke(
-                                        width = 1.dp,
-                                        color = if (isSelected) Color(0xFF42A5F5) else Color(0xFF1E2638)
+                                        width = if (isSelected) 1.5.dp else 1.dp,
+                                        brush = when {
+                                            isSelected -> SolidColor(Color(0xFF38BDF8))
+                                            isHovered -> hoveredBorderBrush
+                                            else -> defaultBorderBrush
+                                        }
                                     ),
-                                    elevation = if (isSelected) 4.dp else 0.dp,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable {
+                                        .clickable(
+                                            interactionSource = interactionSource,
+                                            indication = null
+                                        ) {
                                             if (movie.id != currentPlayingMovie.id) {
                                                 saveMovieProgress()
                                                 currentPlayingMovie = movie
@@ -841,12 +905,13 @@ fun DesktopMoviePlayerScreen(
                                         modifier = Modifier.padding(10.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Card(
-                                            shape = RoundedCornerShape(6.dp),
-                                            backgroundColor = Color.Black,
+                                        // Movie Thumbnail Box
+                                        Box(
                                             modifier = Modifier
-                                                .width(72.dp)
-                                                .height(46.dp)
+                                                .width(76.dp)
+                                                .height(48.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF0A0D14))
                                         ) {
                                             if (!movie.thumbnailUrl.isNullOrBlank()) {
                                                 AsyncImage(
@@ -872,30 +937,43 @@ fun DesktopMoviePlayerScreen(
 
                                         Spacer(modifier = Modifier.width(12.dp))
 
+                                        // Title & Info
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = movie.title,
-                                                color = if (isSelected) Color(0xFF42A5F5) else Color.White,
+                                                color = Color.White,
                                                 fontSize = 13.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                maxLines = 1
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                             Spacer(modifier = Modifier.height(2.dp))
                                             Text(
                                                 text = "${movie.genres}  • ${movie.durationFormatted}",
                                                 color = Color(0xFF94A3B8),
                                                 fontSize = 11.sp,
-                                                maxLines = 1
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                         }
 
+                                        // Clean Audio Play Indicator for active item
                                         if (isSelected) {
-                                            Icon(
-                                                imageVector = Icons.Default.PlayArrow,
-                                                contentDescription = "Playing",
-                                                tint = Color(0xFF42A5F5),
-                                                modifier = Modifier.size(18.dp)
-                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xD90A0E17))
+                                                    .border(1.dp, Color(0xFF38BDF8), CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PlayArrow,
+                                                    contentDescription = "Playing",
+                                                    tint = Color(0xFF38BDF8),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -926,7 +1004,7 @@ private fun SeekFeedbackIndicator(
         Surface(
             shape = CircleShape,
             color = Color(0xB30C111C),
-            border = BorderStroke(1.dp, Color(0x6600E5FF)),
+            border = BorderStroke(1.dp, Color(0xFF222B3D)),
             elevation = 12.dp
         ) {
             Column(
@@ -939,7 +1017,7 @@ private fun SeekFeedbackIndicator(
                 Icon(
                     imageVector = if (direction == SeekFeedbackDirection.REWIND) Icons.Default.FastRewind else Icons.Default.FastForward,
                     contentDescription = null,
-                    tint = Color(0xFF00E5FF),
+                    tint = Color(0xFF60A5FA),
                     modifier = Modifier.size(26.dp)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
@@ -1056,12 +1134,12 @@ private fun InPlayerSettingsPopup(
                             Icon(
                                 imageVector = Icons.Default.Add,
                                 contentDescription = "Add Subtitle File",
-                                tint = Color(0xFF00E5FF),
+                                tint = Color(0xFF60A5FA),
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
                                 text = "Add Subtitle File...",
-                                color = Color(0xFF00E5FF),
+                                color = Color(0xFF60A5FA),
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -1175,7 +1253,7 @@ private fun MenuOptionItem(
     ) {
         Text(
             text = label,
-            color = if (isSelected) Color(0xFF42A5F5) else Color.White,
+            color = if (isSelected) Color(0xFF60A5FA) else Color.White,
             fontSize = 13.sp,
             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
@@ -1184,7 +1262,7 @@ private fun MenuOptionItem(
         if (isSelected) {
             Text(
                 text = "✓",
-                color = Color(0xFF42A5F5),
+                color = Color(0xFF60A5FA),
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(start = 8.dp)
@@ -1264,13 +1342,13 @@ fun SlickVolumeSlider(
                     .clip(RoundedCornerShape(2.dp))
                     .background(
                         Brush.horizontalGradient(
-                            colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                            colors = listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
                         )
                     )
             )
         }
 
-        val thumbSize = if (isDragging) 12.dp else 10.dp
+        val thumbSize = if (isDragging) 11.dp else 9.dp
         Box(
             modifier = Modifier
                 .offset {
@@ -1286,7 +1364,7 @@ fun SlickVolumeSlider(
                 .size(thumbSize)
                 .shadow(3.dp, CircleShape)
                 .clip(CircleShape)
-                .background(Color(0xFF42A5F5))
+                .background(Color.White)
         )
     }
 }
@@ -1408,7 +1486,7 @@ private fun BottomTransportBar(
                             .fillMaxWidth(hoverFraction)
                             .height(trackHeight)
                             .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0x4D42A5F5))
+                            .background(Color(0x3394A3B8))
                     )
                 }
 
@@ -1421,13 +1499,13 @@ private fun BottomTransportBar(
                             .clip(RoundedCornerShape(3.dp))
                             .background(
                                 Brush.horizontalGradient(
-                                    colors = listOf(Color(0xFF0D47A1), Color(0xFF42A5F5))
+                                    colors = listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
                                 )
                             )
                     )
                 }
 
-                // Glowing Scrubber Thumb
+                // Scrubber Thumb
                 Box(
                     modifier = Modifier
                         .offset {
@@ -1438,14 +1516,9 @@ private fun BottomTransportBar(
                             )
                         }
                         .size(thumbSize)
-                        .shadow(
-                            elevation = if (isScrubbing || isTimelineHovered) 10.dp else 4.dp,
-                            shape = CircleShape,
-                            spotColor = Color(0xFF42A5F5),
-                            ambientColor = Color(0xFF42A5F5).copy(alpha = 0.5f)
-                        )
+                        .shadow(4.dp, CircleShape, spotColor = Color(0x66000000))
                         .clip(CircleShape)
-                        .background(Color(0xFF42A5F5))
+                        .background(Color(0xFF60A5FA))
                 )
 
                 // Floating Magnetic Timecode Tooltip Bubble
@@ -1464,13 +1537,13 @@ private fun BottomTransportBar(
                                 )
                             }
                             .clip(RoundedCornerShape(5.dp))
-                            .background(Color(0xE60A0E17))
-                            .border(1.dp, Color(0xFF263346), RoundedCornerShape(5.dp))
+                            .background(Color(0xE60D121C))
+                            .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(5.dp))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
                             text = formatDuration(previewTimeMs),
-                            color = Color(0xFF42A5F5),
+                            color = Color(0xFFE2E8F0),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
@@ -1544,7 +1617,7 @@ private fun BottomTransportBar(
                     Icon(
                         imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = "Play/Pause",
-                        tint = if (isPlayHovered) Color(0xFF42A5F5) else Color.White,
+                        tint = Color.White,
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -1662,7 +1735,8 @@ private fun BottomTransportBar(
 
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF1E293B) else Color(0x33FFFFFF),
+                    color = Color(0xFF141924),
+                    border = BorderStroke(1.dp, Color(0xFF222B3D)),
                     modifier = Modifier
                         .graphicsLayer {
                             scaleX = speedScale
@@ -1677,7 +1751,7 @@ private fun BottomTransportBar(
                 ) {
                     Text(
                         text = speedLabel,
-                        color = if (activePopup == PlayerPopupType.SPEED) Color(0xFF42A5F5) else Color.White,
+                        color = Color(0xFFCBD5E1),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
@@ -1743,10 +1817,10 @@ private fun FluidMovieTransportIconButton(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = when {
-                !enabled -> Color(0x40FFFFFF)
-                active -> Color(0xFF42A5F5)
-                isHovered -> Color(0xFF42A5F5)
-                else -> Color(0xFFCBD5E1)
+                !enabled -> Color(0xFF475569)
+                active -> Color(0xFF60A5FA)
+                isHovered -> Color(0xFFF1F5F9)
+                else -> Color(0xFF94A3B8)
             },
             modifier = Modifier.size(iconSize)
         )

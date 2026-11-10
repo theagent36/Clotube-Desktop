@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Icon
+import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Movie
@@ -55,27 +56,27 @@ fun DesktopFigmaMediaCard(
 
     val clickFlashAlpha = remember { Animatable(0f) }
 
-    // Dynamic Physics: 1.0f (Idle) -> 1.035f (Hover) -> 0.965f (Click Press)
     val cardScale by animateFloatAsState(
         targetValue = when {
-            isPressed -> 0.965f
-            isHovered -> 1.035f
+            isPressed -> 0.97f
+            isHovered -> 1.03f
             else -> 1.0f
         },
-        animationSpec = if (isPressed) com.clotube.desktop.ui.motion.FluidMotionKit.TactilePress
-                        else com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
+        animationSpec = com.clotube.desktop.ui.motion.FluidMotionKit.SilkSpring,
         label = "media_card_scale"
     )
 
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isPressed -> Color(0xFF00E5FF)
-            isHovered -> Color(0xFF38BDF8)
-            else -> Color(0xFF1B2333)
-        },
-        animationSpec = tween(durationMillis = 200, easing = com.clotube.desktop.ui.motion.FluidMotionKit.CinemaDecel),
-        label = "media_card_border"
-    )
+    val hoveredBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(Color(0x55FFFFFF), Color(0x14FFFFFF))
+        )
+    }
+
+    val defaultBorderBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(Color(0xFF222B3D), Color(0xFF131824))
+        )
+    }
 
     val thumbnailBitmap = rememberThumbnailBitmap(
         primaryUrl = item.thumbnailUrl,
@@ -88,17 +89,21 @@ fun DesktopFigmaMediaCard(
             .graphicsLayer {
                 scaleX = cardScale
                 scaleY = cardScale
+                clip = false
             }
             .shadow(
-                elevation = if (isHovered) 16.dp else 4.dp,
+                elevation = if (isHovered) 14.dp else 3.dp,
                 shape = RoundedCornerShape(12.dp),
-                ambientColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
-                spotColor = Color(0xFF38BDF8).copy(alpha = 0.4f)
+                ambientColor = Color(0x40000000),
+                spotColor = Color(0x99000000)
             )
             .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF0F1420))
+            .background(Color(0xFF0F141F))
             .border(
-                border = BorderStroke(if (isHovered || isPressed) 1.5.dp else 1.dp, borderColor),
+                border = BorderStroke(
+                    width = 1.dp,
+                    brush = if (isHovered || isPressed) hoveredBorderBrush else defaultBorderBrush
+                ),
                 shape = RoundedCornerShape(12.dp)
             )
             .pointerHoverIcon(PointerIcon.Hand)
@@ -156,40 +161,42 @@ fun DesktopFigmaMediaCard(
             }
         }
 
-        // Hover Play Beacon
+        // Frosted Obsidian Play Disc on Hover
         if (isHovered) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .size(46.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xCC00E5FF))
-                    .shadow(12.dp, CircleShape),
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(Color(0xD90A0E17))
+                .border(1.dp, Color(0x33FFFFFF), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Rounded.PlayArrow,
                     contentDescription = "Play",
-                    tint = Color.Black,
-                    modifier = Modifier.size(28.dp)
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
                 )
             }
         }
 
         // Duration Pill (Top Right)
         if (item.durationMs > 0L) {
-            Box(
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = Color(0xCC0C111C),
+                border = BorderStroke(1.dp, Color(0xFF263346)),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Text(
                     text = formatDurationBadge(item.durationMs),
-                    color = Color.White,
+                    color = Color(0xFFCBD5E1),
                     fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                 )
             }
         }
@@ -231,7 +238,7 @@ fun DesktopFigmaMediaCard(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF00E5FF).copy(alpha = clickFlashAlpha.value))
+                    .background(Color.White.copy(alpha = clickFlashAlpha.value * 0.4f))
             )
         }
     }

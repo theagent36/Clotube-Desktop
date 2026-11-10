@@ -14,7 +14,8 @@ data class CachedLibrary(
     val userEmail: String = "",
     val timestamp: Long = System.currentTimeMillis(),
     val movies: List<DesktopMediaItem> = emptyList(),
-    val series: List<DesktopMediaItem> = emptyList()
+    val series: List<DesktopMediaItem> = emptyList(),
+    val seriesEpisodes: Map<String, List<DesktopEpisode>> = emptyMap()
 )
 
 object DesktopLibraryCache {

@@ -1,8 +1,11 @@
 package com.clotube.desktop.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -12,6 +15,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -128,35 +133,60 @@ fun DesktopSettingsScreen(
 
                 SettingsTab.entries.forEach { tab ->
                     val isSelected = activeTab == tab
+                    val tabInteraction = remember { MutableInteractionSource() }
+                    val isTabHovered by tabInteraction.collectIsHoveredAsState()
+
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 3.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable { activeTab = tab }
+                            .padding(vertical = 2.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(
+                                interactionSource = tabInteraction,
+                                indication = null
+                            ) { activeTab = tab }
                             .pointerHoverIcon(PointerIcon.Hand),
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (isSelected) Color(0xFF101D30) else Color.Transparent,
-                        border = if (isSelected) BorderStroke(1.dp, Color(0xFF1D3557)) else null
+                        shape = RoundedCornerShape(8.dp),
+                        color = when {
+                            isSelected -> Color(0xFF131824)
+                            isTabHovered -> Color(0xFF0E131D)
+                            else -> Color.Transparent
+                        },
+                        border = if (isSelected) BorderStroke(1.dp, Color(0xFF1E283A)) else null
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 11.dp),
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(16.dp)
+                                    .clip(RoundedCornerShape(1.5.dp))
+                                    .background(if (isSelected) Color(0xFF60A5FA) else Color.Transparent)
+                            )
                             Icon(
                                 imageVector = tab.icon,
                                 contentDescription = tab.label,
-                                tint = if (isSelected) Color(0xFF00E5FF) else Color(0xFF94A3B8),
+                                tint = when {
+                                    isSelected -> Color(0xFF60A5FA)
+                                    isTabHovered -> Color(0xFFCBD5E1)
+                                    else -> Color(0xFF64748B)
+                                },
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
                                 text = tab.label,
-                                color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                                color = when {
+                                    isSelected -> Color.White
+                                    isTabHovered -> Color(0xFFE2E8F0)
+                                    else -> Color(0xFF94A3B8)
+                                },
                                 fontSize = 13.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
                             )
                         }
                     }
@@ -220,7 +250,7 @@ fun DesktopSettingsScreen(
                                             .clip(CircleShape)
                                             .background(
                                                 Brush.linearGradient(
-                                                    listOf(Color(0xFF6366F1), Color(0xFF8B5CF6))
+                                                    listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))
                                                 )
                                             ),
                                         contentAlignment = Alignment.Center
@@ -242,18 +272,21 @@ fun DesktopSettingsScreen(
                                         Text(text = userEmail, color = Color(0xFF94A3B8), fontSize = 12.sp)
                                     }
                                 }
-                                Button(
-                                    onClick = { showSignOutDialog = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF33161C)),
+                                Surface(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showSignOutDialog = true }
+                                        .pointerHoverIcon(PointerIcon.Hand),
                                     shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF7F1D1D)),
-                                    modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                                    color = Color(0x1AE11D48),
+                                    border = BorderStroke(1.dp, Color(0x33E11D48))
                                 ) {
                                     Text(
                                         text = "Sign Out",
-                                        color = Color(0xFFF87171),
+                                        color = Color(0xFFFB7185),
                                         fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
                                     )
                                 }
                             }
@@ -269,7 +302,7 @@ fun DesktopSettingsScreen(
                                     showToast(if (it) "Cloud history sync enabled" else "Cloud history sync paused")
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -279,38 +312,45 @@ fun DesktopSettingsScreen(
                                     Text("Delta Library Revalidation", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text("Check Google Drive for newly added movies and series in the background.", color = Color(0xFF94A3B8), fontSize = 11.sp)
                                 }
-                                Button(
-                                    onClick = {
-                                        if (!isRescanning) {
-                                            isRescanning = true
-                                            onRescanLibrary()
-                                            showToast("Google Drive delta scan initiated")
-                                            scope.launch {
-                                                delay(2500L)
-                                                isRescanning = false
+                                Surface(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable(enabled = !isRescanning) {
+                                            if (!isRescanning) {
+                                                isRescanning = true
+                                                onRescanLibrary()
+                                                showToast("Google Drive delta scan initiated")
+                                                scope.launch {
+                                                    delay(2500L)
+                                                    isRescanning = false
+                                                }
                                             }
                                         }
-                                    },
-                                    enabled = !isRescanning,
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                                        .pointerHoverIcon(if (!isRescanning) PointerIcon.Hand else PointerIcon.Default),
                                     shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF334155)),
-                                    modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                                    color = Color(0xFF141A26),
+                                    border = BorderStroke(1.dp, Color(0xFF222B3D))
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Refresh,
-                                        contentDescription = null,
-                                        tint = Color(0xFF00E5FF),
-                                        modifier = Modifier
-                                            .size(15.dp)
-                                            .then(if (isRescanning) Modifier.rotate(rescanAngle.value) else Modifier)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = if (isRescanning) "Scanning Drive..." else "Rescan Drive Now",
-                                        color = Color.White,
-                                        fontSize = 11.sp
-                                    )
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Refresh,
+                                            contentDescription = null,
+                                            tint = Color(0xFF94A3B8),
+                                            modifier = Modifier
+                                                .size(14.dp)
+                                                .then(if (isRescanning) Modifier.rotate(rescanAngle.value) else Modifier)
+                                        )
+                                        Text(
+                                            text = if (isRescanning) "Scanning Drive..." else "Rescan Drive Now",
+                                            color = Color(0xFFCBD5E1),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -327,7 +367,7 @@ fun DesktopSettingsScreen(
                                     showToast(if (it) "Playback resume enabled" else "Playback will start from 00:00")
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             SettingsToggleRow(
                                 title = "Auto-Play Next Episode",
                                 subtitle = "Automatically start the next episode when the current one finishes.",
@@ -337,41 +377,38 @@ fun DesktopSettingsScreen(
                                     showToast(if (it) "Auto-play enabled" else "Auto-play disabled")
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
+                                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
                                     Text("Stream Pre-Buffer Depth", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text("Higher buffer prevents stutter on high-bitrate 4K files.", color = Color(0xFF94A3B8), fontSize = 11.sp)
                                 }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    listOf(1500 to "1.5s (Fast)", 3000 to "3.0s (Normal)", 5000 to "5.0s (Smooth)").forEach { (ms, label) ->
-                                        val isSelected = settings.bufferDepthMs == ms
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = if (isSelected) Color(0xFF1B2E4B) else Color(0xFF131824),
-                                            border = BorderStroke(1.dp, if (isSelected) Color(0xFF00E5FF) else Color(0xFF263346)),
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .clickable {
-                                                    DesktopAppSettings.update { copy(bufferDepthMs = ms) }
-                                                    showToast("Buffer depth set to ${label.substringBefore(" ")}")
-                                                }
-                                                .pointerHoverIcon(PointerIcon.Hand)
-                                        ) {
-                                            Text(
-                                                text = label,
-                                                color = if (isSelected) Color(0xFF00E5FF) else Color(0xFF94A3B8),
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                            )
+                                StudioSegmentedControl(
+                                    items = listOf(1500, 3000, 5000),
+                                    selectedItem = settings.bufferDepthMs,
+                                    onItemSelected = { ms ->
+                                        DesktopAppSettings.update { copy(bufferDepthMs = ms) }
+                                        val label = when (ms) {
+                                            1500 -> "1.5s"
+                                            3000 -> "3.0s"
+                                            5000 -> "5.0s"
+                                            else -> "${ms}ms"
+                                        }
+                                        showToast("Buffer depth set to $label")
+                                    },
+                                    labelProvider = { ms ->
+                                        when (ms) {
+                                            1500 -> "1.5s (Fast)"
+                                            3000 -> "3.0s (Normal)"
+                                            5000 -> "5.0s (Smooth)"
+                                            else -> "${ms}ms"
                                         }
                                     }
-                                }
+                                )
                             }
                         }
                     }
@@ -390,7 +427,7 @@ fun DesktopSettingsScreen(
                                     )
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             SettingsToggleRow(
                                 title = "Cinema Color & Dynamic Range Optimization",
                                 subtitle = "Expands 16-235 limited range to 0-255 full PC levels and enriches saturation for 4K HDR and BluRay streams.",
@@ -403,7 +440,7 @@ fun DesktopSettingsScreen(
                                     )
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             SettingsToggleRow(
                                 title = "Background Eco Mode",
                                 subtitle = "Freeze Compose render cycles and drop GPU usage when the app window is minimized.",
@@ -412,7 +449,7 @@ fun DesktopSettingsScreen(
                                     DesktopAppSettings.update { copy(backgroundEcoMode = it) }
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             SettingsToggleRow(
                                 title = "Battery Saver (Cap at 60 FPS)",
                                 subtitle = "Restrict Compose UI frame pacing to 60 FPS on high refresh displays (120Hz-165Hz+).",
@@ -435,41 +472,25 @@ fun DesktopSettingsScreen(
                                     showToast(if (it) "Volume persistence enabled" else "Volume resets to 100% on start")
                                 }
                             )
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
+                                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
                                     Text("Default Subtitles State", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text("Initial subtitle track selection when starting playback.", color = Color(0xFF94A3B8), fontSize = 11.sp)
                                 }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    listOf("Off", "English", "Auto-Detect").forEach { opt ->
-                                        val isSelected = settings.defaultSubtitleState == opt
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = if (isSelected) Color(0xFF1B2E4B) else Color(0xFF131824),
-                                            border = BorderStroke(1.dp, if (isSelected) Color(0xFF00E5FF) else Color(0xFF263346)),
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .clickable {
-                                                    DesktopAppSettings.update { copy(defaultSubtitleState = opt) }
-                                                    showToast("Default subtitles: $opt")
-                                                }
-                                                .pointerHoverIcon(PointerIcon.Hand)
-                                        ) {
-                                            Text(
-                                                text = opt,
-                                                color = if (isSelected) Color(0xFF00E5FF) else Color(0xFF94A3B8),
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                            )
-                                        }
-                                    }
-                                }
+                                StudioSegmentedControl(
+                                    items = listOf("Off", "English", "Auto-Detect"),
+                                    selectedItem = settings.defaultSubtitleState,
+                                    onItemSelected = { opt ->
+                                        DesktopAppSettings.update { copy(defaultSubtitleState = opt) }
+                                        showToast("Default subtitles: $opt")
+                                    },
+                                    labelProvider = { it }
+                                )
                             }
                         }
                     }
@@ -484,30 +505,49 @@ fun DesktopSettingsScreen(
                                 Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
                                     Text("Disk Cache Consumption", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     val mb = "%.2f MB".format(cacheSizeBytes / (1024.0 * 1024.0))
-                                    Text("Local poster thumbnails and TV series episode data: $mb", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                                    Text("Local poster thumbnails and series episode data: $mb", color = Color(0xFF94A3B8), fontSize = 11.sp)
                                 }
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            isCacheClearing = true
-                                            val bytesBefore = cacheSizeBytes
-                                            DesktopAppSettings.clearThumbnailCache(userEmail)
-                                            cacheSizeBytes = DesktopAppSettings.calculateCacheSizeBytes(userEmail)
-                                            val freedMb = "%.2f MB".format((bytesBefore - cacheSizeBytes).coerceAtLeast(0L) / (1024.0 * 1024.0))
-                                            isCacheClearing = false
-                                            showToast("Thumbnail cache cleared ($freedMb freed)")
+                                val canClearCache = !isCacheClearing && cacheSizeBytes > 0L
+                                Surface(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable(enabled = canClearCache) {
+                                            scope.launch {
+                                                isCacheClearing = true
+                                                val bytesBefore = cacheSizeBytes
+                                                DesktopAppSettings.clearThumbnailCache(userEmail)
+                                                cacheSizeBytes = DesktopAppSettings.calculateCacheSizeBytes(userEmail)
+                                                val freedMb = "%.2f MB".format((bytesBefore - cacheSizeBytes).coerceAtLeast(0L) / (1024.0 * 1024.0))
+                                                isCacheClearing = false
+                                                showToast("Thumbnail cache cleared ($freedMb freed)")
+                                            }
                                         }
-                                    },
-                                    enabled = !isCacheClearing && cacheSizeBytes > 0L,
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                                        .pointerHoverIcon(if (canClearCache) PointerIcon.Hand else PointerIcon.Default),
                                     shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF334155)),
-                                    modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                                    color = if (canClearCache) Color(0xFF141A26) else Color(0xFF0F141E),
+                                    border = BorderStroke(1.dp, if (canClearCache) Color(0xFF222B3D) else Color(0xFF19202D))
                                 ) {
-                                    Text(if (isCacheClearing) "Purging..." else "Clear Image Cache", color = Color.White, fontSize = 11.sp)
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteSweep,
+                                            contentDescription = null,
+                                            tint = if (canClearCache) Color(0xFF94A3B8) else Color(0xFF475569),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = if (isCacheClearing) "Purging..." else "Clear Image Cache",
+                                            color = if (canClearCache) Color(0xFFCBD5E1) else Color(0xFF64748B),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
                                 }
                             }
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 12.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -517,14 +557,22 @@ fun DesktopSettingsScreen(
                                     Text("Local Playback History", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text("Erase local resume marks from this device without affecting Google Drive.", color = Color(0xFF94A3B8), fontSize = 11.sp)
                                 }
-                                Button(
-                                    onClick = { showClearHistoryDialog = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF33161C)),
+                                Surface(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showClearHistoryDialog = true }
+                                        .pointerHoverIcon(PointerIcon.Hand),
                                     shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF7F1D1D)),
-                                    modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                                    color = Color(0x1AE11D48),
+                                    border = BorderStroke(1.dp, Color(0x33E11D48))
                                 ) {
-                                    Text("Clear History", color = Color(0xFFF87171), fontSize = 11.sp)
+                                    Text(
+                                        text = "Clear History",
+                                        color = Color(0xFFFB7185),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                                    )
                                 }
                             }
                         }
@@ -536,7 +584,7 @@ fun DesktopSettingsScreen(
                                 Text("Application Version", color = Color(0xFF94A3B8), fontSize = 12.sp)
                                 Text("Clotube Windows v1.0.4", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 10.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 10.dp))
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("Decoding Engine", color = Color(0xFF94A3B8), fontSize = 12.sp)
                                 val engineText = if (settings.hardwareAcceleration) {
@@ -546,17 +594,17 @@ fun DesktopSettingsScreen(
                                 }
                                 Text(
                                     text = engineText,
-                                    color = if (settings.hardwareAcceleration) Color(0xFF00E5FF) else Color(0xFFF59E0B),
+                                    color = if (settings.hardwareAcceleration) Color(0xFF38BDF8) else Color(0xFFF59E0B),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 10.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 10.dp))
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("UI Pipeline", color = Color(0xFF94A3B8), fontSize = 12.sp)
                                 Text("Jetpack Compose Multiplatform (Skia D3D)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
-                            HorizontalDivider(color = Color(0xFF1E2638), modifier = Modifier.padding(vertical = 10.dp))
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 10.dp))
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("Local Stream Daemon", color = Color(0xFF94A3B8), fontSize = 12.sp)
                                 Text("127.0.0.1 (LocalStreamServer)", color = Color(0xFF38BDF8), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -578,8 +626,8 @@ fun DesktopSettingsScreen(
         ) {
             Surface(
                 shape = RoundedCornerShape(24.dp),
-                color = Color(0xE60F172A),
-                border = BorderStroke(1.dp, Color(0xFF00E5FF)),
+                color = Color(0xE60E131C),
+                border = BorderStroke(1.dp, Brush.verticalGradient(listOf(Color(0xFF222B3D), Color(0xFF131824)))),
                 modifier = Modifier.shadow(16.dp, RoundedCornerShape(24.dp))
             ) {
                 Row(
@@ -590,7 +638,7 @@ fun DesktopSettingsScreen(
                     Icon(
                         imageVector = Icons.Rounded.CheckCircle,
                         contentDescription = null,
-                        tint = Color(0xFF00E5FF),
+                        tint = Color(0xFF38BDF8),
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
@@ -635,6 +683,105 @@ fun DesktopSettingsScreen(
 }
 
 @Composable
+fun StudioToggleSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 22.dp else 2.dp,
+        animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f),
+        label = "switch_thumb_offset"
+    )
+
+    val trackColor by animateColorAsState(
+        targetValue = if (checked) Color(0xFF2563EB) else Color(0xFF1B2230),
+        animationSpec = tween(durationMillis = 200),
+        label = "switch_track_color"
+    )
+
+    Box(
+        modifier = modifier
+            .width(44.dp)
+            .height(24.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(trackColor)
+            .border(
+                width = 1.dp,
+                color = if (checked) Color(0xFF3B82F6) else Color(0xFF263244),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onCheckedChange(!checked) }
+            .pointerHoverIcon(PointerIcon.Hand),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Box(
+            modifier = Modifier
+                .offset(x = thumbOffset)
+                .size(18.dp)
+                .shadow(elevation = 3.dp, shape = CircleShape)
+                .clip(CircleShape)
+                .background(Color.White)
+        )
+    }
+}
+
+@Composable
+fun <T> StudioSegmentedControl(
+    items: List<T>,
+    selectedItem: T,
+    onItemSelected: (T) -> Unit,
+    labelProvider: (T) -> String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp)),
+        shape = RoundedCornerShape(8.dp),
+        color = Color(0xFF0D111A),
+        border = BorderStroke(1.dp, Color(0xFF1A2230))
+    ) {
+        Row(
+            modifier = Modifier.padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items.forEach { item ->
+                val isSelected = item == selectedItem
+                val interactionSource = remember { MutableInteractionSource() }
+
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(
+                            interactionSource = interactionSource,
+                            indication = null
+                        ) { onItemSelected(item) }
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (isSelected) Color(0xFF1A2333) else Color.Transparent,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isSelected) Color(0xFF2E3B52) else Color.Transparent
+                    )
+                ) {
+                    Text(
+                        text = labelProvider(item),
+                        color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun DestructiveConfirmationDialog(
     title: String,
     description: String,
@@ -646,7 +793,7 @@ private fun DestructiveConfirmationDialog(
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = Color(0xFF0E131E),
-            border = BorderStroke(1.dp, Color(0xFF2B1D24)),
+            border = BorderStroke(1.dp, Brush.verticalGradient(listOf(Color(0xFF2B1D24), Color(0xFF191217)))),
             modifier = Modifier
                 .width(420.dp)
                 .shadow(24.dp, RoundedCornerShape(14.dp))
@@ -663,13 +810,13 @@ private fun DestructiveConfirmationDialog(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF33161C)),
+                            .background(Color(0x26E11D48)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.WarningAmber,
                             contentDescription = null,
-                            tint = Color(0xFFF87171),
+                            tint = Color(0xFFFB7185),
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -700,13 +847,22 @@ private fun DestructiveConfirmationDialog(
                         Text("Cancel", color = Color(0xFF94A3B8), fontSize = 12.sp)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = onConfirm,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF991B1B)),
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onConfirm() }
+                            .pointerHoverIcon(PointerIcon.Hand),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                        color = Color(0xFFE11D48),
+                        border = BorderStroke(1.dp, Color(0xFFF43F5E))
                     ) {
-                        Text(confirmButtonText, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = confirmButtonText,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                        )
                     }
                 }
             }
@@ -719,8 +875,8 @@ private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        color = Color(0xFF0D111A),
-        border = BorderStroke(1.dp, Color(0xFF1A2232))
+        color = Color(0xFF0E131C),
+        border = BorderStroke(1.dp, Brush.verticalGradient(listOf(Color(0xFF222B3D), Color(0xFF131824))))
     ) {
         Column(
             modifier = Modifier.padding(20.dp),
@@ -746,16 +902,9 @@ private fun SettingsToggleRow(
             Spacer(modifier = Modifier.height(2.dp))
             Text(text = subtitle, color = Color(0xFF94A3B8), fontSize = 11.sp)
         }
-        Switch(
+        StudioToggleSwitch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = Color(0xFF00E5FF),
-                uncheckedThumbColor = Color(0xFF64748B),
-                uncheckedTrackColor = Color(0xFF1E293B)
-            ),
-            modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+            onCheckedChange = onCheckedChange
         )
     }
 }
