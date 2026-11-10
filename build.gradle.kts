@@ -41,13 +41,18 @@ compose.desktop {
     application {
         mainClass = "com.clotube.desktop.MainKt"
 
-        // Production JVM flags for Direct3D 11 presentation & low-latency GC
+        // Production-bounded G1GC & Direct3D 11 hardware presentation flags
         jvmArgs += listOf(
             "-XX:+UseG1GC",
             "-Xms256m",
-            "-Xmx1024m",
-            "-XX:MaxGCPauseMillis=20",
+            "-Xmx960m",                           // Hard ceiling preventing 2 GB RAM sawtooth spikes
+            "-XX:MaxGCPauseMillis=15",
+            "-XX:InitiatingHeapOccupancyPercent=40",
+            "-XX:G1ReservePercent=15",
+            "-XX:G1PeriodicGCInterval=3000",      // Periodically uncommits idle heap pages back to Windows OS
             "-Dskiko.renderApi=DIRECT3D",
+            "-Dskiko.vsync.enabled=true",
+            "-Dskiko.direct3d.waitVsync=true",
             "-Dcompose.interop.blending=false",
             "-Djava.net.preferIPv4Stack=true",
             "-Dsun.awt.noerasebackground=true"
@@ -58,7 +63,7 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             packageName = "Clotube"
-            packageVersion = "2.0.1" // Milestone patch release version
+            packageVersion = "2.0.2"              // Incremented one patch version above installed 2.0.1
             description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"

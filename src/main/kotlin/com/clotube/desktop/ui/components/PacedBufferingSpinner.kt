@@ -13,12 +13,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.clotube.desktop.getActiveDisplayRefreshRate
-import kotlinx.coroutines.delay
 
 /**
- * Display-refresh-rate synchronized buffering spinner.
- * Paced via coroutines so it never spins at 500+ FPS or elevates GPU temperatures.
+ * Display-refresh-rate and window-lifecycle synchronized buffering spinner.
+ * Routed through [DesktopFramePacer.paceLoop] so background GPU usage drops to 0% when minimized or unfocused.
  */
 @Composable
 fun PacedBufferingSpinner(
@@ -29,13 +27,8 @@ fun PacedBufferingSpinner(
     var rotationAngle by remember { mutableFloatStateOf(0f) }
 
     LaunchedEffect(Unit) {
-        val displayHz = getActiveDisplayRefreshRate()
-        val frameIntervalMs = (1000L / displayHz.toLong()).coerceIn(4L, 33L)
-        val degreesPerFrame = 360f / (1000f / frameIntervalMs.toFloat())
-
-        while (true) {
-            rotationAngle = (rotationAngle + degreesPerFrame) % 360f
-            delay(frameIntervalMs)
+        DesktopFramePacer.paceLoop { frameStepMs ->
+            rotationAngle = (rotationAngle + (360f * frameStepMs / 1000f)) % 360f
         }
     }
 

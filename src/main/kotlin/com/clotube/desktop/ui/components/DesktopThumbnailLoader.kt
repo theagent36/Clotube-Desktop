@@ -3,6 +3,7 @@ package com.clotube.desktop.ui.components
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import com.clotube.desktop.data.DesktopProfileManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -24,22 +25,32 @@ enum class ThumbnailSize(val maxDimension: Int, val jpegQuality: Int) {
     HERO(maxDimension = 1920, jpegQuality = 90)
 }
 
-// Bounded LRU in-memory cache (Capacity: 120 decoded textures)
-private const val MEMORY_CACHE_CAPACITY = 120
+// Bounded LRU in-memory cache (Capacity: 200 decoded textures)
+private const val MAX_MEMORY_THUMBNAILS = 200
 private val thumbnailMemoryCache: MutableMap<String, ImageBitmap> =
     Collections.synchronizedMap(
-        object : LinkedHashMap<String, ImageBitmap>(MEMORY_CACHE_CAPACITY, 0.75f, true) {
+        object : LinkedHashMap<String, ImageBitmap>(256, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean {
-                return size > MEMORY_CACHE_CAPACITY
+                return size > MAX_MEMORY_THUMBNAILS
             }
         }
     )
 
-private val diskCacheDir = File("cache", "thumbnails").apply {
-    if (!exists()) mkdirs()
+private val cacheRootDir: File by lazy {
+    File(DesktopProfileManager.appDataRoot, "cache").apply {
+        if (!exists()) mkdirs()
+    }
 }
 
-private val failedUrlsFile = File("cache", "failed_urls.txt")
+private val diskCacheDir: File by lazy {
+    File(cacheRootDir, "thumbnails").apply {
+        if (!exists()) mkdirs()
+    }
+}
+
+private val failedUrlsFile: File by lazy {
+    File(cacheRootDir, "failed_urls.txt")
+}
 private val failedUrlCache = ConcurrentHashMap.newKeySet<String>().apply {
     try {
         if (failedUrlsFile.exists()) {

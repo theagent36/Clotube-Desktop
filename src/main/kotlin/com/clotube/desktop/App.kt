@@ -20,6 +20,7 @@ import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
 import com.clotube.desktop.ui.screens.DesktopLoginScreen
 import com.clotube.desktop.ui.screens.DesktopSetupWizardScreen
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.joinAll
@@ -104,57 +105,61 @@ fun App(
                 isScanning = true
             }
 
-            coroutineScope.launch(Dispatchers.IO) {
-                try {
-                    val scanner = DesktopDriveScanner(token)
-
-                    // Stream movies in 4-item chunks
-                    val moviesJob = launch {
-                        scanner.streamMovies().collect { chunk ->
-                            if (authState.userEmail.equals(email, ignoreCase = true)) {
-                                if (hasExistingMedia) {
-                                    // Merge without shrinking or jumping existing list
-                                    movies = mergeLibraryItems(movies, chunk)
-                                } else {
-                                    // Cold start: assign chunk and unlock UI on first 4 items!
-                                    movies = chunk
-                                    if (chunk.isNotEmpty()) {
-                                        isScanning = false
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Stream series in 4-item chunks
-                    val seriesJob = launch {
-                        scanner.streamSeriesFolders().collect { chunk ->
-                            if (authState.userEmail.equals(email, ignoreCase = true)) {
-                                if (hasExistingMedia) {
-                                    series = mergeLibraryItems(series, chunk)
-                                } else {
-                                    series = chunk
-                                    if (chunk.isNotEmpty()) {
-                                        isScanning = false
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Await full completion of both streams
-                    joinAll(moviesJob, seriesJob)
-
-                    // Write full library to persistent disk cache
-                    if (movies.isNotEmpty() || series.isNotEmpty()) {
-                        DesktopLibraryCache.save(email, movies, series)
-                        println("[App] Progressive sync completed and cached: ${movies.size} movies, ${series.size} series")
-                    }
-                } catch (e: Exception) {
-                    System.err.println("[App] Progressive scan error for $email: ${e.message}")
-                } finally {
-                    isScanning = false
+            try {
+                val scanner = withContext(Dispatchers.IO) {
+                    DesktopDriveScanner(token)
                 }
+
+                // Stream movies in 4-item chunks
+                val moviesJob = launch {
+                    scanner.streamMovies().collect { chunk ->
+                        if (authState.userEmail.equals(email, ignoreCase = true)) {
+                            if (hasExistingMedia) {
+                                // Merge without shrinking or jumping existing list
+                                movies = mergeLibraryItems(movies, chunk)
+                            } else {
+                                // Cold start: assign chunk and unlock UI on first 4 items!
+                                movies = chunk
+                                if (chunk.isNotEmpty()) {
+                                    isScanning = false
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Stream series in 4-item chunks
+                val seriesJob = launch {
+                    scanner.streamSeriesFolders().collect { chunk ->
+                        if (authState.userEmail.equals(email, ignoreCase = true)) {
+                            if (hasExistingMedia) {
+                                series = mergeLibraryItems(series, chunk)
+                            } else {
+                                series = chunk
+                                if (chunk.isNotEmpty()) {
+                                    isScanning = false
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Await full completion of both streams
+                joinAll(moviesJob, seriesJob)
+
+                // Write full library to persistent disk cache
+                if (authState.userEmail.equals(email, ignoreCase = true) &&
+                    (movies.isNotEmpty() || series.isNotEmpty())
+                ) {
+                    DesktopLibraryCache.save(email, movies, series)
+                    println("[App] Progressive sync completed and cached: ${movies.size} movies, ${series.size} series")
+                }
+                isScanning = false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                System.err.println("[App] Progressive scan error for $email: ${e.message}")
+                isScanning = false
             }
         } else {
             isScanning = false

@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.last
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.ArrayDeque
 
@@ -32,6 +34,9 @@ class DesktopDriveScanner(
 ) {
 
     private val driveService: Drive?
+    private val directoryMutex = Mutex()
+    @Volatile
+    private var cachedDirectories: ResolvedDriveDirectories? = null
 
     companion object {
         private const val CHUNK_SIZE = 4 // Exactly 1 row in desktop grid view
@@ -73,7 +78,8 @@ class DesktopDriveScanner(
     fun streamMovies(): Flow<List<DesktopMediaItem>> = flow {
         val service = driveService ?: return@flow
         println("[DesktopDriveScanner] Resolving Movies folder...")
-        val rootId = resolveBestFolder(setOf("movies", "movie", "films", "cinema"))
+        val dirs = getResolvedDirectories(service)
+        val rootId = dirs.moviesFolderId
         if (rootId == null) {
             System.err.println("[DesktopDriveScanner] Could not locate Movies folder in Google Drive.")
             emit(emptyList())
@@ -161,7 +167,8 @@ class DesktopDriveScanner(
     fun streamSeriesFolders(): Flow<List<DesktopMediaItem>> = flow {
         val service = driveService ?: return@flow
         println("[DesktopDriveScanner] Resolving TV Series folder...")
-        val rootId = resolveBestFolder(setOf("series", "tv series", "tv shows", "shows"))
+        val dirs = getResolvedDirectories(service)
+        val rootId = dirs.seriesFolderId
         if (rootId == null) {
             System.err.println("[DesktopDriveScanner] Could not locate TV Series folder in Google Drive.")
             emit(emptyList())
@@ -223,7 +230,9 @@ class DesktopDriveScanner(
      * without emitting intermediate partial packets.
      */
     suspend fun loadMovies(): List<DesktopMediaItem> = withContext(Dispatchers.IO) {
-        val rootId = resolveBestFolder(setOf("movies", "movie", "films", "cinema")) ?: return@withContext emptyList()
+        val service = driveService ?: return@withContext emptyList()
+        val dirs = getResolvedDirectories(service)
+        val rootId = dirs.moviesFolderId ?: return@withContext emptyList()
         val discoveredMovies = mutableListOf<DesktopMediaItem>()
         val folderQueue = ArrayDeque<FolderQueueNode>()
         val visitedFolders = mutableSetOf<String>()
@@ -278,7 +287,9 @@ class DesktopDriveScanner(
      * without emitting intermediate partial packets.
      */
     suspend fun loadSeriesFolders(): List<DesktopMediaItem> = withContext(Dispatchers.IO) {
-        val rootId = resolveBestFolder(setOf("series", "tv series", "tv shows", "shows")) ?: return@withContext emptyList()
+        val service = driveService ?: return@withContext emptyList()
+        val dirs = getResolvedDirectories(service)
+        val rootId = dirs.seriesFolderId ?: return@withContext emptyList()
         val items = fetchFolderContents(rootId)
         val seriesFolders = items.filter {
             it.mimeType == "application/vnd.google-apps.folder" ||
@@ -343,62 +354,17 @@ class DesktopDriveScanner(
         return resultList
     }
 
-    private fun resolveBestFolder(targetNames: Set<String>): String? {
-        val service = driveService ?: return null
-        val query = "(mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/vnd.google-apps.shortcut') and trashed = false"
-        val candidates = mutableListOf<com.google.api.services.drive.model.File>()
-
-        try {
-            var pageToken: String? = null
-            do {
-                val response = service.files().list()
-                    .setQ(query)
-                    .setFields("nextPageToken, files(id, name, shortcutDetails)")
-                    .setSupportsAllDrives(true)
-                    .setIncludeItemsFromAllDrives(true)
-                    .setPageSize(500)
-                    .setPageToken(pageToken)
-                    .execute()
-
-                response.files?.forEach { file ->
-                    val normalized = file.name?.trim()?.lowercase() ?: ""
-                    if (targetNames.contains(normalized)) {
-                        candidates.add(file)
-                    }
-                }
-                pageToken = response.nextPageToken
-            } while (pageToken != null)
-        } catch (e: Exception) {
-            System.err.println("[DesktopDriveScanner] API error during resolveBestFolder: ${e.message}")
-            e.printStackTrace()
-            return null
-        }
-
-        if (candidates.isEmpty()) return null
-        if (candidates.size == 1) return resolveTargetId(candidates.first())
-
-        var bestId: String? = null
-        var maxCount = -1
-
-        for (candidate in candidates) {
-            val candidateId = resolveTargetId(candidate)
-            val count = fetchFolderContents(candidateId).size
-            if (count > maxCount) {
-                maxCount = count
-                bestId = candidateId
+    private suspend fun getResolvedDirectories(service: Drive): ResolvedDriveDirectories {
+        cachedDirectories?.let { return it }
+        return directoryMutex.withLock {
+            cachedDirectories ?: DesktopDriveDirectoryManager.resolveHierarchy(service).also {
+                cachedDirectories = it
             }
         }
-
-        return bestId ?: resolveTargetId(candidates.first())
     }
 
-    private fun resolveTargetId(file: com.google.api.services.drive.model.File): String {
-        return if (file.mimeType == "application/vnd.google-apps.shortcut" && file.shortcutDetails?.targetId != null) {
-            file.shortcutDetails.targetId
-        } else {
-            file.id
-        }
-    }
+    private fun resolveTargetId(file: com.google.api.services.drive.model.File): String =
+        DesktopDriveDirectoryManager.resolveTargetId(file)
 
     /**
      * Recursively loads and resolves official episode metadata for a given series folder.

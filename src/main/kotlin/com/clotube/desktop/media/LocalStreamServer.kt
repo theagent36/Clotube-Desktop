@@ -9,9 +9,11 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 object LocalStreamServer {
     private var server: HttpServer? = null
+    private val shutdownHookRegistered = AtomicBoolean(false)
     var serverPort: Int = 0
         private set
 
@@ -31,6 +33,16 @@ object LocalStreamServer {
             s.start()
             server = s
             serverPort = s.address.port
+            if (shutdownHookRegistered.compareAndSet(false, true)) {
+                try {
+                    Runtime.getRuntime().addShutdownHook(
+                        Thread({ stop() }, "LocalStreamServer-ShutdownHook")
+                    )
+                } catch (_: IllegalStateException) {
+                    stop()
+                    return 0
+                }
+            }
             println("[LocalStreamServer] Listening on http://127.0.0.1:$serverPort")
             return serverPort
         } catch (e: Exception) {
@@ -42,7 +54,8 @@ object LocalStreamServer {
     @Synchronized
     fun stop() {
         try {
-            server?.stop(0)
+            val activeServer = server ?: return
+            activeServer.stop(0)
             server = null
             serverPort = 0
             println("[LocalStreamServer] Stopped successfully.")
