@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -49,6 +50,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.focus.FocusRequester
@@ -57,19 +59,28 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import kotlin.math.roundToInt
 import com.clotube.desktop.data.DesktopContinueWatchingItem
 import com.clotube.desktop.data.DesktopSeriesCache
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
+import com.clotube.desktop.data.DesktopWatchlistManager
+import com.clotube.desktop.data.DesktopWatchlistSync
+import com.clotube.desktop.data.WatchlistMediaType
+import com.clotube.desktop.data.WatchlistStatus
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import com.clotube.desktop.ui.components.DesktopFramePacer
 import com.clotube.desktop.ui.motion.FluidEntranceContainer
+import com.clotube.desktop.ui.motion.FluidMotionKit
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -88,13 +99,14 @@ private data class SearchEpisodeMatch(
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
     MOVIES("Movies", Icons.Rounded.Movie),
-    SERIES("Series", Icons.Rounded.Tv),
+    TV_SERIES("TV Series", Icons.Rounded.Tv),
+    WATCHLIST("Watchlist", Icons.Rounded.Bookmarks),
     RECENTS("Recents", Icons.Rounded.History),
     SETTINGS("Settings", Icons.Rounded.Settings);
 
     companion object {
-        // Compatibility alias so legacy DesktopNavSection.TV_SERIES calls resolve to SERIES
-        val TV_SERIES: DesktopNavSection get() = SERIES
+        // Compatibility alias so legacy DesktopNavSection.SERIES calls resolve to TV_SERIES
+        val SERIES: DesktopNavSection get() = TV_SERIES
     }
 }
 
@@ -154,6 +166,7 @@ fun DesktopHomeScreen(
     var selectedSeriesForDetail by remember { mutableStateOf<DesktopMediaItem?>(null) }
     var selectedMovieForPlayer by remember { mutableStateOf<DesktopMediaItem?>(null) }
     var watchHistoryRevision by remember { mutableIntStateOf(0) }
+    val coroutineScope = rememberCoroutineScope()
 
     val navigateTo: (DesktopNavSection) -> Unit = { section ->
         selectedSeriesForDetail = null
@@ -177,6 +190,7 @@ fun DesktopHomeScreen(
 
     val cleanSearch = searchQuery.trim()
     val isSearchActive = cleanSearch.length >= 2
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
 
     val matchedMovies = remember(cleanSearch, movies) {
         if (!isSearchActive) emptyList()
@@ -218,6 +232,23 @@ fun DesktopHomeScreen(
             }
             list.take(8)
         }
+    }
+
+    val matchedWatchlistEntries = remember(cleanSearch, userEmail, watchlistRevision, matchedMovies, matchedSeries) {
+        if (!isSearchActive) emptyList()
+        else {
+            val driveNormalized = (matchedMovies + matchedSeries).map { DesktopWatchlistManager.normalizeTitle(it.title) }.toSet()
+            DesktopWatchlistManager.getVisibleEntries(userEmail).filter { entry ->
+                entry.title.contains(cleanSearch, ignoreCase = true) &&
+                    !driveNormalized.contains(entry.normalizedTitle)
+            }.take(6)
+        }
+    }
+
+    val cleanNormalized = remember(cleanSearch) { DesktopWatchlistManager.normalizeTitle(cleanSearch) }
+    val hasExactWatchlistMatch = remember(cleanNormalized, userEmail, watchlistRevision) {
+        if (!isSearchActive) true
+        else DesktopWatchlistManager.getVisibleEntries(userEmail).any { it.normalizedTitle == cleanNormalized }
     }
 
     // Keyboard Shortcuts (Ctrl+K to focus search, ESC to clear search)
@@ -292,7 +323,7 @@ fun DesktopHomeScreen(
 
                     // Floating Global Search Overlay
                     if (isSearchActive) {
-                        val totalResults = matchedMovies.size + matchedSeries.size + matchedEpisodes.size
+                        val totalResults = matchedMovies.size + matchedSeries.size + matchedEpisodes.size + matchedWatchlistEntries.size
                         Surface(
                             shape = RoundedCornerShape(14.dp),
                             color = Color(0xF70C111C),
@@ -304,7 +335,7 @@ fun DesktopHomeScreen(
                                 .widthIn(min = 520.dp, max = 640.dp)
                                 .heightIn(max = 500.dp)
                         ) {
-                            if (totalResults == 0) {
+                            if (totalResults == 0 && hasExactWatchlistMatch) {
                                 Box(
                                     modifier = Modifier.fillMaxWidth().padding(28.dp),
                                     contentAlignment = Alignment.Center
@@ -320,6 +351,17 @@ fun DesktopHomeScreen(
                                     contentPadding = PaddingValues(vertical = 12.dp, horizontal = 14.dp),
                                     verticalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
+                                    if (totalResults == 0) {
+                                        item(key = "no_res_info") {
+                                            Text(
+                                                text = "No catalog results found for \"$cleanSearch\"",
+                                                color = Color(0xFF64748B),
+                                                fontSize = 12.sp,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+
                                     // SERIES SECTION
                                     if (matchedSeries.isNotEmpty()) {
                                         item(key = "hdr_series") {
@@ -335,6 +377,10 @@ fun DesktopHomeScreen(
 
                                         items(matchedSeries, key = { "search_series_${it.id}" }) { s ->
                                             val thumb = rememberThumbnailBitmap(s.thumbnailUrl, s.fallbackThumbnailUrl, accessToken, userEmail, ThumbnailSize.CARD)
+                                            val watchlistStatus = remember(s.id, s.title, userEmail, watchlistRevision) {
+                                                DesktopWatchlistManager.getStatusForMedia(userEmail, s.title, s.id)
+                                            }
+
                                             SearchResultRowCard(
                                                 onClick = {
                                                     searchQuery = ""
@@ -351,7 +397,63 @@ fun DesktopHomeScreen(
                                                     }
                                                 }
                                                 Column(modifier = Modifier.weight(1f)) {
-                                                    Text(text = s.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = s.title,
+                                                            color = Color.White,
+                                                            fontSize = 13.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f, fill = false)
+                                                        )
+                                                        if (watchlistStatus == WatchlistStatus.WATCHED) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                color = Color(0x1F10B981),
+                                                                border = BorderStroke(1.dp, Color(0x4010B981))
+                                                            ) {
+                                                                Text(
+                                                                    text = "Watched",
+                                                                    color = Color(0xFF6EE7B7),
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        } else if (watchlistStatus == WatchlistStatus.WATCH_LATER) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                color = Color(0x2460A5FA),
+                                                                border = BorderStroke(1.dp, Color(0x4760A5FA))
+                                                            ) {
+                                                                Text(
+                                                                    text = "Watch Later",
+                                                                    color = Color(0xFF93C5FD),
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        } else if (watchlistStatus == WatchlistStatus.REWATCH) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                color = Color(0xFF1E2534),
+                                                                border = BorderStroke(1.dp, Color(0x33FFFFFF))
+                                                            ) {
+                                                                Text(
+                                                                    text = "Rewatch",
+                                                                    color = Color(0xFFF1F5F9),
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    }
                                                     Text(text = s.genre.ifBlank { "Series" }, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
                                                 }
                                                 Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
@@ -419,6 +521,13 @@ fun DesktopHomeScreen(
 
                                         items(matchedMovies, key = { "search_movie_${it.id}" }) { m ->
                                             val thumb = rememberThumbnailBitmap(m.thumbnailUrl, m.fallbackThumbnailUrl, accessToken, userEmail, ThumbnailSize.CARD)
+                                            val watchlistStatus = remember(m.id, m.title, userEmail, watchlistRevision) {
+                                                DesktopWatchlistManager.getStatusForMedia(userEmail, m.title, m.id)
+                                                    ?: if (DesktopWatchHistoryManager.isEpisodeWatched(userEmail, m.id)) {
+                                                        WatchlistStatus.WATCHED
+                                                    } else null
+                                            }
+
                                             SearchResultRowCard(
                                                 onClick = {
                                                     searchQuery = ""
@@ -434,11 +543,204 @@ fun DesktopHomeScreen(
                                                     }
                                                 }
                                                 Column(modifier = Modifier.weight(1f)) {
-                                                    Text(text = m.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = m.title,
+                                                            color = Color.White,
+                                                            fontSize = 13.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f, fill = false)
+                                                        )
+                                                        if (watchlistStatus == WatchlistStatus.WATCHED) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                color = Color(0x1F10B981),
+                                                                border = BorderStroke(1.dp, Color(0x4010B981))
+                                                            ) {
+                                                                Text(
+                                                                    text = "Watched",
+                                                                    color = Color(0xFF6EE7B7),
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        } else if (watchlistStatus == WatchlistStatus.WATCH_LATER) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                color = Color(0x2460A5FA),
+                                                                border = BorderStroke(1.dp, Color(0x4760A5FA))
+                                                            ) {
+                                                                Text(
+                                                                    text = "Watch Later",
+                                                                    color = Color(0xFF93C5FD),
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        } else if (watchlistStatus == WatchlistStatus.REWATCH) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                color = Color(0xFF1E2534),
+                                                                border = BorderStroke(1.dp, Color(0x33FFFFFF))
+                                                            ) {
+                                                                Text(
+                                                                    text = "Rewatch",
+                                                                    color = Color(0xFFF1F5F9),
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    }
                                                     Text(text = "${m.releaseYear} • ${m.genre}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
                                                 }
                                                 Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
                                                     Text(text = "Movie", color = Color(0xFFCBD5E1), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // FROM YOUR WATCHLIST SECTION (Off-Drive / Custom / Deleted Titles)
+                                    if (matchedWatchlistEntries.isNotEmpty()) {
+                                        item(key = "hdr_watchlist") {
+                                            Text(
+                                                text = "FROM YOUR WATCHLIST",
+                                                color = Color(0xFFF59E0B),
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                letterSpacing = 1.2.sp,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                            )
+                                        }
+
+                                        items(matchedWatchlistEntries, key = { "search_wl_${it.id}" }) { entry ->
+                                            SearchResultRowCard(
+                                                onClick = {
+                                                    // Toggle status on row click
+                                                    val next = when (entry.status) {
+                                                        WatchlistStatus.WATCHED -> WatchlistStatus.WATCH_LATER
+                                                        WatchlistStatus.WATCH_LATER -> WatchlistStatus.REWATCH
+                                                        WatchlistStatus.REWATCH -> WatchlistStatus.WATCHED
+                                                    }
+                                                    coroutineScope.launch {
+                                                        DesktopWatchlistManager.updateEntryById(userEmail, entry.id, newStatus = next)
+                                                        DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                                    }
+                                                }
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (entry.mediaType == WatchlistMediaType.SERIES) Icons.Rounded.Tv else Icons.Rounded.Movie,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFF94A3B8),
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(text = entry.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Text(text = "${entry.mediaType.label} • Not in Drive", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
+                                                }
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = when (entry.status) {
+                                                        WatchlistStatus.WATCHED -> Color(0x1F10B981)
+                                                        WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
+                                                        WatchlistStatus.REWATCH -> Color(0xFF1E2534)
+                                                    },
+                                                    border = BorderStroke(
+                                                        1.dp,
+                                                        when (entry.status) {
+                                                            WatchlistStatus.WATCHED -> Color(0x4010B981)
+                                                            WatchlistStatus.WATCH_LATER -> Color(0x4760A5FA)
+                                                            WatchlistStatus.REWATCH -> Color(0x33FFFFFF)
+                                                        }
+                                                    ),
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .clickable {
+                                                            val nextStatus = when (entry.status) {
+                                                                WatchlistStatus.WATCHED -> WatchlistStatus.WATCH_LATER
+                                                                WatchlistStatus.WATCH_LATER -> WatchlistStatus.REWATCH
+                                                                WatchlistStatus.REWATCH -> WatchlistStatus.WATCHED
+                                                            }
+                                                            coroutineScope.launch {
+                                                                DesktopWatchlistManager.updateEntryById(userEmail, entry.id, newStatus = nextStatus)
+                                                                DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                                            }
+                                                        }
+                                                        .pointerHoverIcon(PointerIcon.Hand)
+                                                ) {
+                                                    Text(
+                                                        text = entry.status.label,
+                                                        color = when (entry.status) {
+                                                            WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
+                                                            WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
+                                                            WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                                                        },
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Quick-Add Off-Drive Title Action Row
+                                    if (isSearchActive && !hasExactWatchlistMatch) {
+                                        item(key = "quick_add_watchlist_row") {
+                                            Surface(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .clickable {
+                                                        coroutineScope.launch {
+                                                            DesktopWatchlistManager.upsertEntry(
+                                                                email = userEmail,
+                                                                title = cleanSearch,
+                                                                mediaType = WatchlistMediaType.MOVIE,
+                                                                status = WatchlistStatus.WATCHED,
+                                                                driveId = null
+                                                            )
+                                                            DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                                        }
+                                                    }
+                                                    .pointerHoverIcon(PointerIcon.Hand),
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = Color(0xFF10B981).copy(alpha = 0.12f),
+                                                border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.35f))
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Add,
+                                                        contentDescription = "Add",
+                                                        tint = Color(0xFF34D399),
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Text(
+                                                        text = "Mark \"$cleanSearch\" as Watched (Save to Watchlist)",
+                                                        color = Color(0xFF34D399),
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
                                                 }
                                             }
                                         }
@@ -655,7 +957,7 @@ fun DesktopHomeScreen(
                                     }
                                 )
                             }
-                            DesktopNavSection.SERIES -> {
+                            DesktopNavSection.TV_SERIES -> {
                                 FigmaSeriesContent(
                                     series = filteredSeries,
                                     userEmail = userEmail,
@@ -663,6 +965,22 @@ fun DesktopHomeScreen(
                                     watchHistoryRevision = watchHistoryRevision,
                                     onSeriesClick = { seriesItem, epId ->
                                         targetedEpisodeId = epId
+                                        selectedSeriesForDetail = seriesItem
+                                    }
+                                )
+                            }
+                            DesktopNavSection.WATCHLIST -> {
+                                FigmaWatchlistContent(
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    movies = movies,
+                                    series = series,
+                                    onMovieClick = { movie ->
+                                        selectedMovieForPlayer = movie
+                                        onMediaClick(movie)
+                                    },
+                                    onSeriesClick = { seriesItem ->
+                                        targetedEpisodeId = null
                                         selectedSeriesForDetail = seriesItem
                                     }
                                 )
@@ -851,7 +1169,8 @@ private fun DesktopFigmaSidebar(
         val navItems = listOf(
             DesktopNavSection.HOME,
             DesktopNavSection.MOVIES,
-            DesktopNavSection.SERIES,
+            DesktopNavSection.TV_SERIES,
+            DesktopNavSection.WATCHLIST,
             DesktopNavSection.RECENTS
         )
 
@@ -872,7 +1191,7 @@ private fun DesktopFigmaSidebar(
                         .pointerHoverIcon(PointerIcon.Hand),
                     shape = RoundedCornerShape(10.dp),
                     color = when {
-                        isSelected -> Color(0xFF131824)
+                        isSelected -> Color(0xFF131D31)
                         isHovered -> Color(0xFF0E131D)
                         else -> Color.Transparent
                     },
@@ -893,16 +1212,22 @@ private fun DesktopFigmaSidebar(
                                 .width(3.dp)
                                 .height(16.dp)
                                 .clip(RoundedCornerShape(2.dp))
-                                .background(if (isSelected) Color(0xFF60A5FA) else Color.Transparent)
+                                .background(if (isSelected) Color(0xFF3B82F6) else Color.Transparent)
                         )
 
                         Spacer(modifier = Modifier.width(9.dp))
 
+                        val itemIcon = if (section == DesktopNavSection.WATCHLIST) {
+                            if (isSelected) Icons.Rounded.Bookmarks else Icons.Rounded.BookmarkBorder
+                        } else {
+                            section.icon
+                        }
+
                         Icon(
-                            imageVector = section.icon,
+                            imageVector = itemIcon,
                             contentDescription = section.label,
                             tint = when {
-                                isSelected -> Color(0xFF60A5FA)
+                                isSelected -> Color(0xFF3B82F6)
                                 isHovered -> Color(0xFFCBD5E1)
                                 else -> Color(0xFF64748B)
                             },
@@ -1646,7 +1971,8 @@ private fun FigmaHomeContent(
     val scrollState = rememberScrollState()
 
     val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
-    val continueWatchingItems = remember(userEmail, movies, series, watchHistoryRevision, globalRevision) {
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val continueWatchingItems = remember(userEmail, movies, series, watchHistoryRevision, globalRevision, watchlistRevision) {
         DesktopWatchHistoryManager.getContinueWatching(userEmail, movies, series)
     }
 
@@ -1802,6 +2128,7 @@ private fun FigmaHomeContent(
                 actionLabel = "View all",
                 items = continueWatching.take(5),
                 accessToken = accessToken,
+                userEmail = userEmail,
                 onActionClick = { onNavigateSection(DesktopNavSection.RECENTS) },
                 onItemClick = onMovieClick
             )
@@ -1814,6 +2141,7 @@ private fun FigmaHomeContent(
                 actionLabel = "View all",
                 items = movies.take(5),
                 accessToken = accessToken,
+                userEmail = userEmail,
                 onActionClick = { onNavigateSection(DesktopNavSection.MOVIES) },
                 onItemClick = onMovieClick
             )
@@ -1826,6 +2154,7 @@ private fun FigmaHomeContent(
                 actionLabel = "View all",
                 items = series.take(5),
                 accessToken = accessToken,
+                userEmail = userEmail,
                 onActionClick = { onNavigateSection(DesktopNavSection.SERIES) },
                 onItemClick = onSeriesClick
             )
@@ -1891,7 +2220,8 @@ private fun FigmaMoviesContent(
     onMovieClick: (DesktopMediaItem) -> Unit
 ) {
     val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
-    val lastWatchedMovie = remember(movies, userEmail, watchHistoryRevision, globalRevision) {
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val lastWatchedMovie = remember(movies, userEmail, watchHistoryRevision, globalRevision, watchlistRevision) {
         DesktopWatchHistoryManager.getLastWatchedMovie(userEmail, movies)
     }
 
@@ -2020,13 +2350,19 @@ private fun FigmaMoviesContent(
                             index = index,
                             modifier = Modifier.weight(1f)
                         ) {
-                            DesktopSeriesGridCard(
-                                seriesItem = item,
+                            MediaCardContextMenuBox(
+                                item = item,
                                 userEmail = userEmail,
-                                accessToken = accessToken,
-                                onClick = { onMovieClick(item) },
-                                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
-                            )
+                                accessToken = accessToken
+                            ) {
+                                DesktopSeriesGridCard(
+                                    seriesItem = item,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    onClick = { onMovieClick(item) },
+                                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
+                                )
+                            }
                         }
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
@@ -2296,7 +2632,8 @@ private fun FigmaSeriesContent(
     onSeriesClick: (DesktopMediaItem, String?) -> Unit
 ) {
     val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
-    val lastWatchedSeries = remember(series, userEmail, watchHistoryRevision, globalRevision) {
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val lastWatchedSeries = remember(series, userEmail, watchHistoryRevision, globalRevision, watchlistRevision) {
         DesktopWatchHistoryManager.getLastWatchedSeries(userEmail, series)
     }
 
@@ -2433,13 +2770,19 @@ private fun FigmaSeriesContent(
                             index = index,
                             modifier = Modifier.weight(1f)
                         ) {
-                            DesktopSeriesGridCard(
-                                seriesItem = item,
+                            MediaCardContextMenuBox(
+                                item = item,
                                 userEmail = userEmail,
-                                accessToken = accessToken,
-                                onClick = { onSeriesClick(item, null) },
-                                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
-                            )
+                                accessToken = accessToken
+                            ) {
+                                DesktopSeriesGridCard(
+                                    seriesItem = item,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken,
+                                    onClick = { onSeriesClick(item, null) },
+                                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
+                                )
+                            }
                         }
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
@@ -2714,6 +3057,255 @@ private fun SeriesHeroBillboard(
 }
 
 @Composable
+fun MediaCardContextMenuBox(
+    item: DesktopMediaItem,
+    userEmail: String,
+    accessToken: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val revision = DesktopWatchlistManager.watchlistRevision.intValue
+    val currentStatus = remember(item.id, item.title, userEmail, revision) {
+        DesktopWatchlistManager.getStatusForMedia(userEmail, item.title, item.id)
+    }
+
+    var isPopupMounted by remember { mutableStateOf(false) }
+    var targetExpanded by remember { mutableStateOf(false) }
+    var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
+    val coroutineScope = rememberCoroutineScope()
+
+    val dismissMenu: () -> Unit = {
+        targetExpanded = false
+    }
+
+    Box(
+        modifier = modifier.pointerInput(item.id, userEmail) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                        val pos = event.changes.firstOrNull()?.position
+                        if (pos != null) {
+                            menuOffset = IntOffset(pos.x.roundToInt(), pos.y.roundToInt())
+                            isPopupMounted = true
+                            targetExpanded = true
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
+            }
+        }
+    ) {
+        content()
+
+        if (isPopupMounted) {
+            Popup(
+                offset = menuOffset,
+                onDismissRequest = dismissMenu,
+                properties = PopupProperties(focusable = true)
+            ) {
+                val scaleAnim = remember { Animatable(0.86f) }
+                val alphaAnim = remember { Animatable(0f) }
+                val offsetYAnim = remember { Animatable(-8f) }
+
+                LaunchedEffect(targetExpanded) {
+                    if (targetExpanded) {
+                        launch {
+                            alphaAnim.animateTo(
+                                targetValue = 1f,
+                                animationSpec = tween(
+                                    durationMillis = 160,
+                                    easing = FluidMotionKit.CinemaDecel
+                                )
+                            )
+                        }
+                        launch {
+                            offsetYAnim.animateTo(
+                                targetValue = 0f,
+                                animationSpec = spring(
+                                    dampingRatio = 0.78f,
+                                    stiffness = 460f
+                                )
+                            )
+                        }
+                        scaleAnim.animateTo(
+                            targetValue = 1f,
+                            animationSpec = spring(
+                                dampingRatio = 0.76f,
+                                stiffness = 480f
+                            )
+                        )
+                    } else {
+                        launch {
+                            scaleAnim.animateTo(
+                                targetValue = 0.92f,
+                                animationSpec = tween(
+                                    durationMillis = 120,
+                                    easing = FastOutLinearInEasing
+                                )
+                            )
+                        }
+                        alphaAnim.animateTo(
+                            targetValue = 0f,
+                            animationSpec = tween(
+                                durationMillis = 120,
+                                easing = FastOutLinearInEasing
+                            )
+                        )
+                        isPopupMounted = false
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF0F141F),
+                    border = BorderStroke(1.dp, Color(0xFF263248)),
+                    shadowElevation = 18.dp,
+                    modifier = Modifier
+                        .width(188.dp)
+                        .graphicsLayer {
+                            transformOrigin = TransformOrigin(0f, 0f)
+                            scaleX = scaleAnim.value
+                            scaleY = scaleAnim.value
+                            translationY = offsetYAnim.value
+                            alpha = alphaAnim.value
+                        }
+                ) {
+                    Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                        Text(
+                            text = "SET WATCH STATUS",
+                            color = Color(0xFF64748B),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.1.sp,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
+
+                        val options = listOf(
+                            Triple(WatchlistStatus.WATCHED, Icons.Rounded.CheckCircle, Color(0xFF10B981)),
+                            Triple(WatchlistStatus.WATCH_LATER, Icons.Rounded.BookmarkAdd, Color(0xFF60A5FA)),
+                            Triple(WatchlistStatus.REWATCH, Icons.Rounded.Replay, Color(0xFFCBD5E1))
+                        )
+
+                        options.forEachIndexed { index, (statusOption, iconVector, accentColor) ->
+                            val isSelected = currentStatus == statusOption
+                            var rowHovered by remember { mutableStateOf(false) }
+
+                            val selectedBg = when (statusOption) {
+                                WatchlistStatus.WATCHED -> Color(0x1F10B981)
+                                WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
+                                WatchlistStatus.REWATCH -> Color(0xFF1E2534)
+                            }
+                            val selectedTextColor = when (statusOption) {
+                                WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
+                                WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
+                                WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                            }
+
+                            val itemAlpha = remember { Animatable(0f) }
+                            val itemSlideX = remember { Animatable(-8f) }
+
+                            LaunchedEffect(targetExpanded) {
+                                if (targetExpanded) {
+                                    delay(index * 18L)
+                                    launch {
+                                        itemAlpha.animateTo(
+                                            targetValue = 1f,
+                                            animationSpec = tween(150, easing = FluidMotionKit.CinemaDecel)
+                                        )
+                                    }
+                                    itemSlideX.animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = FluidMotionKit.SilkSpring
+                                    )
+                                }
+                            }
+
+                            val hoverNudgeX by animateFloatAsState(
+                                targetValue = if (rowHovered) 3f else 0f,
+                                animationSpec = FluidMotionKit.TactilePress,
+                                label = "ContextMenuRowNudge"
+                            )
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        when {
+                                            rowHovered -> Color(0xFF1A2436)
+                                            isSelected -> selectedBg
+                                            else -> Color.Transparent
+                                        }
+                                    )
+                                    .clickable {
+                                        dismissMenu()
+                                        coroutineScope.launch {
+                                            DesktopWatchlistManager.upsertEntry(
+                                                email = userEmail,
+                                                title = item.title,
+                                                mediaType = if (item.isSeries) WatchlistMediaType.SERIES else WatchlistMediaType.MOVIE,
+                                                status = statusOption,
+                                                driveId = item.id
+                                            )
+                                            DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                        }
+                                    }
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .pointerInput(Unit) {
+                                        awaitPointerEventScope {
+                                            while (true) {
+                                                val ev = awaitPointerEvent()
+                                                when (ev.type) {
+                                                    PointerEventType.Enter -> rowHovered = true
+                                                    PointerEventType.Exit -> rowHovered = false
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .graphicsLayer {
+                                        alpha = itemAlpha.value
+                                        translationX = itemSlideX.value + hoverNudgeX
+                                    },
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = iconVector,
+                                        contentDescription = statusOption.label,
+                                        tint = accentColor,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = statusOption.label,
+                                        color = if (isSelected) selectedTextColor else Color(0xFFCBD5E1),
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                    )
+                                }
+
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = "Active",
+                                        tint = accentColor,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun DesktopSeriesGridCard(
     seriesItem: DesktopMediaItem,
     userEmail: String,
@@ -2760,6 +3352,19 @@ fun DesktopSeriesGridCard(
         DesktopSeriesCache.get(userEmail, seriesItem.id)
     }
     val seasonCount = cachedSeries?.seasons?.size ?: 0
+
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
+
+    val cardWatchlistStatus = remember(seriesItem.id, seriesItem.title, userEmail, watchlistRevision) {
+        if (userEmail.isBlank()) null
+        else DesktopWatchlistManager.getStatusForMedia(userEmail, seriesItem.title, seriesItem.id)
+    }
+    val isCardHistoryWatched = remember(seriesItem.id, seriesItem.isSeries, userEmail, historyRevision) {
+        !seriesItem.isSeries && userEmail.isNotBlank() && DesktopWatchHistoryManager.isEpisodeWatched(userEmail, seriesItem.id)
+    }
+    val showWatchedBadge = cardWatchlistStatus == WatchlistStatus.WATCHED ||
+        (cardWatchlistStatus == null && isCardHistoryWatched)
 
     Box(
         modifier = modifier
@@ -2846,6 +3451,93 @@ fun DesktopSeriesGridCard(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                     )
+                }
+            }
+
+            // Top-Left Watchlist Status Badge
+            if (showWatchedBadge) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xD90A0E17),
+                    border = BorderStroke(1.dp, Color(0x4010B981)),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = "Watched",
+                            tint = Color(0xFF10B981),
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "Watched",
+                            color = Color(0xFF6EE7B7),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            } else if (cardWatchlistStatus == WatchlistStatus.WATCH_LATER) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xD90A0E17),
+                    border = BorderStroke(1.dp, Color(0x4760A5FA)),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Bookmark,
+                            contentDescription = "Watch Later",
+                            tint = Color(0xFF60A5FA),
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "Watch Later",
+                            color = Color(0xFF93C5FD),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            } else if (cardWatchlistStatus == WatchlistStatus.REWATCH) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xD90A0E17),
+                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Replay,
+                            contentDescription = "Rewatch",
+                            tint = Color(0xFFCBD5E1),
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "Rewatch",
+                            color = Color(0xFFF1F5F9),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
 
@@ -3978,6 +4670,7 @@ private fun FigmaCarouselSection(
     actionLabel: String,
     items: List<DesktopMediaItem>,
     accessToken: String = "",
+    userEmail: String = "",
     onActionClick: () -> Unit,
     onItemClick: (DesktopMediaItem) -> Unit
 ) {
@@ -4051,14 +4744,21 @@ private fun FigmaCarouselSection(
         ) {
             itemsIndexed(items, key = { _, it -> it.id }) { index, item ->
                 FluidEntranceContainer(index = index) {
-                    DesktopFigmaMediaCard(
+                    MediaCardContextMenuBox(
                         item = item,
-                        accessToken = accessToken,
-                        onClick = { onItemClick(item) },
-                        modifier = Modifier
-                            .width(248.dp)
-                            .height(144.dp)
-                    )
+                        userEmail = userEmail,
+                        accessToken = accessToken
+                    ) {
+                        DesktopFigmaMediaCard(
+                            item = item,
+                            accessToken = accessToken,
+                            userEmail = userEmail,
+                            onClick = { onItemClick(item) },
+                            modifier = Modifier
+                                .width(248.dp)
+                                .height(144.dp)
+                        )
+                    }
                 }
             }
         }

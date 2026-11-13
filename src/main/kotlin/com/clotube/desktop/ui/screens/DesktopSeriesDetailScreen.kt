@@ -52,6 +52,10 @@ import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopSeriesCache
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
+import com.clotube.desktop.data.DesktopWatchlistManager
+import com.clotube.desktop.data.DesktopWatchlistSync
+import com.clotube.desktop.data.WatchlistMediaType
+import com.clotube.desktop.data.WatchlistStatus
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
@@ -124,6 +128,11 @@ fun DesktopSeriesDetailScreen(
     val historyRev = DesktopWatchHistoryManager.historyRevision.intValue
     var watchedEpisodeIds by remember(userEmail, historyRev) {
         mutableStateOf(DesktopWatchHistoryManager.getWatchedEpisodeIds(userEmail))
+    }
+
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val currentSeriesStatus = remember(seriesItem.id, seriesItem.title, userEmail, watchlistRevision) {
+        DesktopWatchlistManager.getStatusForMedia(userEmail, seriesItem.title, seriesItem.id)
     }
 
     // 2. Off-Thread Drive Scanning (Runs strictly on Dispatchers.IO to never block the EDT)
@@ -592,13 +601,123 @@ fun DesktopSeriesDetailScreen(
                         letterSpacing = 1.6.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = series.title,
-                        color = Color.White,
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        letterSpacing = (-0.5).sp
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text(
+                            text = series.title,
+                            color = Color.White,
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = (-0.5).sp
+                        )
+
+                        // Status Pill Button next to series title
+                        var statusDropdownExpanded by remember { mutableStateOf(false) }
+                        Box {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = when (currentSeriesStatus) {
+                                    WatchlistStatus.WATCHED -> Color(0x1F10B981)
+                                    WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
+                                    WatchlistStatus.REWATCH -> Color(0xFF1E2534)
+                                    else -> Color(0xFF1E293B)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    when (currentSeriesStatus) {
+                                        WatchlistStatus.WATCHED -> Color(0x4010B981)
+                                        WatchlistStatus.WATCH_LATER -> Color(0x4760A5FA)
+                                        WatchlistStatus.REWATCH -> Color(0x33FFFFFF)
+                                        else -> Color(0xFF334155)
+                                    }
+                                ),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .clickable { statusDropdownExpanded = true }
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = when (currentSeriesStatus) {
+                                            WatchlistStatus.WATCHED -> Icons.Rounded.Check
+                                            WatchlistStatus.WATCH_LATER -> Icons.Rounded.Bookmark
+                                            WatchlistStatus.REWATCH -> Icons.Rounded.Replay
+                                            else -> Icons.Rounded.BookmarkBorder
+                                        },
+                                        contentDescription = null,
+                                        tint = when (currentSeriesStatus) {
+                                            WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
+                                            WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
+                                            WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                                            else -> Color(0xFF94A3B8)
+                                        },
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = currentSeriesStatus?.label ?: "Add to Watchlist",
+                                        color = when (currentSeriesStatus) {
+                                            WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
+                                            WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
+                                            WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                                            else -> Color(0xFFCBD5E1)
+                                        },
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Rounded.ArrowDropDown,
+                                        contentDescription = null,
+                                        tint = Color(0xFF94A3B8),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+
+                            DropdownMenu(
+                                expanded = statusDropdownExpanded,
+                                onDismissRequest = { statusDropdownExpanded = false },
+                                modifier = Modifier.background(Color(0xFF0F141F)).border(1.dp, Color(0xFF263248), RoundedCornerShape(8.dp))
+                            ) {
+                                WatchlistStatus.entries.forEach { status ->
+                                    val isSelected = currentSeriesStatus == status
+                                    val activeColor = when (status) {
+                                        WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
+                                        WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
+                                        WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                                    }
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = status.label,
+                                                color = if (isSelected) activeColor else Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        },
+                                        onClick = {
+                                            statusDropdownExpanded = false
+                                            coroutineScope.launch {
+                                                DesktopWatchlistManager.upsertEntry(
+                                                    email = userEmail,
+                                                    title = seriesItem.title,
+                                                    mediaType = WatchlistMediaType.SERIES,
+                                                    status = status,
+                                                    driveId = seriesItem.id
+                                                )
+                                                DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(6.dp))
 
                     val seasonsCountText = "${series.seasons.size} ${if (series.seasons.size == 1) "Season" else "Seasons"}"
@@ -633,14 +752,31 @@ fun DesktopSeriesDetailScreen(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val isWatchLater = currentSeriesStatus == WatchlistStatus.WATCH_LATER
                     Surface(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { }
+                            .clickable {
+                                val next = when (currentSeriesStatus) {
+                                    WatchlistStatus.WATCH_LATER -> WatchlistStatus.REWATCH
+                                    WatchlistStatus.REWATCH -> WatchlistStatus.WATCHED
+                                    else -> WatchlistStatus.WATCH_LATER
+                                }
+                                coroutineScope.launch {
+                                    DesktopWatchlistManager.upsertEntry(
+                                        email = userEmail,
+                                        title = seriesItem.title,
+                                        mediaType = WatchlistMediaType.SERIES,
+                                        status = next,
+                                        driveId = seriesItem.id
+                                    )
+                                    DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                }
+                            }
                             .pointerHoverIcon(PointerIcon.Hand),
                         shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFF131824),
-                        border = BorderStroke(1.dp, Color(0xFF263346))
+                        color = if (isWatchLater) Color(0xFF1E293B) else Color(0xFF131824),
+                        border = BorderStroke(1.dp, if (isWatchLater) Color(0xFF3B82F6) else Color(0xFF263346))
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
@@ -648,14 +784,14 @@ fun DesktopSeriesDetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.Add,
+                                imageVector = if (isWatchLater) Icons.Rounded.BookmarkAdded else Icons.Rounded.Add,
                                 contentDescription = null,
-                                tint = Color.White,
+                                tint = if (isWatchLater) Color(0xFF60A5FA) else Color.White,
                                 modifier = Modifier.size(14.dp)
                             )
                             Text(
-                                text = "My list",
-                                color = Color.White,
+                                text = if (isWatchLater) "In Watchlist" else "My list",
+                                color = if (isWatchLater) Color(0xFF93C5FD) else Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold
                             )

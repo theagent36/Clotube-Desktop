@@ -8,7 +8,10 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -44,6 +47,7 @@ object DesktopWatchHistoryManager {
     private const val MAX_ACTIVE_WINDOW = 50
     private val gson: Gson = GsonBuilder().disableHtmlEscaping().create()
     private val loadLock = Any()
+    private val historyScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val activeItemsCache = ConcurrentHashMap<String, ConcurrentHashMap<String, HistoryItemEntityV2>>()
     private val seriesResumeCache = ConcurrentHashMap<String, ConcurrentHashMap<String, SeriesResumeEntityV2>>()
@@ -377,7 +381,8 @@ object DesktopWatchHistoryManager {
         val now = System.currentTimeMillis()
         val effectiveDur = if (durationMs > 0L) durationMs else 45L * 60000L
         val fraction = (positionMs.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f)
-        val isWatched = watchedSet.contains(fileId) ||
+        val previouslyWatched = watchedSet.contains(fileId) || (itemsMap[fileId]?.isWatched == true)
+        val isWatched = previouslyWatched ||
             fraction >= 0.90f ||
             (durationMs > 0L && positionMs >= (durationMs * 0.90f))
         if (isWatched) watchedSet.add(fileId)
@@ -416,6 +421,41 @@ object DesktopWatchHistoryManager {
             }
         }
 
+        // Auto-mark watched in persistent watchlist on completion (>= 90%)
+        if (!isSeries && fraction >= 0.90f) {
+            historyScope.launch {
+                DesktopWatchlistManager.autoMarkWatchedIfEligible(
+                    email = email,
+                    title = title,
+                    mediaType = WatchlistMediaType.MOVIE,
+                    driveId = fileId
+                )
+            }
+        } else if (isSeries && fraction >= 0.90f && seriesId.isNotBlank()) {
+            val cachedSeries = DesktopSeriesCache.get(email, seriesId)
+            val allEpisodes = cachedSeries?.seasons?.flatMap { it.episodes } ?: emptyList()
+            val allWatched = allEpisodes.isNotEmpty() && allEpisodes.all { ep ->
+                if (ep.id == fileId) true
+                else {
+                    val epItem = itemsMap[ep.id]
+                    epItem?.isWatched == true ||
+                        (epItem != null && epItem.durationMs > 0L && epItem.positionMs >= (epItem.durationMs * 0.90f)) ||
+                        watchedSet.contains(ep.id)
+                }
+            }
+            if (allWatched) {
+                val resolvedSeriesTitle = cachedSeries?.title?.ifBlank { title } ?: title
+                historyScope.launch {
+                    DesktopWatchlistManager.autoMarkWatchedIfEligible(
+                        email = email,
+                        title = resolvedSeriesTitle,
+                        mediaType = WatchlistMediaType.SERIES,
+                        driveId = seriesId
+                    )
+                }
+            }
+        }
+
         saveLocal(email)
     }
 
@@ -427,6 +467,8 @@ object DesktopWatchHistoryManager {
         val item = activeItemsCache[sanitized]?.get(fileId) ?: return false
         return item.isWatched || item.progressFraction >= 0.90f
     }
+
+    fun isMediaWatched(email: String, fileId: String): Boolean = isEpisodeWatched(email, fileId)
 
     fun getWatchedEpisodeIds(email: String): Set<String> {
         if (email.isBlank()) return emptySet()
@@ -591,7 +633,13 @@ object DesktopWatchHistoryManager {
         ensureProfileLoaded(email)
         val sanitized = DesktopProfileManager.sanitizeEmail(email)
         val item = activeItemsCache[sanitized]?.get(fileId) ?: return 0L
-        if (item.isWatched || item.progressFraction >= 0.95f) return 0L
+
+        // Only reset to 00:00 when the current position is at the end (>= 90%).
+        // Sticky `isWatched` must not block resumption when rewatching and pausing mid-movie.
+        val isAtEnd = item.progressFraction >= 0.90f ||
+            (item.durationMs > 0L && item.positionMs >= (item.durationMs * 0.90f))
+        if (isAtEnd) return 0L
+
         return if (item.positionMs > 1500L) item.positionMs else 0L
     }
 
@@ -612,7 +660,7 @@ object DesktopWatchHistoryManager {
             val effectiveDur = if (item.durationMs > 0L) item.durationMs else movie.durationMs
             val fraction = if (effectiveDur > 0L) (item.positionMs.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f) else 0f
 
-            if (item.timestamp > 0L && item.positionMs >= 3000L && fraction in 0.005f..0.95f && !item.isWatched) {
+            if (item.timestamp > 0L && item.positionMs >= 3000L && fraction >= 0.005f && fraction < 0.90f) {
                 result.add(
                     DesktopContinueWatchingItem(
                         mediaId = movie.id,
@@ -779,7 +827,7 @@ object DesktopWatchHistoryManager {
             val effectiveDur = if (item.durationMs > 0L) item.durationMs else movie.durationMs
             val fraction = if (effectiveDur > 0L) (item.positionMs.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f) else 0f
 
-            if (item.timestamp > maxTs && item.positionMs > 0L && fraction in 0.01f..0.98f) {
+            if (item.timestamp > maxTs && item.positionMs > 0L && fraction >= 0.01f && fraction < 0.90f) {
                 maxTs = item.timestamp
                 val remainingMs = (effectiveDur - item.positionMs).coerceAtLeast(0L)
                 val remainingStr = formatRemainingTime(remainingMs)

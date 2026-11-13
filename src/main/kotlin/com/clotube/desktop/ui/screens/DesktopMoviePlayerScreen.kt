@@ -72,6 +72,10 @@ import coil3.compose.AsyncImage
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
+import com.clotube.desktop.data.DesktopWatchlistManager
+import com.clotube.desktop.data.DesktopWatchlistSync
+import com.clotube.desktop.data.WatchlistMediaType
+import com.clotube.desktop.data.WatchlistStatus
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
@@ -120,6 +124,8 @@ fun DesktopMoviePlayerScreen(
     onBack: () -> Unit
 ) {
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
 
     val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
         DesktopAppSettings.state.seekStepSeconds * 1000L
@@ -198,7 +204,6 @@ fun DesktopMoviePlayerScreen(
 
     var controlsVisible by remember { mutableStateOf(true) }
     var isScrubbing by remember { mutableStateOf(false) }
-    var scrubFraction by remember { mutableFloatStateOf(0f) }
     var activePopup by remember { mutableStateOf(PlayerPopupType.NONE) }
     var seekFeedbackDirection by remember { mutableStateOf<SeekFeedbackDirection?>(null) }
     var seekFeedbackTrigger by remember { mutableIntStateOf(0) }
@@ -334,16 +339,6 @@ fun DesktopMoviePlayerScreen(
             kfm.removeKeyEventDispatcher(dispatcher)
         }
     }
-
-    val activeFraction = if (isScrubbing) {
-        scrubFraction
-    } else if (player.totalDurationMs > 0L) {
-        (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f)
-    } else {
-        0f
-    }
-
-    val displayTimeMs = if (isScrubbing) (scrubFraction * player.totalDurationMs).toLong() else player.currentTimeMs
 
     Box(
         modifier = Modifier
@@ -482,9 +477,9 @@ fun DesktopMoviePlayerScreen(
                         // Bottom Transport Bar
                         BottomTransportBar(
                             player = player,
-                            activeFraction = activeFraction,
-                            displayTimeMs = displayTimeMs,
-                            isScrubbing = isScrubbing,
+                            timeMsProvider = { player.currentTimeMs },
+                            durationMsProvider = { player.totalDurationMs },
+                            onScrubbingStateChange = { isScrubbing = it },
                             isFullscreen = true,
                             currentSpeed = currentSpeed,
                             activePopup = activePopup,
@@ -497,16 +492,6 @@ fun DesktopMoviePlayerScreen(
                                     currentAudioId = player.mediaPlayer.audio().track()
                                 }
                                 activePopup = if (activePopup == popup) PlayerPopupType.NONE else popup
-                            },
-                            onScrubStart = { isScrubbing = true; scrubFraction = it },
-                            onScrubbing = { scrubFraction = it },
-                            onScrubEnd = { frac ->
-                                val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                                if (totalDur > 0L) {
-                                    val targetMs = (frac * totalDur).toLong()
-                                    player.seekToTime(targetMs)
-                                }
-                                isScrubbing = false
                             },
                             onToggleFullscreen = onToggleFullscreen,
                             modifier = Modifier
@@ -720,9 +705,9 @@ fun DesktopMoviePlayerScreen(
                                 ) {
                                     BottomTransportBar(
                                         player = player,
-                                        activeFraction = activeFraction,
-                                        displayTimeMs = displayTimeMs,
-                                        isScrubbing = isScrubbing,
+                                        timeMsProvider = { player.currentTimeMs },
+                                        durationMsProvider = { player.totalDurationMs },
+                                        onScrubbingStateChange = { isScrubbing = it },
                                         isFullscreen = false,
                                         currentSpeed = currentSpeed,
                                         activePopup = activePopup,
@@ -735,16 +720,6 @@ fun DesktopMoviePlayerScreen(
                                                 currentAudioId = player.mediaPlayer.audio().track()
                                             }
                                             activePopup = if (activePopup == popup) PlayerPopupType.NONE else popup
-                                        },
-                                        onScrubStart = { isScrubbing = true; scrubFraction = it },
-                                        onScrubbing = { scrubFraction = it },
-                                        onScrubEnd = { frac ->
-                                            val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                                            if (totalDur > 0L) {
-                                                val targetMs = (frac * totalDur).toLong()
-                                                player.seekToTime(targetMs)
-                                            }
-                                            isScrubbing = false
                                         },
                                         onToggleFullscreen = onToggleFullscreen,
                                         modifier = Modifier.fillMaxWidth()
@@ -873,106 +848,161 @@ fun DesktopMoviePlayerScreen(
                                     )
                                 }
 
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = when {
-                                        isSelected -> Color(0xFF121D2F)
-                                        isHovered -> Color(0xFF141C2B)
-                                        else -> Color(0xFF0F141F)
-                                    },
-                                    border = BorderStroke(
-                                        width = if (isSelected) 1.5.dp else 1.dp,
-                                        brush = when {
-                                            isSelected -> SolidColor(Color(0xFF38BDF8))
-                                            isHovered -> hoveredBorderBrush
-                                            else -> defaultBorderBrush
-                                        }
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable(
-                                            interactionSource = interactionSource,
-                                            indication = null
-                                        ) {
-                                            if (movie.id != currentPlayingMovie.id) {
-                                                saveMovieProgress()
-                                                currentPlayingMovie = movie
-                                            }
-                                        }
-                                        .pointerHoverIcon(PointerIcon.Hand)
+                                val watchlistStatus = remember(movie.id, movie.title, userEmail, watchlistRevision) {
+                                    DesktopWatchlistManager.getStatusForMedia(userEmail, movie.title, movie.id)
+                                }
+                                val isHistoryWatched = remember(movie.id, userEmail, historyRevision) {
+                                    DesktopWatchHistoryManager.isEpisodeWatched(userEmail, movie.id)
+                                }
+                                val isMovieWatched = watchlistStatus == WatchlistStatus.WATCHED ||
+                                    (watchlistStatus == null && isHistoryWatched)
+
+                                val mediaItem = remember(movie.id, movie.title, movie.thumbnailUrl) {
+                                    DesktopMediaItem(
+                                        id = movie.id,
+                                        title = movie.title,
+                                        thumbnailUrl = movie.thumbnailUrl,
+                                        isSeries = false
+                                    )
+                                }
+
+                                MediaCardContextMenuBox(
+                                    item = mediaItem,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        // Movie Thumbnail Box
-                                        Box(
-                                            modifier = Modifier
-                                                .width(76.dp)
-                                                .height(48.dp)
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .background(Color(0xFF0A0D14))
-                                        ) {
-                                            if (!movie.thumbnailUrl.isNullOrBlank()) {
-                                                AsyncImage(
-                                                    model = movie.thumbnailUrl,
-                                                    contentDescription = movie.title,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
-                                            } else {
-                                                Box(
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Movie,
-                                                        contentDescription = null,
-                                                        tint = Color(0xFF475569),
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = when {
+                                            isSelected -> Color(0xFF121D2F)
+                                            isHovered -> Color(0xFF141C2B)
+                                            else -> Color(0xFF0F141F)
+                                        },
+                                        border = BorderStroke(
+                                            width = if (isSelected) 1.5.dp else 1.dp,
+                                            brush = when {
+                                                isSelected -> SolidColor(Color(0xFF38BDF8))
+                                                isHovered -> hoveredBorderBrush
+                                                else -> defaultBorderBrush
+                                            }
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable(
+                                                interactionSource = interactionSource,
+                                                indication = null
+                                            ) {
+                                                if (movie.id != currentPlayingMovie.id) {
+                                                    saveMovieProgress()
+                                                    currentPlayingMovie = movie
                                                 }
                                             }
-                                        }
-
-                                        Spacer(modifier = Modifier.width(12.dp))
-
-                                        // Title & Info
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = movie.title,
-                                                color = Color.White,
-                                                fontSize = 13.sp,
-                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = "${movie.genres}  • ${movie.durationFormatted}",
-                                                color = Color(0xFF94A3B8),
-                                                fontSize = 11.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-
-                                        // Clean Audio Play Indicator for active item
-                                        if (isSelected) {
+                                            .pointerHoverIcon(PointerIcon.Hand)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            // Movie Thumbnail Box
                                             Box(
                                                 modifier = Modifier
-                                                    .size(24.dp)
-                                                    .clip(CircleShape)
-                                                    .background(Color(0xD90A0E17))
-                                                    .border(1.dp, Color(0xFF38BDF8), CircleShape),
+                                                    .width(76.dp)
+                                                    .height(48.dp)
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(Color(0xFF0A0D14))
+                                            ) {
+                                                if (!movie.thumbnailUrl.isNullOrBlank()) {
+                                                    AsyncImage(
+                                                        model = movie.thumbnailUrl,
+                                                        contentDescription = movie.title,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier.fillMaxSize()
+                                                    )
+                                                } else {
+                                                    Box(
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Movie,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFF475569),
+                                                            modifier = Modifier.size(20.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+
+                                            Spacer(modifier = Modifier.width(12.dp))
+
+                                            // Title & Info
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = movie.title,
+                                                    color = Color.White,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                Text(
+                                                    text = "${movie.genres}  • ${movie.durationFormatted}",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+
+                                            Spacer(modifier = Modifier.width(10.dp))
+
+                                            Box(
+                                                modifier = Modifier.size(22.dp),
                                                 contentAlignment = Alignment.Center
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.PlayArrow,
-                                                    contentDescription = "Playing",
-                                                    tint = Color(0xFF38BDF8),
-                                                    modifier = Modifier.size(14.dp)
-                                                )
+                                                when {
+                                                    isSelected -> {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.GraphicEq,
+                                                            contentDescription = "Now Playing",
+                                                            tint = Color(0xFF60A5FA),
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                    isMovieWatched -> {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.CheckCircle,
+                                                            contentDescription = "Watched",
+                                                            tint = Color(0xFF10B981),
+                                                            modifier = Modifier.size(19.dp)
+                                                        )
+                                                    }
+                                                    watchlistStatus == WatchlistStatus.WATCH_LATER -> {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Bookmark,
+                                                            contentDescription = "Watch Later",
+                                                            tint = Color(0xFF60A5FA),
+                                                            modifier = Modifier.size(19.dp)
+                                                        )
+                                                    }
+                                                    watchlistStatus == WatchlistStatus.REWATCH -> {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Replay,
+                                                            contentDescription = "Rewatch",
+                                                            tint = Color(0xFFCBD5E1),
+                                                            modifier = Modifier.size(19.dp)
+                                                        )
+                                                    }
+                                                    else -> {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .size(17.dp)
+                                                                .clip(CircleShape)
+                                                                .border(1.5.dp, Color(0xFF222B3D), CircleShape)
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1370,24 +1400,57 @@ fun SlickVolumeSlider(
 }
 
 @Composable
-private fun BottomTransportBar(
-    player: DirectMemoryVideoPlayer,
-    activeFraction: Float,
-    displayTimeMs: Long,
-    isScrubbing: Boolean,
-    isFullscreen: Boolean,
-    currentSpeed: Float,
-    activePopup: PlayerPopupType,
-    onTogglePopup: (PlayerPopupType) -> Unit,
-    onScrubStart: (Float) -> Unit,
-    onScrubbing: (Float) -> Unit,
-    onScrubEnd: (Float) -> Unit,
-    onToggleFullscreen: () -> Unit,
+private fun IsolatedPlayerTimecode(
+    timeMsProvider: () -> Long,
+    durationMsProvider: () -> Long,
+    formatTime: (Long) -> String,
     modifier: Modifier = Modifier
 ) {
+    val quantizedTick by remember {
+        derivedStateOf { timeMsProvider().coerceAtLeast(0L) / 250L }
+    }
+    val formattedText by remember {
+        derivedStateOf {
+            val currentMs = quantizedTick * 250L
+            val totalMs = durationMsProvider().coerceAtLeast(0L)
+            "${formatTime(currentMs)} / ${formatTime(totalMs)}"
+        }
+    }
+
+    Text(
+        text = formattedText,
+        color = Color(0xFFCBD5E1),
+        fontSize = 12.sp,
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun IsolatedPlayerScrubber(
+    player: DirectMemoryVideoPlayer,
+    timeMsProvider: () -> Long,
+    durationMsProvider: () -> Long,
+    onScrubbingStateChange: ((Boolean) -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubProgress by remember { mutableFloatStateOf(0f) }
     var isTimelineHovered by remember { mutableStateOf(false) }
-    var hoverFraction by remember { mutableStateOf(0f) }
+    var hoverFraction by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
+
+    val playbackProgress by remember {
+        derivedStateOf {
+            val quantizedMs = (timeMsProvider().coerceAtLeast(0L) / 250L) * 250L
+            val totalMs = durationMsProvider()
+            if (totalMs > 0L) (quantizedMs.toFloat() / totalMs.toFloat()).coerceIn(0f, 1f) else 0f
+        }
+    }
+
+    val currentFraction = if (isScrubbing) scrubProgress else playbackProgress
 
     val trackHeight by animateDpAsState(
         targetValue = if (isTimelineHovered || isScrubbing) 6.dp else 3.5.dp,
@@ -1405,153 +1468,190 @@ private fun BottomTransportBar(
         label = "scrubber_thumb_size"
     )
 
-    Column(modifier = modifier) {
-        // Scrubber Bar
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(30.dp)
-        ) {
-            val containerWidthPx = with(density) { maxWidth.toPx() }
-            val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
-            val isSeekable = player.isFirstFrameRendered && player.totalDurationMs > 0L
-            val currentFraction = if (isScrubbing) activeFraction else {
-                if (player.totalDurationMs > 0L) (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
-            }
+    val onValueChange: (Float) -> Unit = { fraction ->
+        isScrubbing = true
+        scrubProgress = fraction
+        onScrubbingStateChange?.invoke(true)
+    }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
-                    .pointerInput(isSeekable) {
-                        if (!isSeekable) return@pointerInput
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                when (event.type) {
-                                    PointerEventType.Enter, PointerEventType.Move -> {
-                                        isTimelineHovered = true
-                                        val x = event.changes.firstOrNull()?.position?.x ?: 0f
-                                        hoverFraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    }
-                                    PointerEventType.Exit -> {
-                                        isTimelineHovered = false
-                                    }
+    val onValueChangeFinished: () -> Unit = {
+        val totalDur = if (durationMsProvider() > 0L) durationMsProvider() else player.mediaPlayer.status().length()
+        if (totalDur > 0L) {
+            val targetMs = (scrubProgress * totalDur).toLong()
+            player.seekToTime(targetMs)
+        }
+        isScrubbing = false
+        onScrubbingStateChange?.invoke(false)
+    }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(30.dp)
+    ) {
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+        val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
+        val isSeekable = player.isFirstFrameRendered && durationMsProvider() > 0L
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
+                .pointerInput(isSeekable) {
+                    if (!isSeekable) return@pointerInput
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            when (event.type) {
+                                PointerEventType.Enter, PointerEventType.Move -> {
+                                    isTimelineHovered = true
+                                    val x = event.changes.firstOrNull()?.position?.x ?: 0f
+                                    hoverFraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
+                                }
+                                PointerEventType.Exit -> {
+                                    isTimelineHovered = false
                                 }
                             }
                         }
                     }
-                    .pointerInput(isSeekable) {
-                        if (!isSeekable) return@pointerInput
-                        detectTapGestures(
-                            onPress = { offset ->
-                                val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                onScrubStart(frac)
-                                val released = tryAwaitRelease()
-                                if (released) onScrubEnd(frac)
+                }
+                .pointerInput(isSeekable) {
+                    if (!isSeekable) return@pointerInput
+                    detectTapGestures(
+                        onPress = { offset ->
+                            val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            onValueChange(frac)
+                            val released = tryAwaitRelease()
+                            if (released) {
+                                onValueChangeFinished()
                             }
-                        )
-                    }
-                    .pointerInput(isSeekable) {
-                        if (!isSeekable) return@pointerInput
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                onScrubStart((offset.x / size.width.toFloat()).coerceIn(0f, 1f))
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
-                                val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                hoverFraction = frac
-                                onScrubbing(frac)
-                            },
-                            onDragEnd = { onScrubEnd(hoverFraction) },
-                            onDragCancel = { onScrubEnd(hoverFraction) }
-                        )
-                    },
-                contentAlignment = Alignment.CenterStart
-            ) {
-                // Background Track
+                        }
+                    )
+                }
+                .pointerInput(isSeekable) {
+                    if (!isSeekable) return@pointerInput
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            onValueChange(frac)
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            hoverFraction = frac
+                            onValueChange(frac)
+                        },
+                        onDragEnd = { onValueChangeFinished() },
+                        onDragCancel = { onValueChangeFinished() }
+                    )
+                },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            // Background Track
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(trackHeight)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color(0x33FFFFFF))
+            )
+
+            // Hover Preview Buffer Line
+            if (isTimelineHovered && !isScrubbing) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .fillMaxWidth(hoverFraction)
                         .height(trackHeight)
                         .clip(RoundedCornerShape(3.dp))
-                        .background(Color(0x33FFFFFF))
+                        .background(Color(0x3394A3B8))
                 )
+            }
 
-                // Hover Preview Buffer Line
-                if (isTimelineHovered && !isScrubbing) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(hoverFraction)
-                            .height(trackHeight)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0x3394A3B8))
-                    )
-                }
-
-                // Active Progress Track
-                if (currentFraction > 0f) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(currentFraction.coerceIn(0.001f, 1f))
-                            .height(trackHeight)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(
-                                Brush.horizontalGradient(
-                                    colors = listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
-                                )
+            // Active Progress Track
+            if (currentFraction > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(currentFraction.coerceIn(0.001f, 1f))
+                        .height(trackHeight)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
                             )
-                    )
-                }
+                        )
+                )
+            }
 
-                // Scrubber Thumb
+            // Scrubber Thumb
+            Box(
+                modifier = Modifier
+                    .offset {
+                        val xPos = (currentFraction * containerWidthPx) - thumbRadiusPx
+                        IntOffset(
+                            xPos.toInt().coerceIn(0, (containerWidthPx - (thumbRadiusPx * 2)).toInt().coerceAtLeast(0)),
+                            0
+                        )
+                    }
+                    .size(thumbSize)
+                    .shadow(4.dp, CircleShape, spotColor = Color(0x66000000))
+                    .clip(CircleShape)
+                    .background(Color(0xFF60A5FA))
+            )
+
+            // Floating Magnetic Timecode Tooltip Bubble
+            if ((isTimelineHovered || isScrubbing) && durationMsProvider() > 0L) {
+                val previewFraction = if (isScrubbing) currentFraction else hoverFraction
+                val previewTimeMs = (previewFraction * durationMsProvider()).toLong()
+                val tooltipWidthPx = with(density) { 62.dp.toPx() }
+                val tooltipOffsetXPx = (previewFraction * containerWidthPx) - (tooltipWidthPx / 2f)
+
                 Box(
                     modifier = Modifier
                         .offset {
-                            val xPos = (currentFraction * containerWidthPx) - thumbRadiusPx
                             IntOffset(
-                                xPos.toInt().coerceIn(0, (containerWidthPx - (thumbRadiusPx * 2)).toInt().coerceAtLeast(0)),
-                                0
+                                x = tooltipOffsetXPx.toInt().coerceIn(0, (containerWidthPx - tooltipWidthPx).toInt().coerceAtLeast(0)),
+                                y = with(density) { (-28).dp.roundToPx() }
                             )
                         }
-                        .size(thumbSize)
-                        .shadow(4.dp, CircleShape, spotColor = Color(0x66000000))
-                        .clip(CircleShape)
-                        .background(Color(0xFF60A5FA))
-                )
-
-                // Floating Magnetic Timecode Tooltip Bubble
-                if ((isTimelineHovered || isScrubbing) && player.totalDurationMs > 0L) {
-                    val previewFraction = if (isScrubbing) currentFraction else hoverFraction
-                    val previewTimeMs = (previewFraction * player.totalDurationMs).toLong()
-                    val tooltipWidthPx = with(density) { 62.dp.toPx() }
-                    val tooltipOffsetXPx = (previewFraction * containerWidthPx) - (tooltipWidthPx / 2f)
-
-                    Box(
-                        modifier = Modifier
-                            .offset {
-                                IntOffset(
-                                    x = tooltipOffsetXPx.toInt().coerceIn(0, (containerWidthPx - tooltipWidthPx).toInt().coerceAtLeast(0)),
-                                    y = with(density) { (-28).dp.roundToPx() }
-                                )
-                            }
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(Color(0xE60D121C))
-                            .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(5.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = formatDuration(previewTimeMs),
-                            color = Color(0xFFE2E8F0),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(Color(0xE60D121C))
+                        .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(5.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = formatDuration(previewTimeMs),
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun BottomTransportBar(
+    player: DirectMemoryVideoPlayer,
+    timeMsProvider: () -> Long,
+    durationMsProvider: () -> Long,
+    onScrubbingStateChange: (Boolean) -> Unit,
+    isFullscreen: Boolean,
+    currentSpeed: Float,
+    activePopup: PlayerPopupType,
+    onTogglePopup: (PlayerPopupType) -> Unit,
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        // Scrubber Bar
+        IsolatedPlayerScrubber(
+            player = player,
+            timeMsProvider = timeMsProvider,
+            durationMsProvider = durationMsProvider,
+            onScrubbingStateChange = onScrubbingStateChange
+        )
 
         Spacer(modifier = Modifier.height(2.dp))
 
@@ -1572,8 +1672,8 @@ private fun BottomTransportBar(
                 // Rewind Button
                 FluidMovieTransportIconButton(
                     onClick = {
-                        val currentMs = player.currentTimeMs
-                        val totalMs = player.totalDurationMs
+                        val currentMs = timeMsProvider()
+                        val totalMs = durationMsProvider()
                         if (player.isFirstFrameRendered && totalMs > 0L) {
                             player.seekToTime((currentMs - stepMs).coerceIn(0L, totalMs))
                         }
@@ -1625,8 +1725,8 @@ private fun BottomTransportBar(
                 // Fast Forward Button
                 FluidMovieTransportIconButton(
                     onClick = {
-                        val currentMs = player.currentTimeMs
-                        val totalMs = player.totalDurationMs
+                        val currentMs = timeMsProvider()
+                        val totalMs = durationMsProvider()
                         if (player.isFirstFrameRendered && totalMs > 0L) {
                             player.seekToTime((currentMs + stepMs).coerceIn(0L, totalMs))
                         }
@@ -1679,12 +1779,10 @@ private fun BottomTransportBar(
 
                 Spacer(modifier = Modifier.width(4.dp))
 
-                Text(
-                    text = "${formatDuration(displayTimeMs)} / ${formatDuration(player.totalDurationMs)}",
-                    color = Color(0xFFCBD5E1),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Medium
+                IsolatedPlayerTimecode(
+                    timeMsProvider = timeMsProvider,
+                    durationMsProvider = durationMsProvider,
+                    formatTime = ::formatDuration
                 )
             }
 

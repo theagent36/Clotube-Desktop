@@ -255,7 +255,6 @@ private fun DesktopSeriesPlayerContent(
         null
     }
     var isScrubbing by remember { mutableStateOf(false) }
-    var scrubFraction by remember { mutableFloatStateOf(0f) }
     var optimisticSeekMs by remember { mutableLongStateOf(-1L) }
     var activePopup by remember { mutableStateOf(SeriesPlayerPopupType.NONE) }
 
@@ -271,15 +270,6 @@ private fun DesktopSeriesPlayerContent(
     // Auto-Play & Binge State
     var isAutoPlayDismissed by remember(player) { mutableStateOf(false) }
     var hasAutoPlayTriggered by remember(player) { mutableStateOf(false) }
-
-    val remainingMs = remember(player.currentTimeMs, player.totalDurationMs) {
-        (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
-    }
-
-    // Dynamic countdown tracking actual remaining seconds
-    val autoPlayCountdownSeconds = remember(remainingMs) {
-        (remainingMs / 1000).toInt().coerceAtLeast(1)
-    }
 
     val shouldAutoPlay = DesktopAppSettings.state.autoPlayNextEpisode
     val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
@@ -304,19 +294,37 @@ private fun DesktopSeriesPlayerContent(
         }
     }
 
-    // Trigger condition: Last 35 seconds of the episode (only when autoPlay is enabled)
-    val shouldShowAutoPlayPrompt = shouldAutoPlay &&
-            hasNextEpisode && 
-            !isAutoPlayDismissed && 
-            !hasAutoPlayTriggered &&
-            player.totalDurationMs > 40000L && 
-            remainingMs in 1L..35000L
+    // Trigger condition: Last 35 seconds of the episode (derived state so it only changes boolean value once)
+    val shouldShowAutoPlayPrompt by remember(player, shouldAutoPlay, hasNextEpisode, isAutoPlayDismissed, hasAutoPlayTriggered) {
+        derivedStateOf {
+            val remaining = (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
+            shouldAutoPlay &&
+                    hasNextEpisode &&
+                    !isAutoPlayDismissed &&
+                    !hasAutoPlayTriggered &&
+                    player.totalDurationMs > 40000L &&
+                    remaining in 1L..35000L
+        }
+    }
 
-    // Auto-advance to next episode when runtime reaches 0
-    LaunchedEffect(shouldShowAutoPlayPrompt, remainingMs, shouldAutoPlay) {
-        if (shouldAutoPlay && shouldShowAutoPlayPrompt && remainingMs <= 800L && !hasAutoPlayTriggered && onNextEpisode != null) {
-            hasAutoPlayTriggered = true
-            onNextEpisode()
+    // Dynamic countdown tracking actual remaining seconds (quantized to 1000ms steps)
+    val autoPlayCountdownSeconds by remember(player) {
+        derivedStateOf {
+            val remaining = (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
+            (remaining / 1000L).toInt().coerceAtLeast(1)
+        }
+    }
+
+    // Auto-advance to next episode when runtime reaches 0 (<= 800ms)
+    LaunchedEffect(player, shouldAutoPlay, hasNextEpisode, isAutoPlayDismissed, hasAutoPlayTriggered) {
+        if (shouldAutoPlay && hasNextEpisode && onNextEpisode != null) {
+            snapshotFlow { (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L) }
+                .collect { rem ->
+                    if (!isAutoPlayDismissed && !hasAutoPlayTriggered && player.totalDurationMs > 40000L && rem in 1L..800L) {
+                        hasAutoPlayTriggered = true
+                        onNextEpisode()
+                    }
+                }
         }
     }
 
@@ -368,11 +376,14 @@ private fun DesktopSeriesPlayerContent(
         }
     }
 
-    LaunchedEffect(player.currentTimeMs) {
+    LaunchedEffect(player, optimisticSeekMs) {
         if (optimisticSeekMs >= 0L) {
-            if (kotlin.math.abs(player.currentTimeMs - optimisticSeekMs) < 1500L) {
-                optimisticSeekMs = -1L
-            }
+            snapshotFlow { player.currentTimeMs }
+                .collect { cur ->
+                    if (kotlin.math.abs(cur - optimisticSeekMs) < 1500L) {
+                        optimisticSeekMs = -1L
+                    }
+                }
         }
     }
 
@@ -504,19 +515,6 @@ private fun DesktopSeriesPlayerContent(
         onDispose {
             kfm.removeKeyEventDispatcher(dispatcher)
         }
-    }
-
-    val activeFraction = when {
-        isScrubbing -> scrubFraction
-        optimisticSeekMs >= 0L && player.totalDurationMs > 0L -> (optimisticSeekMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f)
-        player.totalDurationMs > 0L -> (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f)
-        else -> 0f
-    }
-
-    val displayTimeMs = when {
-        isScrubbing -> (scrubFraction * player.totalDurationMs).toLong()
-        optimisticSeekMs >= 0L -> optimisticSeekMs
-        else -> player.currentTimeMs
     }
 
     Box(
@@ -688,9 +686,17 @@ private fun DesktopSeriesPlayerContent(
                 ) {
                     SeriesBottomTransportBar(
                         player = player,
-                        activeFraction = activeFraction,
-                        displayTimeMs = displayTimeMs,
-                        isScrubbing = isScrubbing,
+                        timeMsProvider = { if (optimisticSeekMs >= 0L) optimisticSeekMs else player.currentTimeMs },
+                        durationMsProvider = { player.totalDurationMs },
+                        onScrubbingStateChange = { isScrubbing = it },
+                        onSeek = { targetMs ->
+                            val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                            if (totalDur > 0L) {
+                                optimisticSeekMs = targetMs
+                                player.seekToTime(targetMs)
+                                onProgressUpdate?.invoke(targetMs)
+                            }
+                        },
                         isFullscreen = isFullscreen,
                         currentSpeed = currentSpeed,
                         activePopup = activePopup,
@@ -709,23 +715,6 @@ private fun DesktopSeriesPlayerContent(
                                 }
                             }
                             activePopup = if (activePopup == popup) SeriesPlayerPopupType.NONE else popup
-                        },
-                        onScrubStart = { frac ->
-                            isScrubbing = true
-                            scrubFraction = frac
-                        },
-                        onScrubbing = { frac ->
-                            scrubFraction = frac
-                        },
-                        onScrubEnd = { frac ->
-                            val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                            if (totalDur > 0L) {
-                                val target = (frac * totalDur).toLong()
-                                optimisticSeekMs = target
-                                player.seekToTime(target)
-                                onProgressUpdate?.invoke(target)
-                            }
-                            isScrubbing = false
                         },
                         onToggleFullscreen = onToggleFullscreen,
                         modifier = Modifier.fillMaxWidth()
@@ -1189,37 +1178,91 @@ private fun SeriesMenuOptionItem(
 }
 
 @Composable
-private fun SeriesBottomTransportBar(
-    player: DirectMemoryVideoPlayer,
-    activeFraction: Float,
-    displayTimeMs: Long,
-    isScrubbing: Boolean,
-    isFullscreen: Boolean,
-    currentSpeed: Float,
-    activePopup: SeriesPlayerPopupType,
-    onPreviousEpisode: (() -> Unit)?,
-    onNextEpisode: (() -> Unit)?,
-    hasPreviousEpisode: Boolean,
-    hasNextEpisode: Boolean,
-    onTogglePopup: (SeriesPlayerPopupType) -> Unit,
-    onScrubStart: (Float) -> Unit,
-    onScrubbing: (Float) -> Unit,
-    onScrubEnd: (Float) -> Unit,
-    onToggleFullscreen: () -> Unit,
+private fun IsolatedSeriesPlayerTimecode(
+    timeMsProvider: () -> Long,
+    durationMsProvider: () -> Long,
+    formatTime: (Long) -> String,
     modifier: Modifier = Modifier
 ) {
+    val quantizedTick by remember {
+        derivedStateOf { timeMsProvider().coerceAtLeast(0L) / 250L }
+    }
+    val formattedCurrent by remember {
+        derivedStateOf {
+            val currentMs = quantizedTick * 250L
+            formatTime(currentMs)
+        }
+    }
+    val formattedTotal by remember {
+        derivedStateOf {
+            val totalMs = durationMsProvider().coerceAtLeast(0L)
+            formatTime(totalMs)
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier
+    ) {
+        Text(
+            text = formattedCurrent,
+            color = Color(0xFFE2E8F0),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
+        Text(
+            text = "/",
+            color = Color(0xFF475569),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Normal,
+            maxLines = 1
+        )
+        Text(
+            text = formattedTotal,
+            color = Color(0xFF64748B),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun IsolatedPlayerScrubber(
+    player: DirectMemoryVideoPlayer,
+    timeMsProvider: () -> Long,
+    durationMsProvider: () -> Long,
+    onScrubbingStateChange: ((Boolean) -> Unit)? = null,
+    onSeek: ((Long) -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubProgress by remember { mutableFloatStateOf(0f) }
     var isTimelineHovered by remember { mutableStateOf(false) }
     var hoverFraction by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
 
-    // Fluid elastic scrubber track height (expands from 3.5dp to 6dp on hover/drag)
+    val playbackProgress by remember {
+        derivedStateOf {
+            val quantizedMs = (timeMsProvider().coerceAtLeast(0L) / 250L) * 250L
+            val totalMs = durationMsProvider()
+            if (totalMs > 0L) (quantizedMs.toFloat() / totalMs.toFloat()).coerceIn(0f, 1f) else 0f
+        }
+    }
+
+    val currentFraction = if (isScrubbing) scrubProgress else playbackProgress
+
     val trackHeight by animateDpAsState(
         targetValue = if (isTimelineHovered || isScrubbing) 6.dp else 3.5.dp,
         animationSpec = FluidMotionKit.SilkSpringDp,
         label = "scrubber_track_height"
     )
 
-    // Fluid glowing thumb scale
     val thumbSize by animateDpAsState(
         targetValue = when {
             isScrubbing -> 16.dp
@@ -1230,154 +1273,196 @@ private fun SeriesBottomTransportBar(
         label = "scrubber_thumb_size"
     )
 
-    Column(modifier = modifier) {
-        // ========================================================
-        // 1. FLUID INTERACTIVE TIMELINE SCRUBBER
-        // ========================================================
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(30.dp)
-        ) {
-            val containerWidthPx = with(density) { maxWidth.toPx() }
-            val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
-            val isSeekable = player.isFirstFrameRendered && player.totalDurationMs > 0L
-            val currentFraction = if (isScrubbing) activeFraction else {
-                if (player.totalDurationMs > 0L) (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
-            }
+    val onValueChange: (Float) -> Unit = { fraction ->
+        isScrubbing = true
+        scrubProgress = fraction
+        onScrubbingStateChange?.invoke(true)
+    }
 
-            // Hover and Drag detector
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
-                    .pointerInput(isSeekable) {
-                        if (!isSeekable) return@pointerInput
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                when (event.type) {
-                                    PointerEventType.Enter, PointerEventType.Move -> {
-                                        isTimelineHovered = true
-                                        val x = event.changes.firstOrNull()?.position?.x ?: 0f
-                                        hoverFraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    }
-                                    PointerEventType.Exit -> {
-                                        isTimelineHovered = false
-                                    }
+    val onValueChangeFinished: () -> Unit = {
+        val totalDur = if (durationMsProvider() > 0L) durationMsProvider() else player.mediaPlayer.status().length()
+        if (totalDur > 0L) {
+            val targetMs = (scrubProgress * totalDur).toLong()
+            if (onSeek != null) onSeek(targetMs) else player.seekToTime(targetMs)
+        }
+        isScrubbing = false
+        onScrubbingStateChange?.invoke(false)
+    }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(30.dp)
+    ) {
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+        val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
+        val isSeekable = player.isFirstFrameRendered && durationMsProvider() > 0L
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerHoverIcon(if (isSeekable) PointerIcon.Hand else PointerIcon.Default)
+                .pointerInput(isSeekable) {
+                    if (!isSeekable) return@pointerInput
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            when (event.type) {
+                                PointerEventType.Enter, PointerEventType.Move -> {
+                                    isTimelineHovered = true
+                                    val x = event.changes.firstOrNull()?.position?.x ?: 0f
+                                    hoverFraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
+                                }
+                                PointerEventType.Exit -> {
+                                    isTimelineHovered = false
                                 }
                             }
                         }
                     }
-                    .pointerInput(isSeekable) {
-                        if (!isSeekable) return@pointerInput
-                        detectTapGestures(
-                            onPress = { offset ->
-                                val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                onScrubStart(frac)
-                                val released = tryAwaitRelease()
-                                if (released) onScrubEnd(frac)
+                }
+                .pointerInput(isSeekable) {
+                    if (!isSeekable) return@pointerInput
+                    detectTapGestures(
+                        onPress = { offset ->
+                            val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            onValueChange(frac)
+                            val released = tryAwaitRelease()
+                            if (released) {
+                                onValueChangeFinished()
                             }
-                        )
-                    }
-                    .pointerInput(isSeekable) {
-                        if (!isSeekable) return@pointerInput
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                onScrubStart((offset.x / size.width.toFloat()).coerceIn(0f, 1f))
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
-                                val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                hoverFraction = frac
-                                onScrubbing(frac)
-                            },
-                            onDragEnd = { onScrubEnd(hoverFraction) },
-                            onDragCancel = { onScrubEnd(hoverFraction) }
-                        )
-                    },
-                contentAlignment = Alignment.CenterStart
-            ) {
-                // Background Track
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(trackHeight)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(Color(0x33FFFFFF))
-                )
-
-                // Hover Preview Buffer Line
-                if (isTimelineHovered && !isScrubbing) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(hoverFraction)
-                            .height(trackHeight)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0x3394A3B8))
+                        }
                     )
                 }
+                .pointerInput(isSeekable) {
+                    if (!isSeekable) return@pointerInput
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            onValueChange(frac)
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            hoverFraction = frac
+                            onValueChange(frac)
+                        },
+                        onDragEnd = { onValueChangeFinished() },
+                        onDragCancel = { onValueChangeFinished() }
+                    )
+                },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            // Background Track
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(trackHeight)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color(0x33FFFFFF))
+            )
 
-                // Active Progress Track
+            // Hover Preview Buffer Line
+            if (isTimelineHovered && !isScrubbing) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(currentFraction.coerceIn(0.001f, 1f))
+                        .fillMaxWidth(hoverFraction)
                         .height(trackHeight)
                         .clip(RoundedCornerShape(3.dp))
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
-                            )
-                        )
+                        .background(Color(0x3394A3B8))
                 )
+            }
 
-                // Scrubber Thumb (Restrained Studio Ice Blue)
+            // Active Progress Track
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(currentFraction.coerceIn(0.001f, 1f))
+                    .height(trackHeight)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(Color(0xFF1D4ED8), Color(0xFF60A5FA))
+                        )
+                    )
+            )
+
+            // Scrubber Thumb (Restrained Studio Ice Blue)
+            Box(
+                modifier = Modifier
+                    .offset {
+                        val xPos = (currentFraction * containerWidthPx) - thumbRadiusPx
+                        IntOffset(
+                            xPos.toInt().coerceIn(0, (containerWidthPx - (thumbRadiusPx * 2)).toInt().coerceAtLeast(0)),
+                            0
+                        )
+                    }
+                    .size(thumbSize)
+                    .shadow(4.dp, CircleShape, spotColor = Color(0x66000000))
+                    .clip(CircleShape)
+                    .background(Color(0xFF60A5FA))
+            )
+
+            // Floating Magnetic Timecode Tooltip Bubble (High-contrast glass)
+            if ((isTimelineHovered || isScrubbing) && durationMsProvider() > 0L) {
+                val previewFraction = if (isScrubbing) currentFraction else hoverFraction
+                val previewTimeMs = (previewFraction * durationMsProvider()).toLong()
+                val tooltipWidthPx = with(density) { 62.dp.toPx() }
+                val tooltipOffsetXPx = (previewFraction * containerWidthPx) - (tooltipWidthPx / 2f)
+
                 Box(
                     modifier = Modifier
                         .offset {
-                            val xPos = (currentFraction * containerWidthPx) - thumbRadiusPx
                             IntOffset(
-                                xPos.toInt().coerceIn(0, (containerWidthPx - (thumbRadiusPx * 2)).toInt().coerceAtLeast(0)),
-                                0
+                                x = tooltipOffsetXPx.toInt().coerceIn(0, (containerWidthPx - tooltipWidthPx).toInt().coerceAtLeast(0)),
+                                y = with(density) { (-28).dp.roundToPx() }
                             )
                         }
-                        .size(thumbSize)
-                        .shadow(4.dp, CircleShape, spotColor = Color(0x66000000))
-                        .clip(CircleShape)
-                        .background(Color(0xFF60A5FA))
-                )
-
-                // Floating Magnetic Timecode Tooltip Bubble (High-contrast glass)
-                if ((isTimelineHovered || isScrubbing) && player.totalDurationMs > 0L) {
-                    val previewFraction = if (isScrubbing) currentFraction else hoverFraction
-                    val previewTimeMs = (previewFraction * player.totalDurationMs).toLong()
-                    val tooltipWidthPx = with(density) { 62.dp.toPx() }
-                    val tooltipOffsetXPx = (previewFraction * containerWidthPx) - (tooltipWidthPx / 2f)
-
-                    Box(
-                        modifier = Modifier
-                            .offset {
-                                IntOffset(
-                                    x = tooltipOffsetXPx.toInt().coerceIn(0, (containerWidthPx - tooltipWidthPx).toInt().coerceAtLeast(0)),
-                                    y = with(density) { (-28).dp.roundToPx() }
-                                )
-                            }
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(Color(0xE60D121C))
-                            .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(5.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = formatDuration(previewTimeMs),
-                            color = Color(0xFFE2E8F0),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(Color(0xE60D121C))
+                        .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(5.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = formatDuration(previewTimeMs),
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SeriesBottomTransportBar(
+    player: DirectMemoryVideoPlayer,
+    timeMsProvider: () -> Long,
+    durationMsProvider: () -> Long,
+    onScrubbingStateChange: (Boolean) -> Unit,
+    onSeek: (Long) -> Unit,
+    isFullscreen: Boolean,
+    currentSpeed: Float,
+    activePopup: SeriesPlayerPopupType,
+    onPreviousEpisode: (() -> Unit)?,
+    onNextEpisode: (() -> Unit)?,
+    hasPreviousEpisode: Boolean,
+    hasNextEpisode: Boolean,
+    onTogglePopup: (SeriesPlayerPopupType) -> Unit,
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        // ========================================================
+        // 1. FLUID INTERACTIVE TIMELINE SCRUBBER
+        // ========================================================
+        IsolatedPlayerScrubber(
+            player = player,
+            timeMsProvider = timeMsProvider,
+            durationMsProvider = durationMsProvider,
+            onScrubbingStateChange = onScrubbingStateChange,
+            onSeek = onSeek
+        )
 
         Spacer(modifier = Modifier.height(2.dp))
 
@@ -1407,11 +1492,11 @@ private fun SeriesBottomTransportBar(
                 val stepMs = seekSec * 1000L
                 FluidTransportIconButton(
                     onClick = {
-                        val currentMs = player.currentTimeMs
-                        val totalMs = player.totalDurationMs
+                        val currentMs = timeMsProvider()
+                        val totalMs = durationMsProvider()
                         if (player.isFirstFrameRendered && totalMs > 0L) {
                             val newTime = (currentMs - stepMs).coerceIn(0L, totalMs)
-                            player.seekToTime(newTime)
+                            onSeek(newTime)
                         }
                     },
                     icon = when (seekSec) {
@@ -1460,11 +1545,11 @@ private fun SeriesBottomTransportBar(
 
                 FluidTransportIconButton(
                     onClick = {
-                        val currentMs = player.currentTimeMs
-                        val totalMs = player.totalDurationMs
+                        val currentMs = timeMsProvider()
+                        val totalMs = durationMsProvider()
                         if (player.isFirstFrameRendered && totalMs > 0L) {
                             val newTime = (currentMs + stepMs).coerceIn(0L, totalMs)
-                            player.seekToTime(newTime)
+                            onSeek(newTime)
                         }
                     },
                     icon = when (seekSec) {
@@ -1523,32 +1608,11 @@ private fun SeriesBottomTransportBar(
 
                 Spacer(modifier = Modifier.width(4.dp))
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = formatDuration(displayTimeMs),
-                        color = Color(0xFFE2E8F0),
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "/",
-                        color = Color(0xFF475569),
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Normal
-                    )
-                    Text(
-                        text = formatDuration(player.totalDurationMs),
-                        color = Color(0xFF64748B),
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
+                IsolatedSeriesPlayerTimecode(
+                    timeMsProvider = timeMsProvider,
+                    durationMsProvider = durationMsProvider,
+                    formatTime = ::formatDuration
+                )
             }
 
             // Right Controls: Subtitles, Audio, Speed, Fullscreen

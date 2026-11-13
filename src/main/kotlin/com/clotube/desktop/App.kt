@@ -15,6 +15,7 @@ import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopProfileManager
 import com.clotube.desktop.data.DesktopThumbnailPrefetcher
 import com.clotube.desktop.data.DesktopWatchHistorySync
+import com.clotube.desktop.data.DesktopWatchlistSync
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
@@ -70,6 +71,7 @@ fun App(
             }
             withContext(Dispatchers.IO) {
                 DesktopWatchHistorySync.pullAndMerge(email, token)
+                DesktopWatchlistSync.pullRemoteWatchlist(email, token)
             }
         }
     }

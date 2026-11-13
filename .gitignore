@@ -75,6 +75,7 @@ $RECYCLE.BIN/
 .DS_Store
 *.swp
 *~
+*bundle*.md
 
 # Frontend / Scaffolding & Logs
 node_modules/

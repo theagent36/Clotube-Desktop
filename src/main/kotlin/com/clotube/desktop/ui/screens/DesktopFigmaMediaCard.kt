@@ -21,8 +21,7 @@ import androidx.compose.material.Icon
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Movie
-import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +37,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.data.DesktopWatchHistoryManager
+import com.clotube.desktop.data.DesktopWatchlistManager
+import com.clotube.desktop.data.WatchlistStatus
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.launch
@@ -46,6 +48,7 @@ import kotlinx.coroutines.launch
 fun DesktopFigmaMediaCard(
     item: DesktopMediaItem,
     accessToken: String = "",
+    userEmail: String = "",
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -83,6 +86,19 @@ fun DesktopFigmaMediaCard(
         fallbackUrl = item.fallbackThumbnailUrl,
         accessToken = accessToken
     )
+
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
+
+    val cardWatchlistStatus = remember(item.id, item.title, userEmail, watchlistRevision) {
+        if (userEmail.isBlank()) null
+        else DesktopWatchlistManager.getStatusForMedia(userEmail, item.title, item.id)
+    }
+    val isCardHistoryWatched = remember(item.id, item.isSeries, userEmail, historyRevision) {
+        !item.isSeries && userEmail.isNotBlank() && DesktopWatchHistoryManager.isEpisodeWatched(userEmail, item.id)
+    }
+    val showWatchedBadge = cardWatchlistStatus == WatchlistStatus.WATCHED ||
+        (cardWatchlistStatus == null && isCardHistoryWatched)
 
     Box(
         modifier = modifier
@@ -198,6 +214,93 @@ fun DesktopFigmaMediaCard(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                 )
+            }
+        }
+
+        // Top-Left Watchlist Status Badge
+        if (showWatchedBadge) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xD90A0E17),
+                border = BorderStroke(1.dp, Color(0x4010B981)),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CheckCircle,
+                        contentDescription = "Watched",
+                        tint = Color(0xFF10B981),
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Text(
+                        text = "Watched",
+                        color = Color(0xFF6EE7B7),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        } else if (cardWatchlistStatus == WatchlistStatus.WATCH_LATER) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xD90A0E17),
+                border = BorderStroke(1.dp, Color(0x4760A5FA)),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bookmark,
+                        contentDescription = "Watch Later",
+                        tint = Color(0xFF60A5FA),
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Text(
+                        text = "Watch Later",
+                        color = Color(0xFF93C5FD),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        } else if (cardWatchlistStatus == WatchlistStatus.REWATCH) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xD90A0E17),
+                border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Replay,
+                        contentDescription = "Rewatch",
+                        tint = Color(0xFFCBD5E1),
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Text(
+                        text = "Rewatch",
+                        color = Color(0xFFF1F5F9),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
 

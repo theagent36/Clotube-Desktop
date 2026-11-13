@@ -308,6 +308,7 @@ object DesktopWatchHistorySync {
 
                 if (loopCount % 2 == 0) {
                     pullAndMerge(userEmail, token)
+                    DesktopWatchlistSync.pullRemoteWatchlist(userEmail, token)
                 }
             }
         }
