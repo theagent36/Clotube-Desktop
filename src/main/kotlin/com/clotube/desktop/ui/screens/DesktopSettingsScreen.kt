@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.clotube.desktop.data.DesktopAppSettings
+import com.clotube.desktop.update.DesktopUpdateManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -579,10 +580,11 @@ fun DesktopSettingsScreen(
                     }
 
                     SettingsTab.ABOUT -> {
+                        SoftwareUpdateSettingsCard()
                         SettingsCard {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("Application Version", color = Color(0xFF94A3B8), fontSize = 12.sp)
-                                Text("Clotube Windows v1.0.4", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text("Clotube Windows v${DesktopUpdateManager.getCurrentAppVersion()}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                             HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 10.dp))
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -906,5 +908,112 @@ private fun SettingsToggleRow(
             checked = checked,
             onCheckedChange = onCheckedChange
         )
+    }
+}
+
+@Composable
+fun SoftwareUpdateSettingsCard() {
+    val isChecking by DesktopUpdateManager.isCheckingManually.collectAsState()
+    val statusMessage by DesktopUpdateManager.statusBannerMessage.collectAsState()
+    val currentVersion = remember { DesktopUpdateManager.getCurrentAppVersion() }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF0E131C),
+        border = BorderStroke(1.dp, Color(0xFF1A2230)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Software Updates",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Installed version: v$currentVersion • Source: GitHub Releases",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.sp
+                    )
+                }
+
+                Button(
+                    onClick = { DesktopUpdateManager.checkForUpdatesManually() },
+                    enabled = !isChecking,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF090A0F),
+                        disabledContainerColor = Color(0xFF1E293B),
+                        disabledContentColor = Color(0xFF64748B)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp),
+                    modifier = Modifier.pointerHoverIcon(if (!isChecking) PointerIcon.Hand else PointerIcon.Default)
+                ) {
+                    if (isChecking) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF60A5FA),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(
+                            modifier = Modifier.width(8.dp)
+                        )
+                        Text(
+                            text = "Checking…",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Text(
+                            text = "Check for Updates",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            if (!statusMessage.isNullOrBlank()) {
+                val isError = statusMessage!!.startsWith("Unable")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            if (isError) Color(0x1AE11D48)
+                            else Color(0x1410B981)
+                        )
+                        .border(
+                            1.dp,
+                            if (isError) Color(0x40FB7185)
+                            else Color(0x3310B981),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = statusMessage!!,
+                        color = if (isError) Color(0xFFFDA4AF)
+                                else Color(0xFF6EE7B7),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
     }
 }

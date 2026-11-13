@@ -63,7 +63,7 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             packageName = "Clotube"
-            packageVersion = "2.0.2"              // Incremented one patch version above installed 2.0.1
+            packageVersion = "2.0.3"              // Incremented to 2.0.3 with GitHub auto-updater
             description = "Clotube OTT Cloud Media Client for Google Drive"
             copyright = "© 2026 Clotube. All rights reserved."
             vendor = "Clotube"

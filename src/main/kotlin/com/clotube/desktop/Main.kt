@@ -22,7 +22,9 @@ import androidx.compose.ui.window.rememberWindowState
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
+import com.clotube.desktop.ui.components.DesktopUpdateOverlay
 import com.clotube.desktop.ui.screens.DesktopBootScreen
+import com.clotube.desktop.update.DesktopUpdateManager
 import com.sun.jna.Native
 import com.sun.jna.NativeLibrary
 import com.sun.jna.Pointer
@@ -210,6 +212,11 @@ fun main() {
                 applyWin32ImmersiveDarkMode(window)
             }
 
+            LaunchedEffect(Unit) {
+                kotlinx.coroutines.delay(2500L)
+                DesktopUpdateManager.checkForUpdatesOnStartup()
+            }
+
             SideEffect {
                 window.background = AwtColor.BLACK
                 window.contentPane.background = AwtColor.BLACK
@@ -318,6 +325,8 @@ fun main() {
                         )
                     }
                 }
+
+                DesktopUpdateOverlay()
             }
         }
     }
