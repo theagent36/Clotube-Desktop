@@ -22,6 +22,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
+import com.clotube.desktop.ui.components.DesktopReleaseNotesOverlay
 import com.clotube.desktop.ui.components.DesktopUpdateOverlay
 import com.clotube.desktop.ui.screens.DesktopBootScreen
 import com.clotube.desktop.update.DesktopUpdateManager
@@ -327,6 +328,7 @@ fun main() {
                 }
 
                 DesktopUpdateOverlay()
+                DesktopReleaseNotesOverlay()
             }
         }
     }

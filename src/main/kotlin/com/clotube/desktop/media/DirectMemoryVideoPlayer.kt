@@ -30,6 +30,7 @@ private fun MediaPlayer.subtitles() = this.subpictures()
 class DirectMemoryVideoPlayer(
     val mediaUrl: String,
     val initialSeekMs: Long = 0L,
+    val boundMediaId: String = "",
     val onFirstFrame: () -> Unit = {}
 ) {
     val settings = DesktopAppSettings.state
@@ -76,7 +77,7 @@ class DirectMemoryVideoPlayer(
     var isPlaying by mutableStateOf(false)
     var isBuffering by mutableStateOf(true)
     var isFirstFrameRendered by mutableStateOf(false)
-    var currentTimeMs by mutableLongStateOf(0L)
+    var currentTimeMs by mutableLongStateOf(initialSeekMs.coerceAtLeast(0L))
     var totalDurationMs by mutableLongStateOf(0L)
     var positionFraction by mutableFloatStateOf(0f)
 
@@ -100,11 +101,19 @@ class DirectMemoryVideoPlayer(
     private var imageInfo: ImageInfo? = null
     private var nativePitch: Int = 0
 
-    @Volatile
-    private var isDisposed: Boolean = false
+    private val nativeLifecycleLock = Any()
+    private val disposedFlag = AtomicBoolean(false)
+
+    val isDisposed: Boolean
+        get() = disposedFlag.get()
     private val hasAppliedPreferences = AtomicBoolean(false)
     private val hasAppliedInitialSeek = AtomicBoolean(false)
     private val asyncExecutor = Executors.newSingleThreadScheduledExecutor()
+
+    private fun updatePlayingState(playing: Boolean) {
+        isPlaying = playing
+        WindowsScreenWakeLock.setPlaybackActive(this, playing && !isDisposed)
+    }
 
     private fun checkAndApplyInitialSeek(mp: MediaPlayer) {
         if (initialSeekMs <= 1500L) return
@@ -220,7 +229,7 @@ class DirectMemoryVideoPlayer(
 
         mediaPlayer.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
             override fun playing(mp: MediaPlayer) {
-                isPlaying = true
+                updatePlayingState(true)
                 isBuffering = false
 
                 val startupRate = settings.defaultSpeed
@@ -245,15 +254,19 @@ class DirectMemoryVideoPlayer(
             }
 
             override fun paused(mp: MediaPlayer) {
-                isPlaying = false
+                updatePlayingState(false)
             }
 
             override fun stopped(mp: MediaPlayer) {
-                isPlaying = false
+                updatePlayingState(false)
             }
 
             override fun finished(mp: MediaPlayer) {
-                isPlaying = false
+                updatePlayingState(false)
+            }
+
+            override fun error(mp: MediaPlayer) {
+                updatePlayingState(false)
             }
 
             override fun timeChanged(mp: MediaPlayer, newTime: Long) {
@@ -329,7 +342,7 @@ class DirectMemoryVideoPlayer(
         if (isDisposed) return
         try {
             mediaPlayer.controls().play()
-            isPlaying = true
+            updatePlayingState(true)
         } catch (_: Throwable) {}
     }
 
@@ -337,7 +350,7 @@ class DirectMemoryVideoPlayer(
         if (isDisposed) return
         try {
             mediaPlayer.controls().pause()
-            isPlaying = false
+            updatePlayingState(false)
         } catch (_: Throwable) {}
     }
 
@@ -346,10 +359,10 @@ class DirectMemoryVideoPlayer(
         try {
             if (mediaPlayer.status().isPlaying) {
                 mediaPlayer.controls().pause()
-                isPlaying = false
+                updatePlayingState(false)
             } else {
                 mediaPlayer.controls().play()
-                isPlaying = true
+                updatePlayingState(true)
             }
         } catch (_: Throwable) {}
     }
@@ -448,30 +461,63 @@ class DirectMemoryVideoPlayer(
         return try { mediaPlayer.subtitles().track() } catch (_: Throwable) { -1 }
     }
 
+    fun addSafeEventListener(listener: uk.co.caprica.vlcj.player.base.MediaPlayerEventListener): Boolean {
+        synchronized(nativeLifecycleLock) {
+            if (disposedFlag.get()) return false
+            return try {
+                mediaPlayer.events().addMediaPlayerEventListener(listener)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+    }
+
+    fun removeSafeEventListener(listener: uk.co.caprica.vlcj.player.base.MediaPlayerEventListener) {
+        synchronized(nativeLifecycleLock) {
+            if (disposedFlag.get()) return
+            try {
+                mediaPlayer.events().removeMediaPlayerEventListener(listener)
+            } catch (_: Throwable) {}
+        }
+    }
+
     fun release() {
-        if (isDisposed) return
-        isDisposed = true
+        WindowsScreenWakeLock.setPlaybackActive(this, false)
+        if (!disposedFlag.compareAndSet(false, true)) return
         asyncExecutor.shutdownNow()
         externalSubtitleName = null
         externalSubtitlePath = null
-        try {
-            mediaPlayer.controls().stop()
-            mediaPlayer.release()
-            factory.release()
-        } catch (_: Throwable) {}
 
-        synchronized(frameLock) {
-            currentFrame = null
-            composeBitmapA = null
-            composeBitmapB = null
-            try {
-                skiaBitmapA?.close()
-                skiaBitmapB?.close()
-            } catch (_: Throwable) {}
-            skiaBitmapA = null
-            skiaBitmapB = null
-            pixelBufferA = null
-            pixelBufferB = null
+        Thread({
+            synchronized(nativeLifecycleLock) {
+                try {
+                    mediaPlayer.controls().stop()
+                } catch (_: Throwable) {}
+                try {
+                    mediaPlayer.release()
+                } catch (_: Throwable) {}
+                try {
+                    factory.release()
+                } catch (_: Throwable) {}
+            }
+
+            synchronized(frameLock) {
+                currentFrame = null
+                composeBitmapA = null
+                composeBitmapB = null
+                try {
+                    skiaBitmapA?.close()
+                    skiaBitmapB?.close()
+                } catch (_: Throwable) {}
+                skiaBitmapA = null
+                skiaBitmapB = null
+                pixelBufferA = null
+                pixelBufferB = null
+            }
+        }, "Clotube-VLC-Release").apply {
+            isDaemon = true
+            start()
         }
     }
 }

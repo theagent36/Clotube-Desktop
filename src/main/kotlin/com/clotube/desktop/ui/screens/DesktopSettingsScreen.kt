@@ -1014,6 +1014,86 @@ fun SoftwareUpdateSettingsCard() {
                     )
                 }
             }
+
+            HorizontalDivider(color = Color(0xFF161D2B))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f).padding(end = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Release Notes",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0x2460A5FA),
+                            border = BorderStroke(1.dp, Color(0x4760A5FA))
+                        ) {
+                            Text(
+                                text = "v$currentVersion",
+                                color = Color(0xFF93C5FD),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "View new features, performance upgrades, and fixes introduced in recent builds.",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.sp
+                    )
+                }
+
+                val whatsNewInteraction = remember { MutableInteractionSource() }
+                val isWhatsNewHovered by whatsNewInteraction.collectIsHoveredAsState()
+
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(
+                            interactionSource = whatsNewInteraction,
+                            indication = null,
+                            onClick = { DesktopUpdateManager.openReleaseNotes(currentVersion) }
+                        )
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (isWhatsNewHovered) Color(0xFF1A2233) else Color(0xFF141A26),
+                    border = BorderStroke(1.dp, if (isWhatsNewHovered) Color(0xFF334155) else Color(0xFF222B3D))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoAwesome,
+                            contentDescription = null,
+                            tint = Color(0xFF60A5FA),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "What's New",
+                            color = if (isWhatsNewHovered) Color.White else Color(0xFFCBD5E1),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
         }
     }
 }

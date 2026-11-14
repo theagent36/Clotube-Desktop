@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.sp
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
+import com.clotube.desktop.model.DesktopEpisode
 import kotlinx.coroutines.delay
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
@@ -83,6 +84,7 @@ private enum class SeriesSeekFeedbackDirection {
 fun DesktopSeriesPlayerScreen(
     player: DirectMemoryVideoPlayer,
     seriesTitle: String,
+    currentEpisode: DesktopEpisode? = null,
     episodeTitle: String = "",
     seasonNumber: Int = 1,
     episodeNumber: Int = 1,
@@ -104,6 +106,7 @@ fun DesktopSeriesPlayerScreen(
     DesktopSeriesPlayerContent(
         player = player,
         seriesTitle = seriesTitle,
+        currentEpisode = currentEpisode,
         episodeTitle = episodeTitle,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
@@ -128,6 +131,7 @@ fun DesktopSeriesPlayerScreen(
 fun DesktopSeriesPlayerScreen(
     mediaUrl: String,
     seriesTitle: String,
+    currentEpisode: DesktopEpisode? = null,
     episodeTitle: String = "",
     seasonNumber: Int = 1,
     episodeNumber: Int = 1,
@@ -156,6 +160,7 @@ fun DesktopSeriesPlayerScreen(
     DesktopSeriesPlayerContent(
         player = player,
         seriesTitle = seriesTitle,
+        currentEpisode = currentEpisode,
         episodeTitle = episodeTitle,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
@@ -181,6 +186,7 @@ fun DesktopSeriesPlayerScreen(
     fileId: String,
     accessToken: String,
     seriesTitle: String,
+    currentEpisode: DesktopEpisode? = null,
     episodeTitle: String = "",
     seasonNumber: Int = 1,
     episodeNumber: Int = 1,
@@ -206,6 +212,7 @@ fun DesktopSeriesPlayerScreen(
     DesktopSeriesPlayerScreen(
         mediaUrl = streamUrl,
         seriesTitle = seriesTitle,
+        currentEpisode = currentEpisode,
         episodeTitle = episodeTitle,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
@@ -230,6 +237,7 @@ fun DesktopSeriesPlayerScreen(
 private fun DesktopSeriesPlayerContent(
     player: DirectMemoryVideoPlayer,
     seriesTitle: String,
+    currentEpisode: DesktopEpisode? = null,
     episodeTitle: String,
     seasonNumber: Int,
     episodeNumber: Int,
@@ -248,15 +256,36 @@ private fun DesktopSeriesPlayerContent(
     hasPreviousEpisode: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val currentEpisode = currentEpisode ?: remember(player.boundMediaId, seriesTitle, episodeTitle, seasonNumber, episodeNumber) {
+        DesktopEpisode(
+            id = player.boundMediaId,
+            seriesId = "",
+            seriesTitle = seriesTitle,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            title = episodeTitle
+        )
+    }
+
     var controlsVisible by remember { mutableStateOf(true) }
     val activeColorFilter = if (DesktopAppSettings.state.cinemaColorEnhancement) {
         CinemaColorFilter.ToneMappedColorFilter
     } else {
         null
     }
-    var isScrubbing by remember { mutableStateOf(false) }
-    var optimisticSeekMs by remember { mutableLongStateOf(-1L) }
+    var isScrubbing by remember(currentEpisode.id) { mutableStateOf(false) }
+    var scrubFraction by remember(currentEpisode.id) { mutableFloatStateOf(0f) }
+    var playNextDismissed by remember(currentEpisode.id) { mutableStateOf(false) }
+    var optimisticSeekMs by remember(currentEpisode.id) { mutableLongStateOf(-1L) }
     var activePopup by remember { mutableStateOf(SeriesPlayerPopupType.NONE) }
+
+    val isPlayerSynced = player.boundMediaId.isEmpty() || player.boundMediaId == currentEpisode.id
+    val rawFraction = if (isPlayerSynced && player.totalDurationMs > 0L) {
+        (player.currentTimeMs.toFloat() / player.totalDurationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val displayFraction = if (isScrubbing) scrubFraction else rawFraction
 
     var currentSubtitleId by remember(player) { mutableIntStateOf(-1) }
     var currentAudioId by remember(player) { mutableIntStateOf(-1) }
@@ -268,8 +297,7 @@ private fun DesktopSeriesPlayerContent(
     var seekFeedbackTrigger by remember { mutableIntStateOf(0) }
 
     // Auto-Play & Binge State
-    var isAutoPlayDismissed by remember(player) { mutableStateOf(false) }
-    var hasAutoPlayTriggered by remember(player) { mutableStateOf(false) }
+    var hasAutoPlayTriggered by remember(currentEpisode.id) { mutableStateOf(false) }
 
     val shouldAutoPlay = DesktopAppSettings.state.autoPlayNextEpisode
     val seekStepMs = remember(DesktopAppSettings.state.seekStepSeconds) {
@@ -277,30 +305,44 @@ private fun DesktopSeriesPlayerContent(
     }
 
     // LibVLC Native Event Hook for finished playback
-    DisposableEffect(player, hasNextEpisode, onNextEpisode, shouldAutoPlay) {
-        val listener = object : MediaPlayerEventAdapter() {
-            override fun finished(mediaPlayer: MediaPlayer) {
+    val latestOnNextEpisode by rememberUpdatedState(onNextEpisode)
+    val latestHasNextEpisode by rememberUpdatedState(hasNextEpisode)
+    val latestShouldAutoPlay by rememberUpdatedState(shouldAutoPlay)
+
+    DisposableEffect(player) {
+        val activePlayer = player
+        if (activePlayer.isDisposed) {
+            return@DisposableEffect onDispose {}
+        }
+
+        val endListener = object : MediaPlayerEventAdapter() {
+            override fun finished(mp: MediaPlayer) {
                 SwingUtilities.invokeLater {
-                    if (shouldAutoPlay && hasNextEpisode && onNextEpisode != null && !hasAutoPlayTriggered) {
+                    if (latestShouldAutoPlay && latestHasNextEpisode && !hasAutoPlayTriggered) {
                         hasAutoPlayTriggered = true
-                        onNextEpisode()
+                        latestOnNextEpisode?.invoke()
                     }
                 }
             }
         }
-        player.mediaPlayer.events().addMediaPlayerEventListener(listener)
+
+        val attached = activePlayer.addSafeEventListener(endListener)
         onDispose {
-            player.mediaPlayer.events().removeMediaPlayerEventListener(listener)
+            if (attached) {
+                activePlayer.removeSafeEventListener(endListener)
+            }
         }
     }
 
     // Trigger condition: Last 35 seconds of the episode (derived state so it only changes boolean value once)
-    val shouldShowAutoPlayPrompt by remember(player, shouldAutoPlay, hasNextEpisode, isAutoPlayDismissed, hasAutoPlayTriggered) {
+    val shouldShowAutoPlayPrompt by remember(player, isPlayerSynced, shouldAutoPlay, hasNextEpisode, playNextDismissed, hasAutoPlayTriggered) {
         derivedStateOf {
             val remaining = (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
-            shouldAutoPlay &&
+            isPlayerSynced &&
+                    player.totalDurationMs > 0L &&
+                    shouldAutoPlay &&
                     hasNextEpisode &&
-                    !isAutoPlayDismissed &&
+                    !playNextDismissed &&
                     !hasAutoPlayTriggered &&
                     player.totalDurationMs > 40000L &&
                     remaining in 1L..35000L
@@ -308,23 +350,31 @@ private fun DesktopSeriesPlayerContent(
     }
 
     // Dynamic countdown tracking actual remaining seconds (quantized to 1000ms steps)
-    val autoPlayCountdownSeconds by remember(player) {
+    val autoPlayCountdownSeconds by remember(player, isPlayerSynced) {
         derivedStateOf {
-            val remaining = (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
-            (remaining / 1000L).toInt().coerceAtLeast(1)
+            if (!isPlayerSynced) 35
+            else {
+                val remaining = (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
+                (remaining / 1000L).toInt().coerceAtLeast(1)
+            }
         }
     }
 
     // Auto-advance to next episode when runtime reaches 0 (<= 800ms)
-    LaunchedEffect(player, shouldAutoPlay, hasNextEpisode, isAutoPlayDismissed, hasAutoPlayTriggered) {
+    LaunchedEffect(player, isPlayerSynced, shouldAutoPlay, hasNextEpisode, playNextDismissed, hasAutoPlayTriggered) {
         if (shouldAutoPlay && hasNextEpisode && onNextEpisode != null) {
-            snapshotFlow { (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L) }
-                .collect { rem ->
-                    if (!isAutoPlayDismissed && !hasAutoPlayTriggered && player.totalDurationMs > 40000L && rem in 1L..800L) {
-                        hasAutoPlayTriggered = true
-                        onNextEpisode()
-                    }
+            snapshotFlow {
+                if (isPlayerSynced && player.totalDurationMs > 40000L) {
+                    (player.totalDurationMs - player.currentTimeMs).coerceAtLeast(0L)
+                } else {
+                    Long.MAX_VALUE
                 }
+            }.collect { rem ->
+                if (!playNextDismissed && !hasAutoPlayTriggered && rem in 1L..800L) {
+                    hasAutoPlayTriggered = true
+                    onNextEpisode()
+                }
+            }
         }
     }
 
@@ -415,26 +465,26 @@ private fun DesktopSeriesPlayerContent(
     }
 
     // Periodic progress reporting every 5 seconds while actively playing
-    LaunchedEffect(player, onProgressUpdate) {
+    LaunchedEffect(player, isPlayerSynced, onProgressUpdate) {
         while (true) {
             delay(5000L)
-            if (player.isPlaying && player.currentTimeMs > 0L) {
+            if (isPlayerSynced && player.isPlaying && player.currentTimeMs > 0L) {
                 onProgressUpdate?.invoke(player.currentTimeMs)
             }
         }
     }
 
     // Report progress when playback pauses
-    LaunchedEffect(player.isPlaying) {
-        if (!player.isPlaying && player.currentTimeMs > 0L) {
+    LaunchedEffect(player.isPlaying, isPlayerSynced) {
+        if (isPlayerSynced && !player.isPlaying && player.currentTimeMs > 0L) {
             onProgressUpdate?.invoke(player.currentTimeMs)
         }
     }
 
     // Report progress on player teardown/navigation
-    DisposableEffect(player) {
+    DisposableEffect(player, isPlayerSynced) {
         onDispose {
-            if (player.currentTimeMs > 0L) {
+            if (isPlayerSynced && player.currentTimeMs > 0L) {
                 onProgressUpdate?.invoke(player.currentTimeMs)
             }
         }
@@ -686,15 +736,26 @@ private fun DesktopSeriesPlayerContent(
                 ) {
                     SeriesBottomTransportBar(
                         player = player,
-                        timeMsProvider = { if (optimisticSeekMs >= 0L) optimisticSeekMs else player.currentTimeMs },
-                        durationMsProvider = { player.totalDurationMs },
+                        currentEpisodeId = currentEpisode.id,
+                        isPlayerSynced = isPlayerSynced,
+                        timeMsProvider = {
+                            if (!isPlayerSynced) 0L
+                            else if (optimisticSeekMs >= 0L) optimisticSeekMs
+                            else player.currentTimeMs
+                        },
+                        durationMsProvider = {
+                            if (!isPlayerSynced) 0L
+                            else player.totalDurationMs
+                        },
                         onScrubbingStateChange = { isScrubbing = it },
                         onSeek = { targetMs ->
-                            val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
-                            if (totalDur > 0L) {
-                                optimisticSeekMs = targetMs
-                                player.seekToTime(targetMs)
-                                onProgressUpdate?.invoke(targetMs)
+                            if (isPlayerSynced) {
+                                val totalDur = if (player.totalDurationMs > 0L) player.totalDurationMs else player.mediaPlayer.status().length()
+                                if (totalDur > 0L) {
+                                    optimisticSeekMs = targetMs
+                                    player.seekToTime(targetMs)
+                                    onProgressUpdate?.invoke(targetMs)
+                                }
                             }
                         },
                         isFullscreen = isFullscreen,
@@ -764,7 +825,7 @@ private fun DesktopSeriesPlayerContent(
                             modifier = Modifier
                                 .size(18.dp)
                                 .clip(CircleShape)
-                                .clickable { isAutoPlayDismissed = true }
+                                .clickable { playNextDismissed = true }
                                 .pointerHoverIcon(PointerIcon.Hand)
                         )
                     }
@@ -1235,20 +1296,25 @@ private fun IsolatedSeriesPlayerTimecode(
 @Composable
 private fun IsolatedPlayerScrubber(
     player: DirectMemoryVideoPlayer,
+    currentEpisodeId: String = "",
+    isPlayerSynced: Boolean = true,
     timeMsProvider: () -> Long,
     durationMsProvider: () -> Long,
     onScrubbingStateChange: ((Boolean) -> Unit)? = null,
     onSeek: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    var isScrubbing by remember { mutableStateOf(false) }
-    var scrubProgress by remember { mutableFloatStateOf(0f) }
-    var isTimelineHovered by remember { mutableStateOf(false) }
-    var hoverFraction by remember { mutableFloatStateOf(0f) }
+    var isScrubbing by remember(currentEpisodeId) { mutableStateOf(false) }
+    var scrubProgress by remember(currentEpisodeId) { mutableFloatStateOf(0f) }
+    var isTimelineHovered by remember(currentEpisodeId) { mutableStateOf(false) }
+    var hoverFraction by remember(currentEpisodeId) { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
 
-    val playbackProgress by remember {
+    val synced = isPlayerSynced && (player.boundMediaId.isEmpty() || currentEpisodeId.isEmpty() || player.boundMediaId == currentEpisodeId)
+
+    val playbackProgress by remember(synced) {
         derivedStateOf {
+            if (!synced) return@derivedStateOf 0f
             val quantizedMs = (timeMsProvider().coerceAtLeast(0L) / 250L) * 250L
             val totalMs = durationMsProvider()
             if (totalMs > 0L) (quantizedMs.toFloat() / totalMs.toFloat()).coerceIn(0f, 1f) else 0f
@@ -1280,10 +1346,12 @@ private fun IsolatedPlayerScrubber(
     }
 
     val onValueChangeFinished: () -> Unit = {
-        val totalDur = if (durationMsProvider() > 0L) durationMsProvider() else player.mediaPlayer.status().length()
-        if (totalDur > 0L) {
-            val targetMs = (scrubProgress * totalDur).toLong()
-            if (onSeek != null) onSeek(targetMs) else player.seekToTime(targetMs)
+        if (synced) {
+            val totalDur = if (durationMsProvider() > 0L) durationMsProvider() else player.mediaPlayer.status().length()
+            if (totalDur > 0L) {
+                val targetMs = (scrubProgress * totalDur).toLong()
+                if (onSeek != null) onSeek(targetMs) else player.seekToTime(targetMs)
+            }
         }
         isScrubbing = false
         onScrubbingStateChange?.invoke(false)
@@ -1296,7 +1364,7 @@ private fun IsolatedPlayerScrubber(
     ) {
         val containerWidthPx = with(density) { maxWidth.toPx() }
         val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
-        val isSeekable = player.isFirstFrameRendered && durationMsProvider() > 0L
+        val isSeekable = synced && player.isFirstFrameRendered && durationMsProvider() > 0L
 
         Box(
             modifier = Modifier
@@ -1437,6 +1505,8 @@ private fun IsolatedPlayerScrubber(
 @Composable
 private fun SeriesBottomTransportBar(
     player: DirectMemoryVideoPlayer,
+    currentEpisodeId: String = "",
+    isPlayerSynced: Boolean = true,
     timeMsProvider: () -> Long,
     durationMsProvider: () -> Long,
     onScrubbingStateChange: (Boolean) -> Unit,
@@ -1458,6 +1528,8 @@ private fun SeriesBottomTransportBar(
         // ========================================================
         IsolatedPlayerScrubber(
             player = player,
+            currentEpisodeId = currentEpisodeId,
+            isPlayerSynced = isPlayerSynced,
             timeMsProvider = timeMsProvider,
             durationMsProvider = durationMsProvider,
             onScrubbingStateChange = onScrubbingStateChange,

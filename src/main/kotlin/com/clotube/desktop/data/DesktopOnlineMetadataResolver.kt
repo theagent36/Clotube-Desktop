@@ -1113,6 +1113,23 @@ object DesktopOnlineMetadataResolver {
                             poster = poster.replace("http://", "https://")
                         }
                         val premiered = chosenShow.get("premiered")?.takeIf { !it.isJsonNull }?.asString?.take(4) ?: "2024"
+
+                        // Fallback to IMDb or Wikipedia if TVMaze has no poster image
+                        if (poster.isBlank()) {
+                            val yearHint = premiered.takeIf { it.isNotBlank() && it != "2024" }
+                            val imdb = fetchFromImdb(title, yearHint) ?: fetchFromImdb(cleanQuery, null)
+                            if (imdb != null && imdb.posterUrl.isNotBlank()) {
+                                poster = imdb.posterUrl
+                            } else {
+                                val wiki = fetchFromWikipedia("$title (TV series)")
+                                    ?: fetchFromWikipedia(title)
+                                    ?: fetchFromWikipedia(cleanQuery)
+                                if (wiki != null && wiki.posterUrl.isNotBlank()) {
+                                    poster = wiki.posterUrl
+                                }
+                            }
+                        }
+
                         val summaryRaw = chosenShow.get("summary")?.takeIf { !it.isJsonNull }?.asString ?: ""
                         val synopsis = cleanHtml(summaryRaw)
 
@@ -1135,8 +1152,32 @@ object DesktopOnlineMetadataResolver {
         }
 
         val fallback = fallbackSeries(cleanQuery)
-        seriesCache[cleanQuery.lowercase()] = fallback
-        fallback
+        val resolvedFallback = if (fallback.posterUrl.isBlank()) {
+            val imdb = fetchFromImdb(cleanQuery, null)
+            if (imdb != null && imdb.posterUrl.isNotBlank()) {
+                fallback.copy(
+                    posterUrl = imdb.posterUrl,
+                    backdropUrl = imdb.posterUrl,
+                    officialTitle = imdb.officialTitle.ifBlank { fallback.officialTitle }
+                )
+            } else {
+                val wiki = fetchFromWikipedia("$cleanQuery (TV series)")
+                    ?: fetchFromWikipedia(cleanQuery)
+                if (wiki != null && wiki.posterUrl.isNotBlank()) {
+                    fallback.copy(
+                        posterUrl = wiki.posterUrl,
+                        backdropUrl = wiki.posterUrl,
+                        officialTitle = wiki.officialTitle.ifBlank { fallback.officialTitle }
+                    )
+                } else {
+                    fallback
+                }
+            }
+        } else {
+            fallback
+        }
+        seriesCache[cleanQuery.lowercase()] = resolvedFallback
+        resolvedFallback
     }
 
     suspend fun resolveSeries(rawTitle: String): SeriesOnlineMeta = resolveSeries(rawTitle, 0)

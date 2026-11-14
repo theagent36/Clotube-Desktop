@@ -27,6 +27,7 @@ data class WatchlistEntry(
     val mediaType: WatchlistMediaType = WatchlistMediaType.MOVIE,
     val status: WatchlistStatus = WatchlistStatus.WATCHED,
     val driveId: String? = null,
+    val posterUrl: String? = null,
     val updatedAt: Long = System.currentTimeMillis(),
     val isDeleted: Boolean = false
 )
@@ -40,6 +41,7 @@ data class WatchlistEnvelope(
 object DesktopWatchlistManager {
     private val gson = GsonBuilder().setPrettyPrinting().create()
     private val memoryCache = ConcurrentHashMap<String, MutableList<WatchlistEntry>>()
+    private val attemptedPosterKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     // Observable Compose revision counter to recompose search results, cards, and Watchlist tab
     val watchlistRevision = mutableIntStateOf(0)
@@ -153,7 +155,8 @@ object DesktopWatchlistManager {
         title: String,
         mediaType: WatchlistMediaType,
         status: WatchlistStatus,
-        driveId: String? = null
+        driveId: String? = null,
+        posterUrl: String? = null
     ) = withContext(Dispatchers.IO) {
         if (email.isBlank() || title.isBlank()) return@withContext
         val list = loadLocalSync(email)
@@ -169,12 +172,14 @@ object DesktopWatchlistManager {
 
             if (existingIdx >= 0) {
                 val existing = list[existingIdx]
+                val resolvedPoster = posterUrl?.takeIf { it.isNotBlank() } ?: existing.posterUrl
                 list[existingIdx] = existing.copy(
                     title = cleanTitle,
                     normalizedTitle = norm,
                     mediaType = mediaType,
                     status = status,
                     driveId = driveId ?: existing.driveId,
+                    posterUrl = resolvedPoster,
                     updatedAt = now,
                     isDeleted = false
                 )
@@ -187,6 +192,7 @@ object DesktopWatchlistManager {
                         mediaType = mediaType,
                         status = status,
                         driveId = driveId,
+                        posterUrl = posterUrl?.takeIf { it.isNotBlank() },
                         updatedAt = now,
                         isDeleted = false
                     )
@@ -216,11 +222,20 @@ object DesktopWatchlistManager {
             if (idx >= 0) {
                 val current = list[idx]
                 val updatedTitle = newTitle?.trim()?.takeIf { it.isNotBlank() } ?: current.title
+                val updatedNorm = normalizeTitle(updatedTitle)
+                val updatedType = newMediaType ?: current.mediaType
+                val titleOrTypeChanged = updatedNorm != current.normalizedTitle || updatedType != current.mediaType
+
+                if (titleOrTypeChanged) {
+                    attemptedPosterKeys.remove("${updatedType.name}:$updatedNorm")
+                }
+
                 list[idx] = current.copy(
                     title = updatedTitle,
-                    normalizedTitle = normalizeTitle(updatedTitle),
+                    normalizedTitle = updatedNorm,
                     status = newStatus ?: current.status,
-                    mediaType = newMediaType ?: current.mediaType,
+                    mediaType = updatedType,
+                    posterUrl = if (titleOrTypeChanged) null else current.posterUrl,
                     updatedAt = now,
                     isDeleted = false
                 )
@@ -297,7 +312,11 @@ object DesktopWatchlistManager {
                     } else {
                         val localEntry = local[idx]
                         if (remoteEntry.updatedAt > localEntry.updatedAt) {
-                            local[idx] = remoteEntry.copy(id = localEntry.id)
+                            val mergedPoster = remoteEntry.posterUrl?.takeIf { it.isNotBlank() } ?: localEntry.posterUrl
+                            local[idx] = remoteEntry.copy(id = localEntry.id, posterUrl = mergedPoster)
+                            changed = true
+                        } else if (localEntry.posterUrl.isNullOrBlank() && !remoteEntry.posterUrl.isNullOrBlank()) {
+                            local[idx] = localEntry.copy(posterUrl = remoteEntry.posterUrl)
                             changed = true
                         }
                     }
@@ -311,5 +330,90 @@ object DesktopWatchlistManager {
             System.err.println("[DesktopWatchlistManager] Error merging remote watchlist: ${e.message}")
         }
         return changed
+    }
+
+    suspend fun updateEntryPoster(
+        email: String,
+        entryId: String,
+        posterUrl: String
+    ) = withContext(Dispatchers.IO) {
+        if (email.isBlank() || entryId.isBlank() || posterUrl.isBlank()) return@withContext
+        val list = loadLocalSync(email)
+        var modified = false
+
+        synchronized(list) {
+            val idx = list.indexOfFirst { it.id == entryId }
+            if (idx >= 0 && list[idx].posterUrl != posterUrl) {
+                list[idx] = list[idx].copy(
+                    posterUrl = posterUrl,
+                    updatedAt = System.currentTimeMillis()
+                )
+                modified = true
+            }
+        }
+        if (modified) {
+            saveLocal(email, list)
+        }
+    }
+
+    /**
+     * Derives official poster thumbnails from the movie/series name for all off-Drive
+     * Watchlist entries that do not yet have a cached posterUrl.
+     */
+    suspend fun resolveMissingOffDrivePosters(
+        email: String,
+        accessToken: String,
+        driveMovies: List<com.clotube.desktop.model.DesktopMediaItem> = emptyList(),
+        driveSeries: List<com.clotube.desktop.model.DesktopMediaItem> = emptyList()
+    ) = withContext(Dispatchers.IO) {
+        if (email.isBlank()) return@withContext
+
+        val driveMovieByNorm = driveMovies.associateBy { normalizeTitle(it.title) }
+        val driveSeriesByNorm = driveSeries.associateBy { normalizeTitle(it.title) }
+
+        val candidates = getVisibleEntries(email).filter { entry ->
+            entry.posterUrl.isNullOrBlank() &&
+                entry.title.isNotBlank() &&
+                !attemptedPosterKeys.contains("${entry.mediaType.name}:${entry.normalizedTitle}")
+        }
+
+        if (candidates.isEmpty()) return@withContext
+
+        var anyUpdated = false
+        for (entry in candidates) {
+            val attemptKey = "${entry.mediaType.name}:${entry.normalizedTitle}"
+            attemptedPosterKeys.add(attemptKey)
+
+            // Fast path: if an active Drive item matches by title, reuse its resolved poster
+            val matchedDrivePoster = when (entry.mediaType) {
+                WatchlistMediaType.MOVIE -> driveMovieByNorm[entry.normalizedTitle]?.thumbnailUrl
+                WatchlistMediaType.SERIES -> driveSeriesByNorm[entry.normalizedTitle]?.thumbnailUrl
+            }?.takeIf { it.isNotBlank() && !it.contains("drive.google.com/thumbnail") }
+
+            val derivedPoster = matchedDrivePoster ?: when (entry.mediaType) {
+                WatchlistMediaType.MOVIE -> {
+                    DesktopOnlineMetadataResolver.resolveMovie(entry.title).posterUrl
+                }
+                WatchlistMediaType.SERIES -> {
+                    DesktopOnlineMetadataResolver.resolveSeries(entry.title).posterUrl.ifBlank {
+                        DesktopOnlineMetadataResolver.resolveMovie(entry.title).posterUrl
+                    }
+                }
+            }
+
+            if (derivedPoster.isNotBlank()) {
+                updateEntryPoster(email, entry.id, derivedPoster)
+                if (accessToken.isNotBlank()) {
+                    DesktopThumbnailPrefetcher.enqueueSingle(derivedPoster, null, accessToken)
+                }
+                anyUpdated = true
+            }
+        }
+
+        if (anyUpdated && accessToken.isNotBlank()) {
+            try {
+                DesktopWatchlistSync.pushLocalWatchlist(email, accessToken)
+            } catch (_: Exception) {}
+        }
     }
 }

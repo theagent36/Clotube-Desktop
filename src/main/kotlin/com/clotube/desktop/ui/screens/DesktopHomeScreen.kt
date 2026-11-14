@@ -637,16 +637,37 @@ fun DesktopHomeScreen(
                                                     }
                                                 }
                                             ) {
+                                                val wlThumb = rememberThumbnailBitmap(
+                                                    primaryUrl = entry.posterUrl?.takeIf { it.isNotBlank() },
+                                                    fallbackUrl = null,
+                                                    accessToken = accessToken,
+                                                    userEmail = userEmail,
+                                                    size = ThumbnailSize.CARD
+                                                )
+
                                                 Box(
-                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
+                                                    modifier = Modifier
+                                                        .width(40.dp)
+                                                        .height(54.dp)
+                                                        .clip(RoundedCornerShape(5.dp))
+                                                        .background(Color(0xFF1A2232)),
                                                     contentAlignment = Alignment.Center
                                                 ) {
-                                                    Icon(
-                                                        imageVector = if (entry.mediaType == WatchlistMediaType.SERIES) Icons.Rounded.Tv else Icons.Rounded.Movie,
-                                                        contentDescription = null,
-                                                        tint = Color(0xFF94A3B8),
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
+                                                    if (wlThumb != null) {
+                                                        Image(
+                                                            bitmap = wlThumb,
+                                                            contentDescription = entry.title,
+                                                            contentScale = ContentScale.Crop,
+                                                            modifier = Modifier.fillMaxSize()
+                                                        )
+                                                    } else {
+                                                        Icon(
+                                                            imageVector = if (entry.mediaType == WatchlistMediaType.SERIES) Icons.Rounded.Tv else Icons.Rounded.Movie,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFF94A3B8),
+                                                            modifier = Modifier.size(20.dp)
+                                                        )
+                                                    }
                                                 }
                                                 Column(modifier = Modifier.weight(1f)) {
                                                     Text(text = entry.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -715,6 +736,12 @@ fun DesktopHomeScreen(
                                                                 driveId = null
                                                             )
                                                             DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                                            DesktopWatchlistManager.resolveMissingOffDrivePosters(
+                                                                email = userEmail,
+                                                                accessToken = accessToken,
+                                                                driveMovies = movies,
+                                                                driveSeries = series
+                                                            )
                                                         }
                                                     }
                                                     .pointerHoverIcon(PointerIcon.Hand),

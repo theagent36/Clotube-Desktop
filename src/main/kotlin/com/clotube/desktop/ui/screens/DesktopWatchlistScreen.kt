@@ -66,6 +66,17 @@ fun FigmaWatchlistContent(
         DesktopWatchlistManager.getVisibleEntries(userEmail)
     }
 
+    LaunchedEffect(userEmail, revision) {
+        if (userEmail.isNotBlank()) {
+            DesktopWatchlistManager.resolveMissingOffDrivePosters(
+                email = userEmail,
+                accessToken = accessToken,
+                driveMovies = movies,
+                driveSeries = series
+            )
+        }
+    }
+
     var selectedFilter by remember { mutableStateOf(WatchlistFilter.ALL) }
     var filterQuery by remember { mutableStateOf("") }
     var isSearchFocused by remember { mutableStateOf(false) }
@@ -450,6 +461,12 @@ fun FigmaWatchlistContent(
                         driveId = null
                     )
                     DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                    DesktopWatchlistManager.resolveMissingOffDrivePosters(
+                        email = userEmail,
+                        accessToken = accessToken,
+                        driveMovies = movies,
+                        driveSeries = series
+                    )
                 }
             }
         )
@@ -470,6 +487,12 @@ fun FigmaWatchlistContent(
                         newStatus = status
                     )
                     DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                    DesktopWatchlistManager.resolveMissingOffDrivePosters(
+                        email = userEmail,
+                        accessToken = accessToken,
+                        driveMovies = movies,
+                        driveSeries = series
+                    )
                 }
             }
         )
@@ -687,9 +710,18 @@ private fun WatchlistRowCard(
         )
     }
 
+    val primaryPosterUrl = remember(matchedMedia?.thumbnailUrl, entry.posterUrl) {
+        matchedMedia?.thumbnailUrl?.takeIf { it.isNotBlank() }
+            ?: entry.posterUrl?.takeIf { it.isNotBlank() }
+    }
+    val fallbackPosterUrl = remember(matchedMedia?.fallbackThumbnailUrl, entry.posterUrl) {
+        matchedMedia?.fallbackThumbnailUrl?.takeIf { it.isNotBlank() }
+            ?: entry.posterUrl?.takeIf { it.isNotBlank() }
+    }
+
     val thumbBitmap = rememberThumbnailBitmap(
-        primaryUrl = matchedMedia?.thumbnailUrl,
-        fallbackUrl = matchedMedia?.fallbackThumbnailUrl,
+        primaryUrl = primaryPosterUrl,
+        fallbackUrl = fallbackPosterUrl,
         accessToken = accessToken,
         userEmail = userEmail,
         size = ThumbnailSize.CARD
@@ -731,11 +763,11 @@ private fun WatchlistRowCard(
         ) {
             Box(
                 modifier = Modifier
-                    .width(98.dp)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF0A0D14))
-                    .border(1.dp, Color(0xFF1A2230), RoundedCornerShape(6.dp)),
+                    .width(42.dp)
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF161E2E))
+                    .border(1.dp, Color(0xFF222B3D), RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 if (thumbBitmap != null) {
@@ -743,47 +775,15 @@ private fun WatchlistRowCard(
                         bitmap = thumbBitmap,
                         contentDescription = entry.title,
                         contentScale = ContentScale.Crop,
+                        filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
                         modifier = Modifier.fillMaxSize()
                     )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(Color.Transparent, Color(0x66000000))
-                                )
-                            )
-                    )
-                    if (isHovered) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.35f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xD90A0E17))
-                                    .border(1.dp, Color(0x33FFFFFF), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = "Play",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                    }
                 } else {
                     Icon(
                         imageVector = if (entry.mediaType == WatchlistMediaType.SERIES) Icons.Rounded.Tv else Icons.Rounded.Movie,
                         contentDescription = null,
-                        tint = Color(0xFF64748B),
-                        modifier = Modifier.size(20.dp)
+                        tint = Color(0xFF60A5FA),
+                        modifier = Modifier.size(19.dp)
                     )
                 }
             }

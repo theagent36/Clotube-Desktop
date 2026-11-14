@@ -3,13 +3,23 @@ package com.clotube.desktop.update
 import com.google.gson.GsonBuilder
 import java.io.File
 
+data class CachedReleaseNoteEntry(
+    val version: String,
+    val tagName: String,
+    val title: String,
+    val body: String,
+    val publishedAt: String = ""
+)
+
 data class PersistedUpdateState(
     val skippedVersion: String? = null,
     val remindLaterVersion: String? = null,
     val remindLaterTimestamp: Long = 0L,
     val pendingInstallerPath: String? = null,
     val pendingVersion: String? = null,
-    val pendingReleaseNotes: String? = null
+    val pendingReleaseNotes: String? = null,
+    val lastSeenReleaseNotesVersion: String? = null,
+    val cachedReleases: List<CachedReleaseNoteEntry> = emptyList()
 )
 
 data class GithubReleaseInfo(
