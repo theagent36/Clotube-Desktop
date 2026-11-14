@@ -1,5 +1,6 @@
 package com.clotube.desktop
 
+import com.clotube.desktop.media.VlcWarmupManager
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -120,13 +121,15 @@ fun setupLibVlcEnvironment() {
     val candidateDirs = listOfNotNull(
         resourcesDir?.let { File(it, "windows/vlc") },
         resourcesDir?.let { File(it, "vlc") },
-        File("package-resources/windows/vlc"), // Local development fallback
+        File("package-resources/windows/vlc"),
         File("vlc")
     )
 
     val bundledVlc = candidateDirs.firstOrNull { dir ->
         dir.exists() && File(dir, "libvlc.dll").exists()
     }
+
+    VlcWarmupManager.configure(bundledVlc)
 
     if (bundledVlc != null) {
         val vlcPath = bundledVlc.absolutePath

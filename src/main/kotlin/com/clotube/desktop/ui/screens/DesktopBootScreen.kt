@@ -1,10 +1,14 @@
 package com.clotube.desktop.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -13,11 +17,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -27,8 +37,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clotube.desktop.media.VlcWarmupManager
 import com.clotube.desktop.ui.components.ClotubeGlyphIcon
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -37,6 +49,8 @@ import kotlinx.coroutines.launch
 fun DesktopBootScreen(
     onBootComplete: () -> Unit
 ) {
+    val currentOnBootComplete by rememberUpdatedState(onBootComplete)
+
     // Stage Animators
     val auraRadius = remember { Animatable(0f) }
     val auraAlpha = remember { Animatable(0f) }
@@ -49,6 +63,8 @@ fun DesktopBootScreen(
     val streakWidth = remember { Animatable(0f) }
     val textAlpha = remember { Animatable(0f) }
     val letterSpacingAnim = remember { Animatable(14f) }
+
+    var showFirstBootSetup by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         // Initial black pause
@@ -94,9 +110,29 @@ fun DesktopBootScreen(
         }
         letterSpacingAnim.animateTo(4.5f, tween(600, easing = FastOutSlowInEasing))
 
-        // Phase 4: Hold cinema lockup before launching app
+        // Phase 4: Hold cinema lockup
         delay(550L)
-        onBootComplete()
+
+        // Phase 5: Keep spinner visible until every VLC plugin, DLL, and engine check is verified
+        if (VlcWarmupManager.needsFirstBootSetup()) {
+            showFirstBootSetup = true
+            val shownAt = System.currentTimeMillis()
+
+            // Yield so the spinner renders on screen before starting the warm-up & engine probe
+            delay(150L)
+
+            VlcWarmupManager.ensureWarmedUpAndVerified()
+
+            // Hold slightly after verification finishes so the transition feels smooth and complete
+            val elapsed = System.currentTimeMillis() - shownAt
+            if (elapsed < 1600L) {
+                delay(1600L - elapsed)
+            } else {
+                delay(300L)
+            }
+        }
+
+        currentOnBootComplete()
     }
 
     Box(
@@ -109,7 +145,6 @@ fun DesktopBootScreen(
         Canvas(modifier = Modifier.fillMaxSize()) {
             val centerOffset = Offset(size.width / 2f, size.height / 2f)
 
-            // Ambient background halo
             if (auraAlpha.value > 0f) {
                 drawCircle(
                     brush = Brush.radialGradient(
@@ -126,7 +161,6 @@ fun DesktopBootScreen(
                 )
             }
 
-            // Expanding sonic shockwave ring
             if (rippleAlpha.value > 0f) {
                 val baseRadius = 56.dp.toPx()
                 drawCircle(
@@ -143,7 +177,6 @@ fun DesktopBootScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Floating 3D Glyph
             ClotubeGlyphIcon(
                 size = 110.dp,
                 modifier = Modifier.graphicsLayer {
@@ -155,7 +188,6 @@ fun DesktopBootScreen(
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // Anamorphic Light Streak
             Box(
                 modifier = Modifier
                     .size(width = (240 * streakWidth.value).dp, height = 1.5.dp)
@@ -174,7 +206,6 @@ fun DesktopBootScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Cinematic Letter-Spaced Brand Wordmark
             Text(
                 text = "CLOTUBE",
                 color = Color.White,
@@ -199,6 +230,37 @@ fun DesktopBootScreen(
                     alpha = textAlpha.value * 0.75f
                 }
             )
+
+            // 3. First-Boot Setup Spinner & Status Message Below App Logo
+            AnimatedVisibility(
+                visible = showFirstBootSetup,
+                enter = fadeIn(animationSpec = tween(350)) + expandVertically(animationSpec = tween(350)),
+                exit = fadeOut(animationSpec = tween(200))
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(top = 32.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF00E5FF),
+                        trackColor = Color(0xFF00E5FF).copy(alpha = 0.16f),
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(30.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text(
+                        text = "Setting up. First time boot takes some time",
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        fontFamily = FontFamily.SansSerif,
+                        letterSpacing = 0.3.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
         }
     }
 }

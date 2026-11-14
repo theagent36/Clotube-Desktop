@@ -1,20 +1,29 @@
 package com.clotube.desktop.ui.screens
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
@@ -31,15 +40,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.zIndex
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.update.DesktopUpdateManager
 import kotlinx.coroutines.Job
@@ -73,6 +91,7 @@ fun DesktopSettingsScreen(
 
     var showSignOutDialog by remember { mutableStateOf(false) }
     var showClearHistoryDialog by remember { mutableStateOf(false) }
+    var showClearCacheDialog by remember { mutableStateOf(false) }
 
     var toastMessage by remember { mutableStateOf<String?>(null) }
     var toastJob by remember { mutableStateOf<Job?>(null) }
@@ -132,10 +151,50 @@ fun DesktopSettingsScreen(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
+                val EmphasizedDecel = remember { CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f) }
+
                 SettingsTab.entries.forEach { tab ->
                     val isSelected = activeTab == tab
                     val tabInteraction = remember { MutableInteractionSource() }
                     val isTabHovered by tabInteraction.collectIsHoveredAsState()
+
+                    val pillHeight by animateDpAsState(
+                        targetValue = if (isSelected) 18.dp else 0.dp,
+                        animationSpec = spring(dampingRatio = 0.72f, stiffness = 440f),
+                        label = "SettingsRailPillHeight"
+                    )
+                    val containerFill by animateColorAsState(
+                        targetValue = when {
+                            isSelected -> Color(0xFF131926)
+                            isTabHovered -> Color(0xFF0E131D)
+                            else -> Color.Transparent
+                        },
+                        animationSpec = tween(200, easing = EmphasizedDecel),
+                        label = "SettingsRailFill"
+                    )
+                    val containerStroke by animateColorAsState(
+                        targetValue = if (isSelected) Color(0xFF223047) else Color.Transparent,
+                        animationSpec = tween(200),
+                        label = "SettingsRailStroke"
+                    )
+                    val iconColor by animateColorAsState(
+                        targetValue = when {
+                            isSelected -> Color(0xFF60A5FA)
+                            isTabHovered -> Color(0xFFCBD5E1)
+                            else -> Color(0xFF64748B)
+                        },
+                        animationSpec = tween(200),
+                        label = "SettingsRailIcon"
+                    )
+                    val textColor by animateColorAsState(
+                        targetValue = when {
+                            isSelected -> Color.White
+                            isTabHovered -> Color(0xFFE2E8F0)
+                            else -> Color(0xFF94A3B8)
+                        },
+                        animationSpec = tween(200),
+                        label = "SettingsRailText"
+                    )
 
                     Surface(
                         modifier = Modifier
@@ -148,12 +207,8 @@ fun DesktopSettingsScreen(
                             ) { activeTab = tab }
                             .pointerHoverIcon(PointerIcon.Hand),
                         shape = RoundedCornerShape(8.dp),
-                        color = when {
-                            isSelected -> Color(0xFF131824)
-                            isTabHovered -> Color(0xFF0E131D)
-                            else -> Color.Transparent
-                        },
-                        border = if (isSelected) BorderStroke(1.dp, Color(0xFF1E283A)) else null
+                        color = containerFill,
+                        border = BorderStroke(1.dp, containerStroke)
                     ) {
                         Row(
                             modifier = Modifier
@@ -165,27 +220,19 @@ fun DesktopSettingsScreen(
                             Box(
                                 modifier = Modifier
                                     .width(3.dp)
-                                    .height(16.dp)
-                                    .clip(RoundedCornerShape(1.5.dp))
-                                    .background(if (isSelected) Color(0xFF60A5FA) else Color.Transparent)
+                                    .height(pillHeight)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(Color(0xFF60A5FA))
                             )
                             Icon(
                                 imageVector = tab.icon,
                                 contentDescription = tab.label,
-                                tint = when {
-                                    isSelected -> Color(0xFF60A5FA)
-                                    isTabHovered -> Color(0xFFCBD5E1)
-                                    else -> Color(0xFF64748B)
-                                },
+                                tint = iconColor,
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
                                 text = tab.label,
-                                color = when {
-                                    isSelected -> Color.White
-                                    isTabHovered -> Color(0xFFE2E8F0)
-                                    else -> Color(0xFF94A3B8)
-                                },
+                                color = textColor,
                                 fontSize = 13.sp,
                                 fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
                             )
@@ -202,38 +249,98 @@ fun DesktopSettingsScreen(
                     .background(Color(0xFF141923))
             )
 
-            // RIGHT WORKSPACE: Category Details Card
-            Column(
+            // RIGHT WORKSPACE: Direction-Aware Animated Page Container
+            val rightScrollState = rememberScrollState()
+            LaunchedEffect(activeTab) {
+                rightScrollState.scrollTo(0)
+            }
+
+            AnimatedContent(
+                targetState = activeTab,
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 36.dp, vertical = 28.dp),
-                verticalArrangement = Arrangement.spacedBy(24.dp)
-            ) {
-                Column {
-                    Text(
-                        text = activeTab.label,
-                        color = Color.White,
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = when (activeTab) {
-                            SettingsTab.ACCOUNT -> "Manage your connected Google Account and cloud media indexing preferences."
-                            SettingsTab.PLAYBACK -> "Configure media pre-buffering, autoplay behaviors, and seek step intervals."
-                            SettingsTab.DISPLAY -> "Direct3D 11 hardware decoding, monitor frame pacing, and background eco modes."
-                            SettingsTab.AUDIO_SUBS -> "Preferred languages, default subtitle states, and persistent audio volume."
-                            SettingsTab.STORAGE -> "Local disk usage for artwork, series metadata caches, and watch history."
-                            SettingsTab.ABOUT -> "Application architecture, bundled 64-bit LibVLC core, and local stream proxy."
-                        },
-                        color = Color(0xFF94A3B8),
-                        fontSize = 12.sp
-                    )
-                }
+                    .fillMaxHeight(),
+                transitionSpec = {
+                    // DIRECTION-AWARE HORIZON SLIDE & DEPTH CROSS-DISSOLVE
+                    // Matches main app navigation (Home <-> Movies <-> TV Series <-> Watchlist <-> Recents <-> Settings)
+                    val isMovingForward = targetState.ordinal > initialState.ordinal
+                    val slideOffset = 64 // Subtle 64px offset prevents motion sickness on wide desktop monitors
 
-                when (activeTab) {
+                    if (isMovingForward) {
+                        (slideInHorizontally(
+                            initialOffsetX = { slideOffset },
+                            animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        ) + fadeIn(
+                            animationSpec = tween(280)
+                        ) + scaleIn(
+                            initialScale = 0.985f,
+                            animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        )).togetherWith(
+                            slideOutHorizontally(
+                                targetOffsetX = { -slideOffset },
+                                animationSpec = tween(220, easing = FastOutLinearInEasing)
+                            ) + fadeOut(
+                                animationSpec = tween(180)
+                            ) + scaleOut(
+                                targetScale = 0.985f,
+                                animationSpec = tween(220)
+                            )
+                        )
+                    } else {
+                        (slideInHorizontally(
+                            initialOffsetX = { -slideOffset },
+                            animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        ) + fadeIn(
+                            animationSpec = tween(280)
+                        ) + scaleIn(
+                            initialScale = 0.985f,
+                            animationSpec = tween(300, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f))
+                        )).togetherWith(
+                            slideOutHorizontally(
+                                targetOffsetX = { slideOffset },
+                                animationSpec = tween(220, easing = FastOutLinearInEasing)
+                            ) + fadeOut(
+                                animationSpec = tween(180)
+                            ) + scaleOut(
+                                targetScale = 0.985f,
+                                animationSpec = tween(220)
+                            )
+                        )
+                    }
+                },
+                label = "SettingsPageTransition"
+            ) { currentTab ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 36.dp, vertical = 28.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                ) {
+                    // Header
+                    Column {
+                        Text(
+                            text = currentTab.label,
+                            color = Color.White,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = when (currentTab) {
+                                SettingsTab.ACCOUNT -> "Manage your connected Google Account and cloud media indexing preferences."
+                                SettingsTab.PLAYBACK -> "Configure media pre-buffering, autoplay behaviors, and seek step intervals."
+                                SettingsTab.DISPLAY -> "Direct3D 11 hardware decoding, monitor frame pacing, and background eco modes."
+                                SettingsTab.AUDIO_SUBS -> "Preferred languages, default subtitle states, and persistent audio volume."
+                                SettingsTab.STORAGE -> "Local disk usage for artwork, series metadata caches, and watch history."
+                                SettingsTab.ABOUT -> "Application architecture, bundled 64-bit LibVLC core, and local stream proxy."
+                            },
+                            color = Color(0xFF94A3B8),
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    when (currentTab) {
                     SettingsTab.ACCOUNT -> {
                         SettingsCard {
                             Row(
@@ -493,6 +600,53 @@ fun DesktopSettingsScreen(
                                     labelProvider = { it }
                                 )
                             }
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                                    Text(
+                                        text = "Subtitle Size",
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    val scaleNote = if (settings.subtitleScalePercent !in listOf(50, 100, 150)) {
+                                        "Current: ${settings.subtitleScalePercent}% (adjusted via Ctrl + Scroll in player)."
+                                    } else {
+                                        "Small (50%), Normal (100%), or Large (150%). Fine-tune in player with Ctrl + Scroll."
+                                    }
+                                    Text(
+                                        text = scaleNote,
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                StudioSegmentedControl(
+                                    items = listOf(50, 100, 150),
+                                    selectedItem = settings.subtitleScalePercent,
+                                    onItemSelected = { percent ->
+                                        DesktopAppSettings.update { copy(subtitleScalePercent = percent) }
+                                        val label = when (percent) {
+                                            50 -> "Small (50%)"
+                                            100 -> "Normal (100%)"
+                                            150 -> "Large (150%)"
+                                            else -> "$percent%"
+                                        }
+                                        showToast("Subtitle size set to $label")
+                                    },
+                                    labelProvider = { percent ->
+                                        when (percent) {
+                                            50 -> "Small"
+                                            100 -> "Normal"
+                                            150 -> "Large"
+                                            else -> "$percent%"
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
 
@@ -513,15 +667,7 @@ fun DesktopSettingsScreen(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
                                         .clickable(enabled = canClearCache) {
-                                            scope.launch {
-                                                isCacheClearing = true
-                                                val bytesBefore = cacheSizeBytes
-                                                DesktopAppSettings.clearThumbnailCache(userEmail)
-                                                cacheSizeBytes = DesktopAppSettings.calculateCacheSizeBytes(userEmail)
-                                                val freedMb = "%.2f MB".format((bytesBefore - cacheSizeBytes).coerceAtLeast(0L) / (1024.0 * 1024.0))
-                                                isCacheClearing = false
-                                                showToast("Thumbnail cache cleared ($freedMb freed)")
-                                            }
+                                            showClearCacheDialog = true
                                         }
                                         .pointerHoverIcon(if (canClearCache) PointerIcon.Hand else PointerIcon.Default),
                                     shape = RoundedCornerShape(8.dp),
@@ -616,15 +762,29 @@ fun DesktopSettingsScreen(
                 }
             }
         }
+    }
 
         // FLOATING TOAST NOTIFICATION
         AnimatedVisibility(
             visible = toastMessage != null,
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            enter = slideInVertically(
+                initialOffsetY = { it + 24 },
+                animationSpec = spring(dampingRatio = 0.78f, stiffness = 400f)
+            ) + fadeIn(animationSpec = tween(200)) + scaleIn(
+                initialScale = 0.92f,
+                animationSpec = spring(dampingRatio = 0.78f, stiffness = 400f)
+            ),
+            exit = slideOutVertically(
+                targetOffsetY = { it + 24 },
+                animationSpec = tween(170, easing = FastOutLinearInEasing)
+            ) + fadeOut(animationSpec = tween(140)) + scaleOut(
+                targetScale = 0.94f,
+                animationSpec = tween(170, easing = FastOutLinearInEasing)
+            ),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 24.dp)
+                .zIndex(35f)
         ) {
             Surface(
                 shape = RoundedCornerShape(24.dp),
@@ -654,7 +814,10 @@ fun DesktopSettingsScreen(
         }
 
         // CONFIRMATION DIALOG: Clear History
-        if (showClearHistoryDialog) {
+        AnimatedSettingsModal(
+            visible = showClearHistoryDialog,
+            onDismissRequest = { showClearHistoryDialog = false }
+        ) {
             DestructiveConfirmationDialog(
                 title = "Clear Local Watch History?",
                 description = "This will remove all resume progress and timestamps saved locally on this computer. Progress stored on Google Drive will remain untouched.",
@@ -669,7 +832,10 @@ fun DesktopSettingsScreen(
         }
 
         // CONFIRMATION DIALOG: Sign Out
-        if (showSignOutDialog) {
+        AnimatedSettingsModal(
+            visible = showSignOutDialog,
+            onDismissRequest = { showSignOutDialog = false }
+        ) {
             DestructiveConfirmationDialog(
                 title = "Sign Out of Clotube?",
                 description = "You will be signed out of your Google account and returned to the authentication screen. Cached offline media tokens will be cleared.",
@@ -679,6 +845,31 @@ fun DesktopSettingsScreen(
                     onSignOut()
                 },
                 onDismiss = { showSignOutDialog = false }
+            )
+        }
+
+        // CONFIRMATION DIALOG: Clear Cache
+        AnimatedSettingsModal(
+            visible = showClearCacheDialog,
+            onDismissRequest = { showClearCacheDialog = false }
+        ) {
+            DestructiveConfirmationDialog(
+                title = "Clear Image & Poster Cache?",
+                description = "This will delete locally cached movie and TV show artwork (${"%.2f MB".format(cacheSizeBytes / (1024.0 * 1024.0))}). Artwork will be re-downloaded on demand as you browse.",
+                confirmButtonText = "Clear Cache",
+                onConfirm = {
+                    showClearCacheDialog = false
+                    scope.launch {
+                        isCacheClearing = true
+                        val bytesBefore = cacheSizeBytes
+                        DesktopAppSettings.clearThumbnailCache(userEmail)
+                        cacheSizeBytes = DesktopAppSettings.calculateCacheSizeBytes(userEmail)
+                        val freedMb = "%.2f MB".format((bytesBefore - cacheSizeBytes).coerceAtLeast(0L) / (1024.0 * 1024.0))
+                        isCacheClearing = false
+                        showToast("Thumbnail cache cleared ($freedMb freed)")
+                    }
+                },
+                onDismiss = { showClearCacheDialog = false }
             )
         }
     }
@@ -791,81 +982,79 @@ private fun DestructiveConfirmationDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = Color(0xFF0E131E),
-            border = BorderStroke(1.dp, Brush.verticalGradient(listOf(Color(0xFF2B1D24), Color(0xFF191217)))),
-            modifier = Modifier
-                .width(420.dp)
-                .shadow(24.dp, RoundedCornerShape(14.dp))
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF0E131E),
+        border = BorderStroke(1.dp, Brush.verticalGradient(listOf(Color(0xFF2B1D24), Color(0xFF191217)))),
+        modifier = Modifier
+            .width(420.dp)
+            .shadow(24.dp, RoundedCornerShape(14.dp))
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x26E11D48)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0x26E11D48)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.WarningAmber,
-                            contentDescription = null,
-                            tint = Color(0xFFFB7185),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Text(
-                        text = title,
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
+                    Icon(
+                        imageVector = Icons.Rounded.WarningAmber,
+                        contentDescription = null,
+                        tint = Color(0xFFFB7185),
+                        modifier = Modifier.size(20.dp)
                     )
                 }
-
                 Text(
-                    text = description,
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
                 )
+            }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
+            Text(
+                text = description,
+                color = Color(0xFF94A3B8),
+                fontSize = 12.sp,
+                lineHeight = 18.sp
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
                 ) {
-                    TextButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Text("Cancel", color = Color(0xFF94A3B8), fontSize = 12.sp)
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { onConfirm() }
-                            .pointerHoverIcon(PointerIcon.Hand),
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFFE11D48),
-                        border = BorderStroke(1.dp, Color(0xFFF43F5E))
-                    ) {
-                        Text(
-                            text = confirmButtonText,
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
-                        )
-                    }
+                    Text("Cancel", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onConfirm() }
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFE11D48),
+                    border = BorderStroke(1.dp, Color(0xFFF43F5E))
+                ) {
+                    Text(
+                        text = confirmButtonText,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                    )
                 }
             }
         }
@@ -1095,5 +1284,214 @@ fun SoftwareUpdateSettingsCard() {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AnimatedSettingsModal(
+    visible: Boolean,
+    onDismissRequest: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    var isMounted by remember { mutableStateOf(visible) }
+    val scrimAlpha = remember { Animatable(0f) }
+    val modalScale = remember { Animatable(0.84f) }
+    val modalAlpha = remember { Animatable(0f) }
+    val modalTiltX = remember { Animatable(7f) }
+    val modalOffsetY = remember { Animatable(20f) }
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(visible) {
+        if (visible) {
+            isMounted = true
+            scrimAlpha.snapTo(0f)
+            modalScale.snapTo(0.84f)
+            modalAlpha.snapTo(0f)
+            modalTiltX.snapTo(7f)
+            modalOffsetY.snapTo(20f)
+
+            launch {
+                scrimAlpha.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(220, easing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f))
+                )
+            }
+            launch {
+                modalAlpha.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(200, easing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f))
+                )
+            }
+            launch {
+                modalTiltX.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(dampingRatio = 0.76f, stiffness = 360f)
+                )
+            }
+            launch {
+                modalOffsetY.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(dampingRatio = 0.76f, stiffness = 360f)
+                )
+            }
+            modalScale.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(dampingRatio = 0.74f, stiffness = 360f)
+            )
+            try {
+                focusRequester.requestFocus()
+            } catch (_: Throwable) {}
+        } else if (isMounted) {
+            launch {
+                scrimAlpha.animateTo(
+                    targetValue = 0f,
+                    animationSpec = tween(170, easing = FastOutLinearInEasing)
+                )
+            }
+            launch {
+                modalScale.animateTo(
+                    targetValue = 0.90f,
+                    animationSpec = tween(170, easing = FastOutLinearInEasing)
+                )
+            }
+            launch {
+                modalTiltX.animateTo(
+                    targetValue = -4f,
+                    animationSpec = tween(170, easing = FastOutLinearInEasing)
+                )
+            }
+            launch {
+                modalOffsetY.animateTo(
+                    targetValue = 14f,
+                    animationSpec = tween(170, easing = FastOutLinearInEasing)
+                )
+            }
+            modalAlpha.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(150, easing = FastOutLinearInEasing)
+            )
+            isMounted = false
+        }
+    }
+
+    if (!isMounted) return
+
+    val scrimInteraction = remember { MutableInteractionSource() }
+    val cardInteraction = remember { MutableInteractionSource() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(50f)
+            .focusRequester(focusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                    onDismissRequest()
+                    true
+                } else {
+                    false
+                }
+            }
+            .graphicsLayer { alpha = scrimAlpha.value }
+            .background(Color(0xC404060A))
+            .clickable(
+                interactionSource = scrimInteraction,
+                indication = null,
+                onClick = onDismissRequest
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .graphicsLayer {
+                    scaleX = modalScale.value
+                    scaleY = modalScale.value
+                    rotationX = modalTiltX.value
+                    translationY = modalOffsetY.value * density
+                    cameraDistance = 14f * density
+                    alpha = modalAlpha.value
+                }
+                .clickable(
+                    interactionSource = cardInteraction,
+                    indication = null,
+                    onClick = { /* Consume clicks on modal card */ }
+                )
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun AnimatedSettingsPopover(
+    expanded: Boolean,
+    transformOrigin: TransformOrigin = TransformOrigin(1f, 0f),
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    var isMounted by remember { mutableStateOf(expanded) }
+    val scaleAnim = remember { Animatable(0.80f) }
+    val alphaAnim = remember { Animatable(0f) }
+    val offsetYAnim = remember { Animatable(-10f) }
+
+    LaunchedEffect(expanded) {
+        if (expanded) {
+            isMounted = true
+            scaleAnim.snapTo(0.80f)
+            alphaAnim.snapTo(0f)
+            offsetYAnim.snapTo(-10f)
+
+            launch {
+                alphaAnim.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(180, easing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f))
+                )
+            }
+            launch {
+                offsetYAnim.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(dampingRatio = 0.76f, stiffness = 440f)
+                )
+            }
+            scaleAnim.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(dampingRatio = 0.74f, stiffness = 460f)
+            )
+        } else if (isMounted) {
+            launch {
+                scaleAnim.animateTo(
+                    targetValue = 0.88f,
+                    animationSpec = tween(130, easing = FastOutLinearInEasing)
+                )
+            }
+            launch {
+                offsetYAnim.animateTo(
+                    targetValue = -6f,
+                    animationSpec = tween(130, easing = FastOutLinearInEasing)
+                )
+            }
+            alphaAnim.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(120, easing = FastOutLinearInEasing)
+            )
+            isMounted = false
+        }
+    }
+
+    if (!isMounted) return
+
+    Box(
+        modifier = modifier
+            .zIndex(45f)
+            .graphicsLayer {
+                this.transformOrigin = transformOrigin
+                scaleX = scaleAnim.value
+                scaleY = scaleAnim.value
+                translationY = offsetYAnim.value * density
+                alpha = alphaAnim.value
+            }
+    ) {
+        content()
     }
 }

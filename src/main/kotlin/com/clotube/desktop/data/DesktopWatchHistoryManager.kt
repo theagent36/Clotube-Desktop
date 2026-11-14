@@ -369,7 +369,8 @@ object DesktopWatchHistoryManager {
         isSeries: Boolean,
         seriesId: String = "",
         seasonNumber: Int = 1,
-        episodeNumber: Int = 1
+        episodeNumber: Int = 1,
+        allowZeroOverwrite: Boolean = false
     ) {
         if (email.isBlank() || fileId.isBlank()) return
         ensureProfileLoaded(email)
@@ -377,6 +378,15 @@ object DesktopWatchHistoryManager {
         val itemsMap = activeItemsCache[sanitized] ?: return
         val resumeMap = seriesResumeCache[sanitized] ?: return
         val watchedSet = watchedIdsCache[sanitized] ?: return
+
+        // Guard: Never overwrite an active resume position (>5s, <90%) with an un-seeked <3s position
+        // unless explicitly requested by a user scrubber gesture.
+        if (!allowZeroOverwrite && positionMs < 3000L) {
+            val existing = itemsMap[fileId]
+            if (existing != null && existing.positionMs > 5000L && existing.progressFraction < 0.90f) {
+                return
+            }
+        }
 
         val now = System.currentTimeMillis()
         val effectiveDur = if (durationMs > 0L) durationMs else 45L * 60000L

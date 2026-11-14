@@ -825,7 +825,8 @@ fun DesktopHomeScreen(
                             )
                         )
                     } else if (initialState is DesktopActiveView.Library && targetState is DesktopActiveView.Library) {
-                        // DIRECTION-AWARE HORIZON SLIDE & DEPTH CROSS-DISSOLVE (Home <-> Movies <-> Series <-> Recents)
+                        // DIRECTION-AWARE HORIZON SLIDE & DEPTH CROSS-DISSOLVE
+                        // (Home <-> Movies <-> TV Series <-> Watchlist <-> Recents <-> Settings)
                         val fromSection = (initialState as DesktopActiveView.Library).section
                         val toSection = (targetState as DesktopActiveView.Library).section
                         val isMovingForward = toSection.ordinal > fromSection.ordinal

@@ -67,12 +67,16 @@ import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.PacedEqualizerBars
 import com.clotube.desktop.ui.components.PacedLoadingSpinner
+import com.clotube.desktop.ui.components.SubtitleCanvasOverlay
+import com.clotube.desktop.ui.components.SubtitleScaleOsdBadge
+import com.clotube.desktop.ui.components.onCtrlScrollSubtitleScale
 import com.clotube.desktop.ui.motion.FluidMotionKit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -301,82 +305,94 @@ fun DesktopSeriesDetailScreen(
         } ?: ""
     }
 
-    val subtitleFontSize = DesktopAppSettings.state.subtitleFontSizeSp
     val cinemaColor = DesktopAppSettings.state.cinemaColorEnhancement
     val shouldResume = DesktopAppSettings.state.resumePlayback
 
-    // 1. Resolve saved position for the active episode
-    val savedPos = remember(activeEpisode?.id, userEmail) {
-        val ep = activeEpisode
-        if (userEmail.isNotBlank() && ep != null) {
-            com.clotube.desktop.data.DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
-        } else 0L
-    }
+    // 1. Resolve saved position for the active episode from Google Drive watch history BEFORE creating player
+    var isDriveTimestampLoaded by remember(activeEpisode?.id) { mutableStateOf(false) }
+    var resolvedInitialSeekMs by remember(activeEpisode?.id) { mutableLongStateOf(0L) }
 
-    val initialSeekTarget = if (shouldResume && savedPos > 1500L) savedPos else 0L
-
-    var player by remember(activeEpisode?.id, activeStreamUrl, subtitleFontSize, cinemaColor) {
-        mutableStateOf<DirectMemoryVideoPlayer?>(null)
-    }
-
-    LaunchedEffect(activeEpisode?.id, activeStreamUrl, subtitleFontSize, cinemaColor) {
-        val targetEp = activeEpisode ?: return@LaunchedEffect
-        if (activeStreamUrl.isNotBlank()) {
-            delay(60L)
-            if (!isActive || activeEpisode?.id != targetEp.id) return@LaunchedEffect
-            try {
-                player = DirectMemoryVideoPlayer(
-                    mediaUrl = activeStreamUrl,
-                    initialSeekMs = initialSeekTarget,
-                    boundMediaId = targetEp.id
-                )
-            } catch (t: Throwable) {
-                System.err.println("[DesktopSeriesDetailScreen] Failed to initialize player: ${t.message}")
-            }
-        }
-    }
-
-    val hasAppliedResume = remember(activeEpisode?.id) { AtomicBoolean(false) }
-
-    LaunchedEffect(activeEpisode?.id, player?.isFirstFrameRendered) {
-        val p = player ?: return@LaunchedEffect
-        val currentEp = activeEpisode ?: return@LaunchedEffect
-        if (p.boundMediaId.isNotEmpty() && p.boundMediaId != currentEp.id) return@LaunchedEffect
-
-        // MID-STREAM GUARD: If the player is ALREADY playing (e.g. during fullscreen toggle), NEVER restart or seek!
-        if (p.currentTimeMs >= 1500L) {
-            hasAppliedResume.set(true)
+    LaunchedEffect(activeEpisode?.id, userEmail) {
+        val ep = activeEpisode ?: return@LaunchedEffect
+        isDriveTimestampLoaded = false
+        val resumeEnabled = DesktopAppSettings.state.resumePlayback
+        if (!resumeEnabled || userEmail.isBlank()) {
+            resolvedInitialSeekMs = 0L
+            isDriveTimestampLoaded = true
             return@LaunchedEffect
         }
 
-        val shouldResume = DesktopAppSettings.state.resumePlayback
-        if (shouldResume && savedPos > 1500L && hasAppliedResume.compareAndSet(false, true)) {
-            var attempts = 0
-            while (attempts < 30 && (!p.isFirstFrameRendered || p.totalDurationMs <= 0L)) {
-                delay(100L)
-                attempts++
+        val targetSeek = withContext(Dispatchers.IO) {
+            if (accessToken.isNotBlank() && DesktopWatchHistorySync.isInternetAvailable()) {
+                withTimeoutOrNull(4000L) {
+                    DesktopWatchHistorySync.pullAndMerge(userEmail, accessToken)
+                }
             }
-            if (p.currentTimeMs < 1500L) {
-                p.seekToTime(savedPos)
-                println("[SeriesPlayer] Applied initial resume at ${savedPos}ms")
-            }
+            DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
+        }
+
+        if (activeEpisode?.id == ep.id) {
+            resolvedInitialSeekMs = targetSeek
+            isDriveTimestampLoaded = true
         }
     }
 
-    val progressSaveScope = remember { kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()) }
+    var player by remember(activeEpisode?.id, activeStreamUrl, cinemaColor) {
+        mutableStateOf<DirectMemoryVideoPlayer?>(null)
+    }
+
+    var subtitleScalePercent by remember {
+        mutableIntStateOf(DesktopAppSettings.state.subtitleScalePercent)
+    }
+    var showSubtitleScaleOsd by remember { mutableStateOf(false) }
+    var subtitleScaleTrigger by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(DesktopAppSettings.state.subtitleScalePercent) {
+        val newScale = DesktopAppSettings.state.subtitleScalePercent
+        subtitleScalePercent = newScale
+        player?.applySubtitleScale(newScale)
+    }
+
+    LaunchedEffect(subtitleScaleTrigger) {
+        if (subtitleScaleTrigger > 0) {
+            showSubtitleScaleOsd = true
+            delay(1000L)
+            showSubtitleScaleOsd = false
+        }
+    }
+
+    LaunchedEffect(activeEpisode?.id, activeStreamUrl, isDriveTimestampLoaded, cinemaColor) {
+        val targetEp = activeEpisode ?: return@LaunchedEffect
+        if (!isDriveTimestampLoaded || activeStreamUrl.isBlank()) return@LaunchedEffect
+        if (player != null) return@LaunchedEffect
+        delay(60L)
+        if (!isActive || activeEpisode?.id != targetEp.id) return@LaunchedEffect
+        try {
+            player = DirectMemoryVideoPlayer(
+                mediaUrl = activeStreamUrl,
+                initialSeekMs = resolvedInitialSeekMs,
+                boundMediaId = targetEp.id
+            )
+        } catch (t: Throwable) {
+            System.err.println("[DesktopSeriesDetailScreen] Failed to initialize player: ${t.message}")
+        }
+    }
+
+    val progressSaveScope = remember { kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob()) }
 
     // 2. Periodic Progress Recording
-    fun saveActiveEpisodeProgress() {
+    fun saveActiveEpisodeProgress(allowZeroOverwrite: Boolean = false) {
         val ep = activeEpisode ?: return
         val activePlayer = player ?: return
 
-        // CRITICAL GUARD: Never write timestamps if the player belongs to a previous episode
+        // CRITICAL GUARD: Only save when timestamp is loaded and frame is ready for this episode
+        if (!isDriveTimestampLoaded) return
+        if (!activePlayer.isTargetFrameReady) return
         if (activePlayer.boundMediaId.isNotEmpty() && activePlayer.boundMediaId != ep.id) return
-        if (!activePlayer.isFirstFrameRendered && activePlayer.currentTimeMs <= 0L) return
 
         val pos = activePlayer.currentTimeMs
         val dur = activePlayer.totalDurationMs
-        if (pos < 1500L) return
+        if (pos < 1500L && !allowZeroOverwrite) return
 
         DesktopWatchHistoryManager.recordPlaybackProgress(
             email = userEmail,
@@ -387,7 +403,8 @@ fun DesktopSeriesDetailScreen(
             isSeries = true,
             seriesId = seriesItem.id,
             seasonNumber = ep.seasonNumber,
-            episodeNumber = ep.episodeNumber
+            episodeNumber = ep.episodeNumber,
+            allowZeroOverwrite = allowZeroOverwrite
         )
 
         if (accessToken.isNotBlank()) {
@@ -396,13 +413,13 @@ fun DesktopSeriesDetailScreen(
             }
         }
     }
-    val saveSeriesProgress = ::saveActiveEpisodeProgress
+    val saveSeriesProgress = { saveActiveEpisodeProgress(false) }
 
     fun switchToEpisode(targetEpisode: DesktopSeriesEpisode) {
         if (targetEpisode.id == activeEpisode?.id) return
 
         // Flush outgoing episode progress while activeEpisode & player still match
-        saveActiveEpisodeProgress()
+        saveActiveEpisodeProgress(false)
 
         if (targetEpisode.seasonNumber != selectedSeasonNumber) {
             selectedSeasonNumber = targetEpisode.seasonNumber
@@ -410,24 +427,24 @@ fun DesktopSeriesDetailScreen(
         activeEpisode = targetEpisode
     }
 
-    LaunchedEffect(player?.isPlaying, player?.boundMediaId, activeEpisode?.id, userEmail) {
+    LaunchedEffect(player?.isPlaying, player?.isTargetFrameReady, player?.boundMediaId, activeEpisode?.id, isDriveTimestampLoaded, userEmail) {
         val p = player
         val ep = activeEpisode
-        if (p != null && ep != null && (p.boundMediaId.isEmpty() || p.boundMediaId == ep.id) && userEmail.isNotBlank()) {
+        if (p != null && ep != null && isDriveTimestampLoaded && p.isTargetFrameReady && (p.boundMediaId.isEmpty() || p.boundMediaId == ep.id) && userEmail.isNotBlank()) {
             if (p.isPlaying) {
                 while (isActive) {
                     delay(5000L)
-                    saveActiveEpisodeProgress()
+                    saveActiveEpisodeProgress(false)
                 }
             } else {
-                saveActiveEpisodeProgress()
+                saveActiveEpisodeProgress(false)
             }
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            saveActiveEpisodeProgress()
+            saveActiveEpisodeProgress(false)
         }
     }
 
@@ -452,12 +469,15 @@ fun DesktopSeriesDetailScreen(
                 nextEpisodeTitle = nextEpisode?.title ?: "",
                 nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
                 nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
-                initialSeekMs = 0L,
+                initialSeekMs = resolvedInitialSeekMs,
+                isDriveTimestampLoaded = isDriveTimestampLoaded,
                 onInitialSeekApplied = null,
                 onProgressUpdate = { currentPos ->
                     activeEpisode?.let { ep ->
                         val p = player
-                        if (p != null && p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
+                        if (!isDriveTimestampLoaded) return@let
+                        if (p == null || !p.isTargetFrameReady) return@let
+                        if (p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
                         DesktopWatchHistoryManager.recordPlaybackProgress(
                             email = userEmail,
                             fileId = ep.id,
@@ -471,7 +491,7 @@ fun DesktopSeriesDetailScreen(
                         )
                         // Quiet background sync to Drive
                         if (accessToken.isNotBlank()) {
-                            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            progressSaveScope.launch {
                                 DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
                             }
                         }
@@ -532,11 +552,44 @@ fun DesktopSeriesDetailScreen(
                     .background(Color(0xFF06080C)),
                 contentAlignment = Alignment.Center
             ) {
-                PacedLoadingSpinner(
-                    color = Color(0xFF38BDF8),
-                    modifier = Modifier.size(46.dp),
-                    strokeWidth = 3.5.dp
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    PacedLoadingSpinner(
+                        color = Color(0xFF38BDF8),
+                        modifier = Modifier.size(46.dp),
+                        strokeWidth = 3.5.dp
+                    )
+                    Text(
+                        text = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video...",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.TopStart
+                ) {
+                    IconButton(
+                        onClick = onToggleFullscreen,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x660F172A))
+                            .pointerHoverIcon(PointerIcon.Hand)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Exit Fullscreen",
+                            tint = Color.White
+                        )
+                    }
+                }
             }
         }
         return
@@ -879,6 +932,15 @@ fun DesktopSeriesDetailScreen(
                             .clip(RoundedCornerShape(14.dp))
                             .background(Color.Black)
                             .border(1.dp, topLitPanelBorder, RoundedCornerShape(14.dp))
+                            .onCtrlScrollSubtitleScale(
+                                currentPercent = subtitleScalePercent,
+                                onScaleStep = { nextPercent ->
+                                    subtitleScalePercent = nextPercent
+                                    subtitleScaleTrigger++
+                                    player?.applySubtitleScale(nextPercent)
+                                    DesktopAppSettings.update { copy(subtitleScalePercent = nextPercent) }
+                                }
+                            )
                     ) {
                         val activeP = player
                         if (activeP != null) {
@@ -892,12 +954,15 @@ fun DesktopSeriesDetailScreen(
                                 nextEpisodeTitle = nextEpisode?.title ?: "",
                                 nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
                                 nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
-                                initialSeekMs = 0L,
+                                initialSeekMs = resolvedInitialSeekMs,
+                                isDriveTimestampLoaded = isDriveTimestampLoaded,
                                 onInitialSeekApplied = null,
                                 onProgressUpdate = { currentPos ->
                                     activeEpisode?.let { ep ->
                                         val p = player
-                                        if (p != null && p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
+                                        if (!isDriveTimestampLoaded) return@let
+                                        if (p == null || !p.isTargetFrameReady) return@let
+                                        if (p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
                                         DesktopWatchHistoryManager.recordPlaybackProgress(
                                             email = userEmail,
                                             fileId = ep.id,
@@ -911,7 +976,7 @@ fun DesktopSeriesDetailScreen(
                                         )
                                         // Quiet background sync to Drive
                                         if (accessToken.isNotBlank()) {
-                                            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                            progressSaveScope.launch {
                                                 DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
                                             }
                                         }
@@ -967,13 +1032,32 @@ fun DesktopSeriesDetailScreen(
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                PacedLoadingSpinner(
-                                    color = Color(0xFF38BDF8),
-                                    modifier = Modifier.size(46.dp),
-                                    strokeWidth = 3.5.dp
-                                )
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                                ) {
+                                    PacedLoadingSpinner(
+                                        color = Color(0xFF38BDF8),
+                                        modifier = Modifier.size(46.dp),
+                                        strokeWidth = 3.5.dp
+                                    )
+                                    Text(
+                                        text = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video...",
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
                             }
                         }
+
+                        SubtitleScaleOsdBadge(
+                            scalePercent = subtitleScalePercent,
+                            visible = showSubtitleScaleOsd,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 28.dp, end = 32.dp)
+                        )
                     }
 
                     activeEpisode?.let { ep ->

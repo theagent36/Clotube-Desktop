@@ -4,10 +4,10 @@ import com.google.gson.GsonBuilder
 import java.io.File
 
 data class CachedReleaseNoteEntry(
-    val version: String,
-    val tagName: String,
-    val title: String,
-    val body: String,
+    val version: String = "",
+    val tagName: String = "",
+    val title: String = "",
+    val body: String = "",
     val publishedAt: String = ""
 )
 
@@ -18,8 +18,9 @@ data class PersistedUpdateState(
     val pendingInstallerPath: String? = null,
     val pendingVersion: String? = null,
     val pendingReleaseNotes: String? = null,
+    val installOnNextAppBoot: Boolean = false,
     val lastSeenReleaseNotesVersion: String? = null,
-    val cachedReleases: List<CachedReleaseNoteEntry> = emptyList()
+    val cachedLatestRelease: CachedReleaseNoteEntry? = null
 )
 
 data class GithubReleaseInfo(
@@ -45,7 +46,8 @@ sealed class UpdateUiState {
         val installImmediatelyAfter: Boolean,
         val bytesDownloaded: Long,
         val totalBytes: Long,
-        val progressFraction: Float
+        val progressFraction: Float,
+        val statusDetail: String? = null
     ) : UpdateUiState()
     data class ReadyToInstall(
         val currentVersion: String,

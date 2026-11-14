@@ -9,10 +9,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asComposeImageBitmap
 import com.clotube.desktop.data.DesktopAppSettings
+import com.sun.jna.NativeLibrary
+import com.sun.jna.Pointer
+import com.sun.jna.PointerType
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.ImageInfo
+import uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
@@ -42,20 +46,17 @@ class DirectMemoryVideoPlayer(
         private set
     var externalSubtitlePath: String? = null
         private set
+    var externalSubtitleCues by mutableStateOf<List<com.clotube.desktop.ui.components.SubtitleCue>>(emptyList())
+        private set
 
-    // Divisor of video height: 25 -> Small, 18 -> Normal, 12 -> Large
-    private val relFontSize: Int = when (settings.subtitleFontSizeSp) {
-        14 -> 25
-        18 -> 18
-        24 -> 12
-        else -> 18
-    }
+    var currentSubtitleScalePercent by mutableIntStateOf(settings.subtitleScalePercent.coerceIn(25, 300))
+        private set
 
     private val factory: MediaPlayerFactory by lazy {
         val isHwEnabled = settings.hardwareAcceleration
         val hwFlag = if (isHwEnabled) "--avcodec-hw=any" else "--avcodec-hw=none"
 
-        println("[DirectMemoryVideoPlayer] Initializing LibVLC Engine: HW = $isHwEnabled ($hwFlag), Subtitle Rel-Divisor = $relFontSize (${settings.subtitleFontSizeSp}sp)")
+        println("[DirectMemoryVideoPlayer] Initializing LibVLC Engine: HW = $isHwEnabled ($hwFlag), Subtitle Scale = ${currentSubtitleScalePercent}%")
 
         MediaPlayerFactory(
             "--no-video-title-show",
@@ -65,7 +66,7 @@ class DirectMemoryVideoPlayer(
             "--clock-jitter=0",
             "--clock-synchro=0",
             "--quiet",
-            "--freetype-rel-fontsize=$relFontSize",
+            "--sub-text-scale=$currentSubtitleScalePercent",
             hwFlag
         )
     }
@@ -80,6 +81,39 @@ class DirectMemoryVideoPlayer(
     var currentTimeMs by mutableLongStateOf(initialSeekMs.coerceAtLeast(0L))
     var totalDurationMs by mutableLongStateOf(0L)
     var positionFraction by mutableFloatStateOf(0f)
+
+    private val targetResumeMs: Long = initialSeekMs.coerceAtLeast(0L)
+    var isResumeSeekSettled by mutableStateOf(targetResumeMs <= 1500L)
+        private set
+    private var postSeekFramePainted by mutableStateOf(false)
+
+    /**
+     * Strictly false while connecting, seeking to initialSeekMs, or buffering the initial frame.
+     * Becomes true ONLY after:
+     * 1. Native player is active (!isDisposed)
+     * 2. Any initial resume seek (targetResumeMs > 1500ms) has settled at the target timestamp
+     * 3. At least one decoded video frame (currentFrame != null) has painted at/after that timestamp
+     * 4. LibVLC is not actively buffering the initial stream (!isBuffering || hasEverReachedReady)
+     */
+    private var hasEverReachedReady by mutableStateOf(false)
+
+    val isTargetFrameReady: Boolean
+        get() {
+            if (isDisposed) return false
+            if (hasEverReachedReady) return true
+            val readyNow = isFirstFrameRendered &&
+                isResumeSeekSettled &&
+                postSeekFramePainted &&
+                currentFrame != null &&
+                !isBuffering
+            if (readyNow) {
+                hasEverReachedReady = true
+            }
+            return readyNow
+        }
+
+    val isPlaybackFrameReady: Boolean
+        get() = isTargetFrameReady
 
     var volume by mutableIntStateOf(
         if (settings.rememberVolume) DesktopTrackPreferences.stickyVolume else 100
@@ -130,12 +164,54 @@ class DirectMemoryVideoPlayer(
                 if (isDisposed) return@schedule
 
                 mp.controls().setTime(initialSeekMs)
-                currentTimeMs = initialSeekMs
                 println("[DirectMemoryVideoPlayer] Engine-level resume applied successfully at ${initialSeekMs}ms")
             } catch (t: Throwable) {
                 System.err.println("[DirectMemoryVideoPlayer] Resume seek error: ${t.message}")
             }
         }, 150, TimeUnit.MILLISECONDS)
+    }
+
+    private val watchdogStarted = AtomicBoolean(false)
+    private fun ensureWatchdogStarted() {
+        if (targetResumeMs <= 1500L || isResumeSeekSettled) return
+        if (!watchdogStarted.compareAndSet(false, true)) return
+
+        asyncExecutor.schedule({
+            try {
+                var attempts = 0
+                val startTime = System.currentTimeMillis()
+                while (!isDisposed && !isResumeSeekSettled) {
+                    val elapsed = System.currentTimeMillis() - startTime
+                    val currentNativeTime = try { mediaPlayer.status().time() } catch (_: Throwable) { -1L }
+                    val minAcceptable = (targetResumeMs - 3000L).coerceAtLeast(1500L)
+
+                    if (currentNativeTime >= minAcceptable) {
+                        isResumeSeekSettled = true
+                        postSeekFramePainted = true
+                        currentTimeMs = currentNativeTime
+                        break
+                    }
+
+                    if (attempts < 3 && mediaPlayer.status().isPlayable) {
+                        try {
+                            mediaPlayer.controls().setTime(targetResumeMs)
+                            attempts++
+                        } catch (_: Throwable) {}
+                    }
+
+                    if (elapsed >= 3500L) {
+                        println("[DirectMemoryVideoPlayer] Watchdog latch released after 3.5s timeout (target: ${targetResumeMs}ms, actual: ${currentNativeTime}ms)")
+                        isResumeSeekSettled = true
+                        postSeekFramePainted = true
+                        break
+                    }
+                    Thread.sleep(250)
+                }
+            } catch (t: Throwable) {
+                isResumeSeekSettled = true
+                postSeekFramePainted = true
+            }
+        }, 200, TimeUnit.MILLISECONDS)
     }
 
     init {
@@ -159,9 +235,6 @@ class DirectMemoryVideoPlayer(
 
                         pixelBufferA = ByteArray(byteCount)
                         pixelBufferB = ByteArray(byteCount)
-
-                        skiaBitmapA?.close()
-                        skiaBitmapB?.close()
 
                         val bmpA = Bitmap().apply { allocPixels(info) }
                         val bmpB = Bitmap().apply { allocPixels(info) }
@@ -214,6 +287,15 @@ class DirectMemoryVideoPlayer(
                         onFirstFrame()
                     }
 
+                    if (isResumeSeekSettled && currentFrame != null) {
+                        postSeekFramePainted = true
+                        if (!isBuffering) {
+                            hasEverReachedReady = true
+                        }
+                    } else {
+                        ensureWatchdogStarted()
+                    }
+
                     frameTick++
                 }
             },
@@ -246,7 +328,15 @@ class DirectMemoryVideoPlayer(
                     }, 400, TimeUnit.MILLISECONDS)
                 }
 
+                LibVlcLiveSubScale.applyLiveScale(factory, mp, currentSubtitleScalePercent)
+
                 checkAndApplyInitialSeek(mp)
+            }
+
+            override fun videoOutput(mp: MediaPlayer, newCount: Int) {
+                if (newCount > 0) {
+                    LibVlcLiveSubScale.applyLiveScale(factory, mp, currentSubtitleScalePercent)
+                }
             }
 
             override fun buffering(mp: MediaPlayer, newCache: Float) {
@@ -270,10 +360,19 @@ class DirectMemoryVideoPlayer(
             }
 
             override fun timeChanged(mp: MediaPlayer, newTime: Long) {
-                if (kotlin.math.abs(newTime - currentTimeMs) >= 250L || newTime == 0L) {
+                if (!isResumeSeekSettled && targetResumeMs > 1500L) {
+                    val minAcceptableMs = (targetResumeMs - 3000L).coerceAtLeast(1500L)
+                    if (newTime >= minAcceptableMs) {
+                        isResumeSeekSettled = true
+                        currentTimeMs = newTime
+                    } else {
+                        // Keep currentTimeMs pinned to targetResumeMs until seek completes; never flash 00:00
+                        currentTimeMs = targetResumeMs
+                    }
+                } else {
                     currentTimeMs = newTime
                 }
-                if (newTime in 0L..1500L && initialSeekMs > 2000L) {
+                if (newTime in 0L..1500L && targetResumeMs > 2000L && !isResumeSeekSettled) {
                     checkAndApplyInitialSeek(mp)
                 }
             }
@@ -281,13 +380,22 @@ class DirectMemoryVideoPlayer(
             override fun lengthChanged(mp: MediaPlayer, newLength: Long) {
                 if (newLength > 0L) {
                     totalDurationMs = newLength
+                    if (!isResumeSeekSettled && targetResumeMs > 1500L) {
+                        positionFraction = (targetResumeMs.toFloat() / newLength.toFloat()).coerceIn(0f, 1f)
+                    }
                     checkAndApplyInitialSeek(mp)
                 }
             }
 
             override fun positionChanged(mp: MediaPlayer, newPosition: Float) {
-                if (kotlin.math.abs(newPosition - positionFraction) >= 0.001f) {
-                    positionFraction = newPosition
+                if (!isResumeSeekSettled && targetResumeMs > 1500L) {
+                    if (totalDurationMs > 0L) {
+                        positionFraction = (targetResumeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
+                    }
+                } else {
+                    if (kotlin.math.abs(newPosition - positionFraction) >= 0.001f) {
+                        positionFraction = newPosition
+                    }
                 }
             }
         })
@@ -297,7 +405,7 @@ class DirectMemoryVideoPlayer(
         val mediaArgs = mutableListOf(
             ":network-caching=$bufferMs",
             ":file-caching=$fileCacheMs",
-            ":freetype-rel-fontsize=$relFontSize"
+            ":sub-text-scale=$currentSubtitleScalePercent"
         )
         if (initialSeekMs > 1500L) {
             mediaArgs.add(":start-time=${initialSeekMs / 1000L}")
@@ -314,8 +422,13 @@ class DirectMemoryVideoPlayer(
         } catch (_: Throwable) {}
     }
 
-    fun seekToFraction(fraction: Float) {
+    fun seekToFraction(fraction: Float, isUserScrub: Boolean = true) {
         if (isDisposed || !isFirstFrameRendered) return
+        if (isUserScrub) {
+            isResumeSeekSettled = true
+            postSeekFramePainted = true
+            hasEverReachedReady = true
+        }
         try {
             if (!mediaPlayer.status().isPlayable) return
             val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
@@ -327,8 +440,13 @@ class DirectMemoryVideoPlayer(
         } catch (_: Throwable) {}
     }
 
-    fun seekToTime(timeMs: Long) {
+    fun seekToTime(timeMs: Long, isUserScrub: Boolean = true) {
         if (isDisposed || !isFirstFrameRendered) return
+        if (isUserScrub) {
+            isResumeSeekSettled = true
+            postSeekFramePainted = true
+            hasEverReachedReady = true
+        }
         try {
             if (!mediaPlayer.status().isPlayable) return
             val totalMs = if (totalDurationMs > 0L) totalDurationMs else mediaPlayer.status().length()
@@ -423,6 +541,8 @@ class DirectMemoryVideoPlayer(
     fun setSubtitleTrack(trackId: Int, description: String = "", isOff: Boolean = (trackId == -1)) {
         if (isDisposed) return
         try {
+            externalSubtitleCues = emptyList()
+            externalSubtitleName = null
             mediaPlayer.subtitles().setTrack(trackId)
             DesktopTrackPreferences.saveSubtitleTrack(description, isOff)
         } catch (_: Throwable) {}
@@ -434,11 +554,24 @@ class DirectMemoryVideoPlayer(
             val file = java.io.File(filePath)
             if (!file.exists()) return false
 
-            val success = mediaPlayer.subpictures().setSubTitleFile(file.absolutePath)
-            externalSubtitlePath = file.absolutePath
-            externalSubtitleName = file.name
-            println("[DirectMemoryVideoPlayer] Loaded external subtitle: ${file.name} (success=$success)")
-            true
+            val parsedCues = com.clotube.desktop.ui.components.SubtitleParser.parseFile(file)
+            if (parsedCues.isNotEmpty()) {
+                externalSubtitleCues = parsedCues
+                externalSubtitlePath = file.absolutePath
+                externalSubtitleName = file.name
+                try {
+                    mediaPlayer.subpictures().setTrack(-1)
+                } catch (_: Throwable) {}
+                println("[DirectMemoryVideoPlayer] Loaded external subtitle (Compose canvas overlay): ${file.name} (${parsedCues.size} cues)")
+                true
+            } else {
+                val success = mediaPlayer.subpictures().setSubTitleFile(file.absolutePath)
+                externalSubtitlePath = file.absolutePath
+                externalSubtitleName = file.name
+                externalSubtitleCues = emptyList()
+                println("[DirectMemoryVideoPlayer] Loaded external subtitle (LibVLC fallback): ${file.name} (success=$success)")
+                success
+            }
         } catch (_: Throwable) {
             System.err.println("[DirectMemoryVideoPlayer] Failed to load subtitle file: $filePath")
             false
@@ -451,14 +584,24 @@ class DirectMemoryVideoPlayer(
         return loadExternalSubtitle(path)
     }
 
-    fun getActiveAudioTrackId(): Int {
-        if (isDisposed) return -1
-        return try { mediaPlayer.audio().track() } catch (_: Throwable) { -1 }
+    fun getActiveAudioTrackId(): Int = try {
+        mediaPlayer?.audio()?.track() ?: -1
+    } catch (_: Throwable) {
+        -1
     }
 
-    fun getActiveSubtitleTrackId(): Int {
-        if (isDisposed) return -1
-        return try { mediaPlayer.subtitles().track() } catch (_: Throwable) { -1 }
+    fun getActiveSubtitleTrackId(): Int = try {
+        mediaPlayer?.subtitles()?.track() ?: -1
+    } catch (_: Throwable) {
+        -1
+    }
+
+    fun applySubtitleScale(newScalePercent: Int) {
+        val clampedPercent = newScalePercent.coerceIn(25, 300)
+        currentSubtitleScalePercent = clampedPercent
+        if (!isDisposed) {
+            LibVlcLiveSubScale.applyLiveScale(factory, mediaPlayer, clampedPercent)
+        }
     }
 
     fun addSafeEventListener(listener: uk.co.caprica.vlcj.player.base.MediaPlayerEventListener): Boolean {
@@ -488,6 +631,7 @@ class DirectMemoryVideoPlayer(
         asyncExecutor.shutdownNow()
         externalSubtitleName = null
         externalSubtitlePath = null
+        externalSubtitleCues = emptyList()
 
         Thread({
             synchronized(nativeLifecycleLock) {
@@ -506,10 +650,6 @@ class DirectMemoryVideoPlayer(
                 currentFrame = null
                 composeBitmapA = null
                 composeBitmapB = null
-                try {
-                    skiaBitmapA?.close()
-                    skiaBitmapB?.close()
-                } catch (_: Throwable) {}
                 skiaBitmapA = null
                 skiaBitmapB = null
                 pixelBufferA = null
@@ -518,6 +658,112 @@ class DirectMemoryVideoPlayer(
         }, "Clotube-VLC-Release").apply {
             isDaemon = true
             start()
+        }
+    }
+
+    private object LibVlcLiveSubScale {
+        private const val VLC_VAR_INTEGER = 0x0010
+
+        private val vlcCore: NativeLibrary? by lazy {
+            try {
+                NativeLibrary.getInstance(RuntimeUtil.getLibVlcCoreLibraryName())
+            } catch (_: Throwable) {
+                try {
+                    NativeLibrary.getInstance("libvlccore")
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+        }
+
+        private val libvlcInstanceField: java.lang.reflect.Field? by lazy {
+            try {
+                MediaPlayerFactory::class.java.getDeclaredField("libvlcInstance").apply {
+                    isAccessible = true
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        fun applyLiveScale(factory: MediaPlayerFactory, mediaPlayer: MediaPlayer, scalePercent: Int) {
+            val core = vlcCore ?: return
+            val clamped = scalePercent.coerceIn(25, 300)
+
+            // Update global config variable for any newly spawned decoders/vouts
+            try {
+                val configPutInt = core.getFunction("config_PutInt")
+                configPutInt.invokeVoid(arrayOf(Pointer.NULL, "sub-text-scale", clamped.toLong()))
+            } catch (_: Throwable) {}
+
+            val varSetChecked = try {
+                core.getFunction("var_SetChecked")
+            } catch (_: Throwable) {
+                return
+            }
+
+            fun setIntVar(objPtr: Pointer?) {
+                if (objPtr == null || objPtr == Pointer.NULL) return
+                try {
+                    varSetChecked.invokeVoid(arrayOf(objPtr, "sub-text-scale", VLC_VAR_INTEGER, clamped.toLong()))
+                } catch (_: Throwable) {}
+            }
+
+            // Set on root LibVLC instance object
+            try {
+                val inst = libvlcInstanceField?.get(factory) as? PointerType
+                val instPtr = inst?.pointer
+                if (instPtr != null && instPtr != Pointer.NULL) {
+                    val rootObj = instPtr.getPointer(0)
+                    if (rootObj != null && rootObj != Pointer.NULL) {
+                        setIntVar(rootObj)
+                        propagateToChildren(core, rootObj, ::setIntVar, depth = 0)
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            // Set on libvlc_media_player_t instance and all child objects (input_thread_t, vout_thread_t, spu)
+            val mpPtr = try {
+                mediaPlayer.mediaPlayerInstance()?.pointer
+            } catch (_: Throwable) {
+                null
+            } ?: return
+
+            setIntVar(mpPtr)
+            propagateToChildren(core, mpPtr, ::setIntVar, depth = 0)
+        }
+
+        private fun propagateToChildren(
+            core: NativeLibrary,
+            parentPtr: Pointer,
+            setter: (Pointer?) -> Unit,
+            depth: Int
+        ) {
+            if (depth > 4) return
+            try {
+                val listChildren = core.getFunction("vlc_list_children")
+                val releaseList = core.getFunction("vlc_list_release")
+                val listPtr = listChildren.invokePointer(arrayOf(parentPtr)) ?: return
+                if (listPtr == Pointer.NULL) return
+
+                try {
+                    val count = listPtr.getInt(0)
+                    if (count in 1..64) {
+                        val valuesPtr = listPtr.getPointer(8)
+                        if (valuesPtr != null && valuesPtr != Pointer.NULL) {
+                            for (i in 0 until count) {
+                                val childPtr = valuesPtr.getPointer(i * 8L)
+                                if (childPtr != null && childPtr != Pointer.NULL) {
+                                    setter(childPtr)
+                                    propagateToChildren(core, childPtr, setter, depth + 1)
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    releaseList.invokeVoid(arrayOf(listPtr))
+                }
+            } catch (_: Throwable) {}
         }
     }
 }

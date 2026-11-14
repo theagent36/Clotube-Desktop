@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,7 +28,7 @@ data class ClotubeSettings(
 
     // 3. Display & Performance
     val hardwareAcceleration: Boolean = true,
-    val cinemaColorEnhancement: Boolean = true, // Expands limited range to full 0-255 & enriches saturation
+    val cinemaColorEnhancement: Boolean = true,
     val batterySaver60Fps: Boolean = false,
     val backgroundEcoMode: Boolean = true,
     val launchMaximized: Boolean = true,
@@ -35,7 +36,7 @@ data class ClotubeSettings(
     // 4. Audio & Subtitles
     val rememberVolume: Boolean = true,
     val defaultSubtitleState: String = "Off",
-    val subtitleFontSizeSp: Int = 18,
+    val subtitleScalePercent: Int = 100, // 50 = Small, 100 = Normal, 150 = Large
     val preferredAudioLanguage: String = "Original"
 )
 
@@ -55,7 +56,20 @@ object DesktopAppSettings {
         return try {
             if (settingsFile.exists() && settingsFile.length() > 0) {
                 val json = settingsFile.readText(Charsets.UTF_8)
-                gson.fromJson(json, ClotubeSettings::class.java) ?: ClotubeSettings()
+                val parsed = gson.fromJson(json, ClotubeSettings::class.java) ?: ClotubeSettings()
+                val jsonObj = JsonParser.parseString(json).asJsonObject
+
+                val migratedScale = if (!jsonObj.has("subtitleScalePercent") && jsonObj.has("subtitleFontSizeSp")) {
+                    when (jsonObj.get("subtitleFontSizeSp").asInt) {
+                        14 -> 50
+                        24 -> 150
+                        else -> 100
+                    }
+                } else {
+                    parsed.subtitleScalePercent.coerceIn(25, 300)
+                }
+
+                parsed.copy(subtitleScalePercent = migratedScale)
             } else {
                 ClotubeSettings()
             }
@@ -68,7 +82,7 @@ object DesktopAppSettings {
         state = state.transform()
         saveJob?.cancel()
         saveJob = scope.launch {
-            delay(400L) // Debounce writes
+            delay(400L)
             try {
                 settingsFile.writeText(gson.toJson(state), Charsets.UTF_8)
             } catch (e: Exception) {
@@ -102,4 +116,3 @@ object DesktopAppSettings {
         } catch (_: Exception) {}
     }
 }
-

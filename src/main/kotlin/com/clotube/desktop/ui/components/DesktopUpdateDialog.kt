@@ -421,10 +421,19 @@ private fun UpdateDownloadingContent(state: UpdateUiState.Downloading) {
                 text = if (state.installImmediatelyAfter) {
                     "Clotube will install the update and relaunch automatically once finished."
                 } else {
-                    "You will be prompted to install now or on your next Windows boot once downloaded."
+                    "You will be prompted to install now or on the next app boot once downloaded."
                 },
                 color = Color(0xFF94A3B8),
                 fontSize = 12.sp
+            )
+        }
+
+        if (!state.statusDetail.isNullOrBlank()) {
+            Text(
+                text = state.statusDetail,
+                color = Color(0xFF93C5FD),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium
             )
         }
 
@@ -517,18 +526,14 @@ private fun UpdateReadyToInstallContent(state: UpdateUiState.ReadyToInstall) {
 
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(
-                    text = if (state.scheduledForNextBoot) "SCHEDULED FOR NEXT BOOT" else "DOWNLOAD COMPLETE",
+                    text = if (state.scheduledForNextBoot) "SCHEDULED FOR NEXT APP BOOT" else "DOWNLOAD COMPLETE",
                     color = Color(0xFF6EE7B7),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.6.sp
                 )
                 Text(
-                    text = if (state.scheduledForNextBoot) {
-                        "Update Scheduled for Next Boot"
-                    } else {
-                        "Clotube v${state.version} Ready to Install"
-                    },
+                    text = if (state.scheduledForNextBoot) "Update Scheduled for Next App Boot" else "Clotube v${state.version} Ready to Install",
                     color = Color.White,
                     fontSize = 19.sp,
                     fontWeight = FontWeight.ExtraBold
@@ -538,9 +543,9 @@ private fun UpdateReadyToInstallContent(state: UpdateUiState.ReadyToInstall) {
 
         Text(
             text = if (state.scheduledForNextBoot) {
-                "Clotube v${state.version} will automatically install the next time you boot and sign into Windows. Your profiles, Drive credentials, and watch history will remain intact."
+                "Clotube v${state.version} will automatically install the next time you open Clotube. Your profiles, Drive credentials, and watch history will remain intact."
             } else {
-                "The installer (${state.installerFile.name}) has been downloaded. Install now to update and relaunch immediately, or schedule installation for your next Windows boot."
+                "The installer (${state.installerFile.name}) has been downloaded. Install now to update and relaunch immediately, or schedule installation for the next app boot."
             },
             color = Color(0xFFCBD5E1),
             fontSize = 12.sp,

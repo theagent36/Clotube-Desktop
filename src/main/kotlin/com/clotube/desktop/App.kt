@@ -21,6 +21,7 @@ import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
 import com.clotube.desktop.ui.screens.DesktopLoginScreen
 import com.clotube.desktop.ui.screens.DesktopSetupWizardScreen
+import com.clotube.desktop.update.DesktopUpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
@@ -229,6 +230,15 @@ fun App(
                 )
             }
             "home" -> {
+                LaunchedEffect(activeEmail) {
+                    kotlinx.coroutines.delay(500L)
+                    DesktopUpdateManager.onHomeScreenEntered()
+                }
+                DisposableEffect(activeEmail) {
+                    onDispose {
+                        DesktopUpdateManager.onHomeScreenExited()
+                    }
+                }
                 // 3. Isolated Home Screen keyed strictly to the active email
                 key(activeEmail) {
                     DesktopHomeScreen(
@@ -264,6 +274,7 @@ fun App(
                         },
                         onSignOut = {
                             println("[App] Signing out active session: $activeEmail")
+                            DesktopUpdateManager.onHomeScreenExited()
                             DesktopWatchHistorySync.stopAutoRecoveryWorker()
                             if (activeEmail.isNotBlank() && authState.accessToken.isNotBlank()) {
                                 @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)

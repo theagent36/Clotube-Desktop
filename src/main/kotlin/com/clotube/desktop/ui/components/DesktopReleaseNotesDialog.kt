@@ -161,7 +161,11 @@ fun DesktopReleaseNotesOverlay(
     modifier: Modifier = Modifier
 ) {
     val state by DesktopUpdateManager.releaseNotesState.collectAsState()
-    if (!state.isVisible) return
+    val isHomeActive by DesktopUpdateManager.isHomeScreenActive.collectAsState()
+
+    // Post-update automatic popup only renders once Home Screen is active; also gated by visibility & non-null release
+    if (!state.isVisible || (!isHomeActive && state.isAutomaticPostUpdate)) return
+    val release = state.release ?: return
 
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) {
@@ -174,13 +178,8 @@ fun DesktopReleaseNotesOverlay(
         )
     }
 
-    val selectedRelease = remember(state.releases, state.selectedVersion) {
-        state.releases.firstOrNull { it.version == state.selectedVersion }
-            ?: state.releases.firstOrNull()
-    }
-
-    val sections = remember(selectedRelease?.body) {
-        parseReleaseSections(selectedRelease?.body.orEmpty())
+    val sections = remember(release.body) {
+        parseReleaseSections(release.body)
     }
 
     // Fullscreen scrim blocking background interactions and supporting click / Escape dismiss
@@ -299,71 +298,6 @@ fun DesktopReleaseNotesOverlay(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Version Selector Strip (if multiple versions are available)
-                if (state.releases.size > 1) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        for (release in state.releases) {
-                            val isSelected = release.version == (selectedRelease?.version ?: state.selectedVersion)
-                            val isInstalled = release.version == state.currentAppVersion
-
-                            Surface(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .clickable {
-                                        DesktopUpdateManager.selectReleaseNotesVersion(release.version)
-                                    }
-                                    .pointerHoverIcon(PointerIcon.Hand),
-                                shape = RoundedCornerShape(20.dp),
-                                color = if (isSelected) Color(0x2460A5FA) else Color(0xFF090C12),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isSelected) Color(0x6660A5FA) else Color(0xFF1A2230)
-                                )
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = "v${release.version}",
-                                        color = if (isSelected) Color(0xFF93C5FD) else Color(0xFF94A3B8),
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.5.sp
-                                    )
-                                    if (isInstalled) {
-                                        Surface(
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = if (isSelected) Color(0x3360A5FA) else Color(0xFF1E293B),
-                                            border = BorderStroke(
-                                                0.5.dp,
-                                                if (isSelected) Color(0x6660A5FA) else Color(0xFF334155)
-                                            )
-                                        ) {
-                                            Text(
-                                                text = "INSTALLED",
-                                                fontSize = 8.5.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = if (isSelected) Color(0xFF93C5FD) else Color(0xFF64748B),
-                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-                }
-
                 // Release Title & Tag Banner
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -371,8 +305,8 @@ fun DesktopReleaseNotesOverlay(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = selectedRelease?.title.orEmpty().ifBlank {
-                            "Release v${selectedRelease?.version ?: state.selectedVersion}"
+                        text = release.title.ifBlank {
+                            "Release v${release.version}"
                         },
                         color = Color.White,
                         fontSize = 15.sp,
@@ -388,7 +322,7 @@ fun DesktopReleaseNotesOverlay(
                         border = BorderStroke(1.dp, Color(0x4760A5FA))
                     ) {
                         Text(
-                            text = "v${selectedRelease?.version ?: state.selectedVersion}",
+                            text = "v${release.version}",
                             color = Color(0xFF93C5FD),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,

@@ -7,18 +7,27 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URL
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLSocketFactory
 import kotlin.system.exitProcess
 
 object DesktopUpdateManager {
     private const val GITHUB_LATEST_RELEASE_API =
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
-    private const val GITHUB_RELEASES_LIST_API =
-        "https://api.github.com/repos/theagent36/Clotube-Desktop/releases?per_page=10"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.0.4"
+    private const val DEV_FALLBACK_VERSION = "2.0.7"
+
+    private const val MAX_DOWNLOAD_ATTEMPTS = 5
+    private const val CONNECT_TIMEOUT_MS = 25_000
+    private const val READ_TIMEOUT_MS = 30_000
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var activeDownloadJob: Job? = null
@@ -36,138 +45,99 @@ object DesktopUpdateManager {
         val isVisible: Boolean = false,
         val isAutomaticPostUpdate: Boolean = false,
         val currentAppVersion: String = "",
-        val selectedVersion: String = "",
-        val releases: List<CachedReleaseNoteEntry> = emptyList(),
+        val release: CachedReleaseNoteEntry? = null,
         val isLoading: Boolean = false
     )
 
     private val _releaseNotesState = MutableStateFlow(ReleaseNotesDialogState())
     val releaseNotesState: StateFlow<ReleaseNotesDialogState> = _releaseNotesState.asStateFlow()
 
-    private val embeddedFallbackReleases = listOf(
-        CachedReleaseNoteEntry(
-            version = "2.0.4",
-            tagName = "v2.0.4",
-            title = "Playback Stability, Wake Lock & Off-Drive Watchlist Posters",
-            body = """
-                ### Watchlist & Off-Drive Artwork
-                - **Automatic Off-Drive Posters:** Movies and TV series added to your **Watchlist** that are not stored in Google Drive now automatically derive and cache official poster thumbnails from their title.
-                - **Global Search Artwork:** Off-Drive Watchlist matches in the top search bar now render derived poster thumbnails alongside status badges.
+    private val _isHomeScreenActive = MutableStateFlow(false)
+    val isHomeScreenActive: StateFlow<Boolean> = _isHomeScreenActive.asStateFlow()
 
-                ### Playback, Stability & System Integration
-                - **What's New Release Notes:** Added an in-app **What's New** changelog modal that opens automatically after updates and can be revisited anytime from **Settings → About & Engine**.
-                - **Display Sleep Prevention:** Keeps your Windows laptop screen awake automatically while video playback is active, and restores normal sleep behavior when paused or closed.
-                - **Next-Episode Scrubber & Watch Sync Fix:** Pressing `N` or clicking **Play Next** now resets the timeline scrubber immediately on Frame 1 and prevents incoming episodes from being falsely marked as watched.
-                - **Native LibVLC Lifecycle Hardening:** Added thread-safe listener synchronization to eliminate native memory access crashes during rapid episode transitions.
-            """.trimIndent()
-        ),
-        CachedReleaseNoteEntry(
-            version = "2.0.3",
-            tagName = "v2.0.3",
-            title = "Persistent Watchlist & In-App Auto-Updater",
-            body = """
-                ### Dedicated Watchlist Tab & Persistent Watch Status
-                - **New Watchlist Sidebar Tab:** Added a dedicated **Watchlist** tab directly above **Recents** featuring Studio Obsidian capsule filter chips (**All**, **Watched**, **Watch Later**, **Rewatch**, **Not in Drive**) and instant filtering.
-                - **Add & Edit Off-Drive Titles:** Add, rename, categorize, or delete any movie or TV series—even custom titles that are not stored in your Google Drive.
-                - **Survives Drive File Deletions:** Entries are tracked independently of Google Drive file IDs, so deleting or moving a video file from Drive preserves its **Watched** status until you explicitly delete it from your list.
-                - **Automatic Completion Sync:** Movies reaching ≥ 90% playback and fully completed TV series automatically sync to your Watchlist as **Watched** across devices.
+    private var pendingAutomaticReleaseNotes = false
 
-                ### Global Search Badges, Right-Click Menu & Player Indicators
-                - **Search Status Badges & Off-Drive Matches:** Searching in the top bar displays **Watched**, **Watch Later**, and **Rewatch** badges on matching Drive media and surfaces matching custom titles from your Watchlist.
-                - **Right-Click Context Menu:** Right-click any movie or TV series card across **Home**, **Movies**, **TV Series**, or the movie player playlist to mark it as **Watched**, **Watch Later**, or **Rewatch**.
-                - **Clean Playlist Status Icons:** Added subtle icon-only indicators to the **Movies in the Drive** playlist rail.
-
-                ### In-App GitHub Auto-Updater
-                - **Automatic Release Detection:** Checks GitHub Releases on startup and via **Settings → About & Engine → Check for Updates**.
-                - **Flexible Update Controls:** Choose **Skip this version**, **Remind me Later** (24-hour snooze), **Download** (install now or on next Windows boot), or **Download & Install** (atomic in-place upgrade and auto-relaunch).
-                - **Zero UAC & Data Preservation:** Upgrades `%LOCALAPPDATA%\Clotube` in-place without Administrator prompts while preserving all profiles, Drive credentials, and watch history in `%APPDATA%\Clotube`.
-            """.trimIndent()
-        ),
-        CachedReleaseNoteEntry(
-            version = "2.0.2",
-            tagName = "v2.0.2",
-            title = "Production Performance & Bounded Memory",
-            body = """
-                ### Production Performance & Bounded Memory
-                - **Bounded G1GC Architecture:** Pinned JVM maximum heap ceiling with periodic memory uncommitting, permanently eliminating 2 GB RAM sawtooth spikes.
-                - **Zero-Allocation Video Frame Pipeline:** Reusable double-buffered off-heap Skia bitmap swap eliminating per-frame allocations during 1080p/4K video playback.
-                - **LRU In-Memory Thumbnail Bounds:** Capped in-memory decoded bitmap cache with decode-time downsampling, keeping memory flat across massive multi-season libraries.
-
-                ### True 0% Minimized & Background GPU Pacing
-                - **Unified Frame Pacing:** Wired all buffering and loading spinners to `DesktopFramePacer` and `AppLifecycleManager`—instantly freezing micro-animations and dropping GPU utilization to 0% when minimized or unfocused.
-                - **D3D11 V-Sync Presentation:** Direct3D 11 hardware presentation backend locking display refresh without tearing.
-            """.trimIndent()
-        )
-    )
-
-    fun mergedCachedAndFallbackReleases(cached: List<CachedReleaseNoteEntry> = DesktopUpdateStore.load().cachedReleases): List<CachedReleaseNoteEntry> {
-        val map = linkedMapOf<String, CachedReleaseNoteEntry>()
-        for (entry in cached) {
-            val norm = DesktopUpdateStore.normalizeVersion(entry.version)
-            if (norm.isNotBlank()) {
-                map[norm] = entry
-            }
-        }
-        for (entry in embeddedFallbackReleases) {
-            val norm = DesktopUpdateStore.normalizeVersion(entry.version)
-            if (norm.isNotBlank() && !map.containsKey(norm)) {
-                map[norm] = entry
-            }
-        }
-        return map.values.sortedWith { a, b ->
-            DesktopUpdateStore.compareVersions(b.version, a.version)
+    fun onHomeScreenEntered() {
+        _isHomeScreenActive.value = true
+        if (pendingAutomaticReleaseNotes) {
+            pendingAutomaticReleaseNotes = false
+            triggerAutomaticReleaseNotesPopup()
         }
     }
 
-    private fun cacheReleaseNotes(newEntries: List<CachedReleaseNoteEntry>) {
+    fun onHomeScreenExited() {
+        _isHomeScreenActive.value = false
+    }
+
+    private fun getEmbeddedLatestRelease(version: String): CachedReleaseNoteEntry {
+        val body = """
+            ### Resilient In-App Updater & Seamless Installation
+            - **IPv4 Connection Priority & Auto-Retry:** Resolves dual-stack connection stalls and connects reliably over IPv4 with up to 5 progressive retries.
+            - **HTTP Range Resumption:** Automatically resumes partial `.msi` downloads instead of restarting from zero.
+            - **Silent GUI Installation:** Background VBScript runner via `wscript.exe` eliminates command prompt window popups and batch file errors during updates.
+            - **Next App Boot Scheduling:** Schedules pending updates cleanly to install on the next Clotube launch.
+
+            ### First-Boot Optimization & Playback Readiness
+            - **First-Boot Setup Indicator:** Added a setup spinner below the boot logo on first launch after install, update, or Windows restart.
+            - **Full Parallel LibVLC Caching:** Pre-warms bundled LibVLC DLLs and initializes module bank before entering the Home screen.
+
+            ### Playback Stability & Watchlist Integration
+            - **Watchlist & Off-Drive Artwork:** Automatic poster thumbnail derivation and caching for custom movies and TV series not in Google Drive.
+            - **Display Sleep Prevention:** Keeps your Windows laptop screen awake automatically while video playback is active.
+            - **Instant Scrubber Sync:** Play Next (`N`) scrubber instant reset and robust watch history synchronization.
+        """.trimIndent()
+
+        return CachedReleaseNoteEntry(
+            version = version,
+            tagName = "v$version",
+            title = "What's New in Clotube v$version",
+            body = body
+        )
+    }
+
+    fun getLatestReleaseNotes(targetVersion: String = getCurrentAppVersion()): CachedReleaseNoteEntry {
         val current = DesktopUpdateStore.load()
-        val map = linkedMapOf<String, CachedReleaseNoteEntry>()
-        for (entry in newEntries) {
-            val norm = DesktopUpdateStore.normalizeVersion(entry.version)
-            if (norm.isNotBlank()) map[norm] = entry
+        val cached = current.cachedLatestRelease
+        if (cached != null && DesktopUpdateStore.normalizeVersion(cached.version) == DesktopUpdateStore.normalizeVersion(targetVersion)) {
+            return cached
         }
-        for (entry in current.cachedReleases) {
-            val norm = DesktopUpdateStore.normalizeVersion(entry.version)
-            if (norm.isNotBlank() && !map.containsKey(norm)) {
-                map[norm] = entry
-            }
+        if (cached != null && cached.version.isNotBlank()) {
+            return cached
         }
-        val sorted = map.values.sortedWith { a, b ->
-            DesktopUpdateStore.compareVersions(b.version, a.version)
-        }
-        DesktopUpdateStore.save(current.copy(cachedReleases = sorted))
+        return getEmbeddedLatestRelease(targetVersion)
+    }
+
+    private fun cacheLatestRelease(entry: CachedReleaseNoteEntry) {
+        val current = DesktopUpdateStore.load()
+        DesktopUpdateStore.save(current.copy(cachedLatestRelease = entry))
     }
 
     fun openReleaseNotes(targetVersion: String = getCurrentAppVersion()) {
         val currentVersion = getCurrentAppVersion()
-        val initialReleases = mergedCachedAndFallbackReleases()
-        val hasTarget = initialReleases.any {
-            DesktopUpdateStore.normalizeVersion(it.version) == DesktopUpdateStore.normalizeVersion(targetVersion)
-        }
-        val sel = if (hasTarget) targetVersion else initialReleases.firstOrNull()?.version ?: targetVersion
+        val initialRelease = getLatestReleaseNotes(targetVersion)
 
         _releaseNotesState.value = ReleaseNotesDialogState(
             isVisible = true,
             isAutomaticPostUpdate = false,
             currentAppVersion = currentVersion,
-            selectedVersion = sel,
-            releases = initialReleases,
+            release = initialRelease,
             isLoading = true
         )
 
         scope.launch {
-            val remote = fetchGithubReleases()
-            if (!remote.isNullOrEmpty()) {
-                cacheReleaseNotes(remote)
-                val merged = mergedCachedAndFallbackReleases()
+            val latestGithub = fetchLatestGithubRelease()
+            if (latestGithub != null) {
+                val entry = CachedReleaseNoteEntry(
+                    version = latestGithub.version,
+                    tagName = latestGithub.tagName,
+                    title = latestGithub.releaseName,
+                    body = latestGithub.releaseNotes,
+                    publishedAt = ""
+                )
+                cacheLatestRelease(entry)
                 if (_releaseNotesState.value.isVisible) {
-                    val stillSelected = _releaseNotesState.value.selectedVersion
-                    val finalSelected = if (merged.any { it.version == stillSelected }) stillSelected
-                        else if (merged.any { it.version == targetVersion }) targetVersion
-                        else merged.firstOrNull()?.version ?: targetVersion
                     _releaseNotesState.value = _releaseNotesState.value.copy(
-                        selectedVersion = finalSelected,
-                        releases = merged,
+                        release = entry,
                         isLoading = false
                     )
                 }
@@ -179,8 +149,41 @@ object DesktopUpdateManager {
         }
     }
 
-    fun selectReleaseNotesVersion(version: String) {
-        _releaseNotesState.value = _releaseNotesState.value.copy(selectedVersion = version)
+    fun triggerAutomaticReleaseNotesPopup() {
+        val currentVersion = getCurrentAppVersion()
+        val initialRelease = getLatestReleaseNotes(currentVersion)
+
+        _releaseNotesState.value = ReleaseNotesDialogState(
+            isVisible = true,
+            isAutomaticPostUpdate = true,
+            currentAppVersion = currentVersion,
+            release = initialRelease,
+            isLoading = true
+        )
+
+        scope.launch {
+            val latestGithub = fetchLatestGithubRelease()
+            if (latestGithub != null) {
+                val entry = CachedReleaseNoteEntry(
+                    version = latestGithub.version,
+                    tagName = latestGithub.tagName,
+                    title = latestGithub.releaseName,
+                    body = latestGithub.releaseNotes,
+                    publishedAt = ""
+                )
+                cacheLatestRelease(entry)
+                if (_releaseNotesState.value.isVisible) {
+                    _releaseNotesState.value = _releaseNotesState.value.copy(
+                        release = entry,
+                        isLoading = false
+                    )
+                }
+            } else {
+                if (_releaseNotesState.value.isVisible) {
+                    _releaseNotesState.value = _releaseNotesState.value.copy(isLoading = false)
+                }
+            }
+        }
     }
 
     fun dismissReleaseNotes() {
@@ -205,7 +208,7 @@ object DesktopUpdateManager {
 
     /**
      * Called automatically on app startup (after a brief delay).
-     * 1. Detects post-update state and displays Release Notes modal if newly upgraded.
+     * 1. Detects post-update state and displays Release Notes modal if newly upgraded (gated to Home screen).
      * 2. Cleans up obsolete `.msi` installers if the app is already running the upgraded version.
      * 3. Surfaces an already-downloaded pending `.msi` if one is waiting on disk.
      * 4. Queries GitHub Releases while honoring Skip Version and 24-hour Remind Me Later rules.
@@ -231,42 +234,10 @@ object DesktopUpdateManager {
             }
 
             if (isPostUpdate) {
-                val initialReleases = mergedCachedAndFallbackReleases(saved.cachedReleases)
-                val hasCurrentInReleases = initialReleases.any {
-                    DesktopUpdateStore.normalizeVersion(it.version) == DesktopUpdateStore.normalizeVersion(currentVersion)
-                }
-                val targetSelected = if (hasCurrentInReleases) currentVersion else initialReleases.firstOrNull()?.version ?: currentVersion
-
-                _releaseNotesState.value = ReleaseNotesDialogState(
-                    isVisible = true,
-                    isAutomaticPostUpdate = true,
-                    currentAppVersion = currentVersion,
-                    selectedVersion = targetSelected,
-                    releases = initialReleases,
-                    isLoading = true
-                )
-
-                scope.launch {
-                    val remote = fetchGithubReleases()
-                    if (!remote.isNullOrEmpty()) {
-                        cacheReleaseNotes(remote)
-                        val merged = mergedCachedAndFallbackReleases()
-                        if (_releaseNotesState.value.isVisible) {
-                            val curSelected = _releaseNotesState.value.selectedVersion
-                            val finalSelected = if (merged.any { it.version == curSelected }) curSelected
-                                else if (merged.any { it.version == currentVersion }) currentVersion
-                                else merged.firstOrNull()?.version ?: currentVersion
-                            _releaseNotesState.value = _releaseNotesState.value.copy(
-                                selectedVersion = finalSelected,
-                                releases = merged,
-                                isLoading = false
-                            )
-                        }
-                    } else {
-                        if (_releaseNotesState.value.isVisible) {
-                            _releaseNotesState.value = _releaseNotesState.value.copy(isLoading = false)
-                        }
-                    }
+                if (_isHomeScreenActive.value) {
+                    triggerAutomaticReleaseNotesPopup()
+                } else {
+                    pendingAutomaticReleaseNotes = true
                 }
             }
 
@@ -277,22 +248,31 @@ object DesktopUpdateManager {
                 val pendingFile = File(pendingPath)
                 if (DesktopUpdateStore.compareVersions(pendingVer, currentVersion) <= 0) {
                     cleanupOldInstallers(keepFileName = null)
-                    saved = saved.copy(
-                        pendingInstallerPath = null,
-                        pendingVersion = null,
-                        pendingReleaseNotes = null
+                    DesktopUpdateStore.save(
+                        saved.copy(
+                            pendingInstallerPath = null,
+                            pendingVersion = null,
+                            pendingReleaseNotes = null,
+                            installOnNextAppBoot = false
+                        )
                     )
-                    DesktopUpdateStore.save(saved)
                 } else if (pendingFile.exists() && pendingFile.length() > 0L) {
-                    // Valid downloaded MSI is already waiting locally
-                    _uiState.value = UpdateUiState.ReadyToInstall(
-                        currentVersion = currentVersion,
-                        version = pendingVer,
-                        releaseNotes = saved.pendingReleaseNotes.orEmpty(),
-                        installerFile = pendingFile,
-                        scheduledForNextBoot = false
-                    )
-                    return@launch
+                    if (saved.installOnNextAppBoot) {
+                        // User chose "Install on Next Boot" -> execute silently now on app boot
+                        DesktopUpdateStore.save(saved.copy(installOnNextAppBoot = false))
+                        installNowAndRelaunch(pendingFile, pendingVer)
+                        return@launch
+                    } else {
+                        // Downloaded earlier without scheduling auto-install -> prompt ready state
+                        _uiState.value = UpdateUiState.ReadyToInstall(
+                            currentVersion = currentVersion,
+                            version = pendingVer,
+                            releaseNotes = saved.pendingReleaseNotes.orEmpty(),
+                            installerFile = pendingFile,
+                            scheduledForNextBoot = false
+                        )
+                        return@launch
+                    }
                 }
             }
 
@@ -415,7 +395,6 @@ object DesktopUpdateManager {
             val targetFile = File(DesktopUpdateStore.updatesDir, release.msiFileName)
             val tempFile = File(DesktopUpdateStore.updatesDir, "${release.msiFileName}.tmp")
 
-            // If exact file already exists on disk with matching byte size, skip re-downloading
             if (targetFile.exists() && release.msiSizeBytes > 0L && targetFile.length() == release.msiSizeBytes) {
                 persistPendingInstaller(release, targetFile)
                 if (installImmediately) {
@@ -431,32 +410,53 @@ object DesktopUpdateManager {
                 return@launch
             }
 
+            val initialExistingBytes = if (tempFile.exists()) tempFile.length() else 0L
+            val initialFraction = if (release.msiSizeBytes > 0L && initialExistingBytes > 0L) {
+                (initialExistingBytes.toFloat() / release.msiSizeBytes.toFloat()).coerceIn(0f, 0.99f)
+            } else {
+                0f
+            }
+
             _uiState.value = UpdateUiState.Downloading(
                 currentVersion = currentVersion,
                 release = release,
                 installImmediatelyAfter = installImmediately,
-                bytesDownloaded = 0L,
+                bytesDownloaded = initialExistingBytes,
                 totalBytes = release.msiSizeBytes,
-                progressFraction = 0f
+                progressFraction = initialFraction,
+                statusDetail = "Connecting to GitHub release server…"
             )
 
             try {
-                if (tempFile.exists()) tempFile.delete()
-                downloadFileWithRedirects(
+                downloadWithAutoRetry(
                     initialUrl = release.msiDownloadUrl,
                     destination = tempFile,
-                    expectedTotalBytes = release.msiSizeBytes
-                ) { downloaded, total ->
-                    val fraction = if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
-                    _uiState.value = UpdateUiState.Downloading(
-                        currentVersion = currentVersion,
-                        release = release,
-                        installImmediatelyAfter = installImmediately,
-                        bytesDownloaded = downloaded,
-                        totalBytes = total,
-                        progressFraction = fraction
-                    )
-                }
+                    expectedTotalBytes = release.msiSizeBytes,
+                    onStatus = { statusText, downloaded, total ->
+                        val fraction = if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                        _uiState.value = UpdateUiState.Downloading(
+                            currentVersion = currentVersion,
+                            release = release,
+                            installImmediatelyAfter = installImmediately,
+                            bytesDownloaded = downloaded,
+                            totalBytes = total,
+                            progressFraction = fraction,
+                            statusDetail = statusText
+                        )
+                    },
+                    onProgress = { downloaded, total ->
+                        val fraction = if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                        _uiState.value = UpdateUiState.Downloading(
+                            currentVersion = currentVersion,
+                            release = release,
+                            installImmediatelyAfter = installImmediately,
+                            bytesDownloaded = downloaded,
+                            totalBytes = total,
+                            progressFraction = fraction,
+                            statusDetail = null
+                        )
+                    }
+                )
 
                 if (targetFile.exists()) targetFile.delete()
                 if (!tempFile.renameTo(targetFile)) {
@@ -478,17 +478,69 @@ object DesktopUpdateManager {
                     )
                 }
             } catch (e: CancellationException) {
-                if (tempFile.exists()) tempFile.delete()
+                // Keep partial .tmp file on cancel so future resume can reuse downloaded bytes
                 _uiState.value = UpdateUiState.Hidden
             } catch (e: Exception) {
-                if (tempFile.exists()) tempFile.delete()
-                System.err.println("[DesktopUpdateManager] Download failed: ${e.message}")
+                System.err.println("[DesktopUpdateManager] Download failed after $MAX_DOWNLOAD_ATTEMPTS attempts: ${e.message}")
                 _uiState.value = UpdateUiState.Error(
-                    message = "Download failed: ${e.message ?: "Network error"}",
+                    message = "Download failed after $MAX_DOWNLOAD_ATTEMPTS attempts: ${e.message ?: "Network timeout"}",
                     retryRelease = release
                 )
             }
         }
+    }
+
+    private suspend fun downloadWithAutoRetry(
+        initialUrl: String,
+        destination: File,
+        expectedTotalBytes: Long,
+        onStatus: (statusText: String, downloaded: Long, total: Long) -> Unit,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) {
+        val backoffDelaysMs = longArrayOf(1200L, 2500L, 4000L, 6000L)
+        var lastError: Exception? = null
+
+        for (attempt in 1..MAX_DOWNLOAD_ATTEMPTS) {
+            currentCoroutineContext().ensureActive()
+            val existingBytes = if (destination.exists()) destination.length() else 0L
+
+            if (attempt == 1) {
+                onStatus("Connecting to GitHub release server…", existingBytes, expectedTotalBytes)
+            } else {
+                onStatus(
+                    "Connection slow — retrying automatically (attempt $attempt of $MAX_DOWNLOAD_ATTEMPTS)…",
+                    existingBytes,
+                    expectedTotalBytes
+                )
+            }
+
+            try {
+                downloadFileWithRedirects(
+                    initialUrl = initialUrl,
+                    destination = destination,
+                    expectedTotalBytes = expectedTotalBytes,
+                    onProgress = onProgress
+                )
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                System.err.println("[DesktopUpdateManager] Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: ${e.message}")
+                if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
+                    val waitMs = backoffDelaysMs[(attempt - 1).coerceAtMost(backoffDelaysMs.lastIndex)]
+                    val currentBytes = if (destination.exists()) destination.length() else 0L
+                    onStatus(
+                        "Timed out — retrying in ${waitMs / 1000}s (attempt ${attempt + 1} of $MAX_DOWNLOAD_ATTEMPTS)…",
+                        currentBytes,
+                        expectedTotalBytes
+                    )
+                    delay(waitMs)
+                }
+            }
+        }
+
+        throw lastError ?: IOException("Connect timed out")
     }
 
     fun cancelDownload() {
@@ -502,60 +554,13 @@ object DesktopUpdateManager {
     }
 
     /**
-     * Schedules the downloaded `.msi` to install silently on the user's next Windows boot/login
-     * via HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce (requires zero UAC admin rights).
+     * Schedules the downloaded `.msi` to install automatically on the next app boot
+     * (the next time Clotube is launched), without touching Windows OS startup.
      */
     fun scheduleInstallOnNextBoot(installerFile: File, version: String) {
         scope.launch {
             try {
-                val bootScript = File(DesktopUpdateStore.updatesDir, "clotube_next_boot_update.cmd")
-                val scriptContent = buildString {
-                    appendLine("@echo off")
-                    appendLine("timeout /t 4 /nobreak >nul")
-                    appendLine("msiexec.exe /i \"${installerFile.absolutePath}\" /passive /norestart")
-                    appendLine("del \"%~f0\"")
-                }
-                bootScript.writeText(scriptContent, Charsets.UTF_8)
-
-                val regProcess = ProcessBuilder(
-                    "reg.exe",
-                    "add",
-                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-                    "/v",
-                    "ClotubePendingUpdate",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "\"${bootScript.absolutePath}\"",
-                    "/f"
-                ).redirectErrorStream(true).start()
-                regProcess.waitFor()
-
-                val currentState = _uiState.value
-                if (currentState is UpdateUiState.ReadyToInstall) {
-                    _uiState.value = currentState.copy(scheduledForNextBoot = true)
-                } else {
-                    _uiState.value = UpdateUiState.Hidden
-                }
-                println("[DesktopUpdateManager] Scheduled v$version for next Windows boot via HKCU RunOnce.")
-            } catch (e: Exception) {
-                System.err.println("[DesktopUpdateManager] Failed to register RunOnce update: ${e.message}")
-                _uiState.value = UpdateUiState.Error(
-                    message = "Could not schedule boot installer: ${e.message}"
-                )
-            }
-        }
-    }
-
-    /**
-     * Executes an atomic in-place `.msi` upgrade via a detached background script and relaunches Clotube.
-     */
-    fun installNowAndRelaunch(installerFile: File, version: String) {
-        scope.launch {
-            try {
-                _uiState.value = UpdateUiState.Installing(version = version)
-
-                // Remove any RunOnce entry so it doesn't re-run after we install right now
+                // Clean up any legacy HKCU RunOnce entry or old .cmd scripts if present
                 runCatching {
                     ProcessBuilder(
                         "reg.exe",
@@ -566,36 +571,96 @@ object DesktopUpdateManager {
                         "/f"
                     ).start().waitFor()
                 }
+                File(DesktopUpdateStore.updatesDir, "clotube_next_boot_update.cmd").delete()
 
+                val saved = DesktopUpdateStore.load()
+                DesktopUpdateStore.save(
+                    saved.copy(
+                        pendingInstallerPath = installerFile.absolutePath,
+                        pendingVersion = version,
+                        installOnNextAppBoot = true
+                    )
+                )
+
+                val currentState = _uiState.value
+                if (currentState is UpdateUiState.ReadyToInstall) {
+                    _uiState.value = currentState.copy(scheduledForNextBoot = true)
+                } else {
+                    _uiState.value = UpdateUiState.Hidden
+                }
+                println("[DesktopUpdateManager] Scheduled v$version for next app boot.")
+            } catch (e: Exception) {
+                System.err.println("[DesktopUpdateManager] Failed to schedule next-app-boot update: ${e.message}")
+                _uiState.value = UpdateUiState.Error(
+                    message = "Could not schedule update for next app boot: ${e.message}"
+                )
+            }
+        }
+    }
+
+    /**
+     * Executes an atomic in-place `.msi` upgrade via a completely hidden Windows Script Host
+     * (wscript.exe, GUI subsystem -> zero console windows) and relaunches Clotube.
+     */
+    fun installNowAndRelaunch(installerFile: File, version: String) {
+        scope.launch {
+            try {
+                _uiState.value = UpdateUiState.Installing(version = version)
+
+                // Clear installOnNextAppBoot flag and any legacy RunOnce key
+                val saved = DesktopUpdateStore.load()
+                DesktopUpdateStore.save(saved.copy(installOnNextAppBoot = false))
+                runCatching {
+                    ProcessBuilder(
+                        "reg.exe",
+                        "delete",
+                        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                        "/v",
+                        "ClotubePendingUpdate",
+                        "/f"
+                    ).start().waitFor()
+                }
+                File(DesktopUpdateStore.updatesDir, "clotube_install_now.cmd").delete()
+
+                // Resolve exact running Clotube.exe path (supports custom install directories)
+                val runningCmd = runCatching { ProcessHandle.current().info().command().orElse(null) }.getOrNull()
                 val localAppData = System.getenv("LOCALAPPDATA")
                     ?: File(System.getProperty("user.home"), "AppData\\Local").absolutePath
-                val installedExePath = File(localAppData, "Clotube\\Clotube.exe").absolutePath
-
-                val installScript = File(DesktopUpdateStore.updatesDir, "clotube_install_now.cmd")
-                val scriptContent = buildString {
-                    appendLine("@echo off")
-                    appendLine("timeout /t 2 /nobreak >nul")
-                    appendLine("taskkill /F /IM Clotube.exe >nul 2>&1")
-                    appendLine("timeout /t 1 /nobreak >nul")
-                    appendLine("msiexec.exe /i \"${installerFile.absolutePath}\" /passive /norestart")
-                    appendLine("if exist \"$installedExePath\" (")
-                    appendLine("    start \"\" \"$installedExePath\"")
-                    appendLine(")")
-                    appendLine("del \"%~f0\"")
+                val installedExePath = if (!runningCmd.isNullOrBlank() && runningCmd.endsWith("Clotube.exe", ignoreCase = true)) {
+                    runningCmd
+                } else {
+                    File(localAppData, "Clotube\\Clotube.exe").absolutePath
                 }
-                installScript.writeText(scriptContent, Charsets.UTF_8)
 
-                // Spawn completely detached outside JVM process tree
+                val escapedMsi = installerFile.absolutePath.replace("\"", "\"\"")
+                val escapedExe = installedExePath.replace("\"", "\"\"")
+
+                val vbsScript = File(DesktopUpdateStore.updatesDir, "clotube_install.vbs")
+                val vbsContent = buildString {
+                    appendLine("On Error Resume Next")
+                    appendLine("Set WshShell = CreateObject(\"WScript.Shell\")")
+                    appendLine("Set fso = CreateObject(\"Scripting.FileSystemObject\")")
+                    appendLine("WScript.Sleep 2000")
+                    appendLine("WshShell.Run \"taskkill /F /IM Clotube.exe\", 0, True")
+                    appendLine("WScript.Sleep 800")
+                    appendLine("msiCmd = \"msiexec.exe /i \"\"$escapedMsi\"\" /passive /norestart\"")
+                    appendLine("WshShell.Run msiCmd, 1, True")
+                    appendLine("If fso.FileExists(\"$escapedExe\") Then")
+                    appendLine("    WshShell.Run \"\"\"$escapedExe\"\"\", 1, False")
+                    appendLine("End If")
+                    appendLine("fso.DeleteFile WScript.ScriptFullName, True")
+                }
+                vbsScript.writeText(vbsContent, Charsets.UTF_8)
+
+                // Launch via GUI-subsystem wscript.exe -> never creates a cmd.exe or Terminal window
                 ProcessBuilder(
-                    "cmd.exe",
-                    "/c",
-                    "start",
-                    "\"Clotube Updater\"",
-                    "/min",
-                    installScript.absolutePath
+                    "wscript.exe",
+                    "//B",
+                    "//Nologo",
+                    vbsScript.absolutePath
                 ).start()
 
-                delay(600L)
+                delay(500L)
                 exitProcess(0)
             } catch (e: Exception) {
                 System.err.println("[DesktopUpdateManager] Failed to launch installer: ${e.message}")
@@ -614,7 +679,8 @@ object DesktopUpdateManager {
                 remindLaterTimestamp = 0L,
                 pendingInstallerPath = targetFile.absolutePath,
                 pendingVersion = release.version,
-                pendingReleaseNotes = release.releaseNotes
+                pendingReleaseNotes = release.releaseNotes,
+                installOnNextAppBoot = false
             )
         )
     }
@@ -694,59 +760,11 @@ object DesktopUpdateManager {
                 body = releaseNotes,
                 publishedAt = ""
             )
-            cacheReleaseNotes(listOf(cachedEntry))
+            cacheLatestRelease(cachedEntry)
 
             releaseInfo
         } catch (e: Exception) {
             System.err.println("[DesktopUpdateManager] Error querying GitHub Releases: ${e.message}")
-            null
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun fetchGithubReleases(): List<CachedReleaseNoteEntry>? {
-        var connection: HttpURLConnection? = null
-        return try {
-            connection = (URL(GITHUB_RELEASES_LIST_API).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 8000
-                readTimeout = 8000
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", "Clotube-Desktop-Updater")
-            }
-
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                System.err.println("[DesktopUpdateManager] GitHub Releases list API returned HTTP ${connection.responseCode}")
-                return null
-            }
-
-            val bodyText = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val jsonArray = JsonParser.parseString(bodyText).asJsonArray
-            val results = mutableListOf<CachedReleaseNoteEntry>()
-
-            for (elem in jsonArray) {
-                val obj = elem.asJsonObject
-                if (obj.get("draft")?.asBoolean == true) continue
-                val tagName = obj.get("tag_name")?.asString ?: continue
-                val version = DesktopUpdateStore.normalizeVersion(tagName)
-                if (version.isBlank()) continue
-                val title = obj.get("name")?.asString?.ifBlank { "Clotube v$version" } ?: "Clotube v$version"
-                val body = obj.get("body")?.asString ?: ""
-                val publishedAt = obj.get("published_at")?.asString ?: ""
-                results.add(
-                    CachedReleaseNoteEntry(
-                        version = version,
-                        tagName = tagName,
-                        title = title,
-                        body = body,
-                        publishedAt = publishedAt
-                    )
-                )
-            }
-            results
-        } catch (e: Exception) {
-            System.err.println("[DesktopUpdateManager] Error querying GitHub Releases list: ${e.message}")
             null
         } finally {
             connection?.disconnect()
@@ -761,19 +779,33 @@ object DesktopUpdateManager {
     ) {
         var currentUrl = initialUrl
         var redirects = 0
+        var resumeOffset = if (destination.exists()) destination.length() else 0L
 
-        while (redirects < 6) {
+        if (expectedTotalBytes > 0L && resumeOffset >= expectedTotalBytes) {
+            destination.delete()
+            resumeOffset = 0L
+        }
+
+        while (redirects < 8) {
             currentCoroutineContext().ensureActive()
             var connection: HttpURLConnection? = null
             try {
                 val url = URL(currentUrl)
                 connection = (url.openConnection() as HttpURLConnection).apply {
+                    if (this is HttpsURLConnection) {
+                        sslSocketFactory = Ipv4PreferringSslSocketFactory(HttpsURLConnection.getDefaultSSLSocketFactory())
+                    }
                     requestMethod = "GET"
-                    connectTimeout = 12000
-                    readTimeout = 15000
+                    connectTimeout = CONNECT_TIMEOUT_MS
+                    readTimeout = READ_TIMEOUT_MS
                     instanceFollowRedirects = false
-                    setRequestProperty("User-Agent", "Clotube-Desktop-Updater")
+                    useCaches = false
+                    setRequestProperty("User-Agent", "Clotube-Desktop-Updater/2.0")
                     setRequestProperty("Accept", "application/octet-stream")
+                    setRequestProperty("Connection", "keep-alive")
+                    if (resumeOffset > 0L) {
+                        setRequestProperty("Range", "bytes=$resumeOffset-")
+                    }
                 }
 
                 val code = connection.responseCode
@@ -789,17 +821,40 @@ object DesktopUpdateManager {
                     continue
                 }
 
-                if (code != HttpURLConnection.HTTP_OK) {
-                    throw IllegalStateException("HTTP $code while downloading update")
+                if (code == 416) {
+                    // Range Not Satisfiable -> delete stale partial file and restart from 0
+                    if (destination.exists()) destination.delete()
+                    resumeOffset = 0L
+                    redirects++
+                    continue
                 }
 
-                val contentLength = connection.contentLengthLong.takeIf { it > 0L } ?: expectedTotalBytes
-                var downloaded = 0L
+                if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
+                    throw IOException("HTTP $code while downloading update")
+                }
+
+                val isPartialAppend = (code == HttpURLConnection.HTTP_PARTIAL && resumeOffset > 0L)
+                if (!isPartialAppend && resumeOffset > 0L) {
+                    // Server ignored Range header and returned full 200 stream -> restart from 0
+                    if (destination.exists()) destination.delete()
+                    resumeOffset = 0L
+                }
+
+                val responseLength = connection.contentLengthLong
+                val totalBytes = when {
+                    isPartialAppend && responseLength > 0L -> resumeOffset + responseLength
+                    responseLength > 0L -> responseLength
+                    else -> expectedTotalBytes
+                }
+
+                var downloaded = resumeOffset
                 var lastEmitTime = 0L
 
+                onProgress(downloaded, totalBytes)
+
                 connection.inputStream.use { input ->
-                    FileOutputStream(destination).use { output ->
-                        val buffer = ByteArray(64 * 1024)
+                    FileOutputStream(destination, isPartialAppend).use { output ->
+                        val buffer = ByteArray(128 * 1024)
                         while (true) {
                             currentCoroutineContext().ensureActive()
                             val bytesRead = input.read(buffer)
@@ -808,9 +863,9 @@ object DesktopUpdateManager {
                             downloaded += bytesRead
 
                             val now = System.currentTimeMillis()
-                            if (now - lastEmitTime >= 80L || downloaded == contentLength) {
+                            if (now - lastEmitTime >= 80L || (totalBytes > 0L && downloaded >= totalBytes)) {
                                 lastEmitTime = now
-                                onProgress(downloaded, contentLength)
+                                onProgress(downloaded, totalBytes)
                             }
                         }
                         output.flush()
@@ -821,7 +876,51 @@ object DesktopUpdateManager {
                 connection?.disconnect()
             }
         }
-        throw IllegalStateException("Too many redirects while downloading update")
+        throw IOException("Too many redirects while downloading update")
+    }
+
+    /**
+     * Connects to IPv4 addresses first before IPv6 so dual-stack ISPs with broken IPv6 routes
+     * do not stall at 0.0 MB when connecting to objects.githubusercontent.com.
+     */
+    private class Ipv4PreferringSslSocketFactory(
+        private val delegate: SSLSocketFactory
+    ) : SSLSocketFactory() {
+        override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
+        override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
+
+        override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
+            delegate.createSocket(s, host, port, autoClose)
+
+        override fun createSocket(host: String, port: Int): Socket =
+            connectIpv4First(host, port)
+
+        override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+            delegate.createSocket(host, port, localHost, localPort)
+
+        override fun createSocket(address: InetAddress, port: Int): Socket =
+            delegate.createSocket(address, port)
+
+        override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
+            delegate.createSocket(address, port, localAddress, localPort)
+
+        private fun connectIpv4First(host: String, port: Int): Socket {
+            val allAddresses = InetAddress.getAllByName(host)
+            val ordered = allAddresses.sortedBy { if (it is Inet4Address) 0 else 1 }
+            var lastEx: IOException? = null
+
+            for (addr in ordered) {
+                val rawSocket = Socket()
+                try {
+                    rawSocket.connect(InetSocketAddress(addr, port), CONNECT_TIMEOUT_MS)
+                    return delegate.createSocket(rawSocket, host, port, true)
+                } catch (e: IOException) {
+                    lastEx = e
+                    runCatching { rawSocket.close() }
+                }
+            }
+            throw lastEx ?: IOException("Unable to connect to $host:$port")
+        }
     }
 }
 
