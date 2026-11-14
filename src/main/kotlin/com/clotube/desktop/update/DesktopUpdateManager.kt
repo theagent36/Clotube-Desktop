@@ -23,7 +23,7 @@ object DesktopUpdateManager {
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.0.7"
+    private const val DEV_FALLBACK_VERSION = "2.0.8"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
     private const val CONNECT_TIMEOUT_MS = 25_000
