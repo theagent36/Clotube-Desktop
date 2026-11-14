@@ -262,7 +262,7 @@ fun DesktopSettingsScreen(
                     .fillMaxHeight(),
                 transitionSpec = {
                     // DIRECTION-AWARE HORIZON SLIDE & DEPTH CROSS-DISSOLVE
-                    // Matches main app navigation (Home <-> Movies <-> TV Series <-> Watchlist <-> Recents <-> Settings)
+                    // Matches main app navigation (Home <-> Movies <-> Series <-> Watchlist <-> Recents <-> Settings)
                     val isMovingForward = targetState.ordinal > initialState.ordinal
                     val slideOffset = 64 // Subtle 64px offset prevents motion sickness on wide desktop monitors
 

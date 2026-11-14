@@ -26,8 +26,10 @@ import uk.co.caprica.vlcj.player.embedded.videosurface.callback.BufferFormatCall
 import uk.co.caprica.vlcj.player.embedded.videosurface.callback.RenderCallback
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 private fun MediaPlayer.subtitles() = this.subpictures()
 
@@ -143,6 +145,12 @@ class DirectMemoryVideoPlayer(
     private val hasAppliedPreferences = AtomicBoolean(false)
     private val hasAppliedInitialSeek = AtomicBoolean(false)
     private val asyncExecutor = Executors.newSingleThreadScheduledExecutor()
+
+    private val pendingSubtitleScalePercent = java.util.concurrent.atomic.AtomicInteger(currentSubtitleScalePercent)
+    private var pendingScaleFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    private val subScaleExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "Clotube-SubScale").apply { isDaemon = true }
+    }
 
     private fun updatePlayingState(playing: Boolean) {
         isPlaying = playing
@@ -328,14 +336,14 @@ class DirectMemoryVideoPlayer(
                     }, 400, TimeUnit.MILLISECONDS)
                 }
 
-                LibVlcLiveSubScale.applyLiveScale(factory, mp, currentSubtitleScalePercent)
+                LibVlcLiveSubScale.applyLiveScale(mp, currentSubtitleScalePercent)
 
                 checkAndApplyInitialSeek(mp)
             }
 
             override fun videoOutput(mp: MediaPlayer, newCount: Int) {
                 if (newCount > 0) {
-                    LibVlcLiveSubScale.applyLiveScale(factory, mp, currentSubtitleScalePercent)
+                    LibVlcLiveSubScale.applyLiveScale(mp, currentSubtitleScalePercent)
                 }
             }
 
@@ -597,10 +605,21 @@ class DirectMemoryVideoPlayer(
     }
 
     fun applySubtitleScale(newScalePercent: Int) {
-        val clampedPercent = newScalePercent.coerceIn(25, 300)
-        currentSubtitleScalePercent = clampedPercent
-        if (!isDisposed) {
-            LibVlcLiveSubScale.applyLiveScale(factory, mediaPlayer, clampedPercent)
+        val clamped = newScalePercent.coerceIn(25, 300)
+        currentSubtitleScalePercent = clamped
+        pendingSubtitleScalePercent.set(clamped)
+        if (isDisposed) return
+
+        pendingScaleFuture?.cancel(false)
+        pendingScaleFuture = try {
+            subScaleExecutor.schedule({
+                val targetScale = pendingSubtitleScalePercent.get()
+                if (!isDisposed) {
+                    LibVlcLiveSubScale.applyLiveScale(mediaPlayer, targetScale)
+                }
+            }, 30L, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -628,6 +647,8 @@ class DirectMemoryVideoPlayer(
     fun release() {
         WindowsScreenWakeLock.setPlaybackActive(this, false)
         if (!disposedFlag.compareAndSet(false, true)) return
+        pendingScaleFuture?.cancel(false)
+        subScaleExecutor.shutdownNow()
         asyncExecutor.shutdownNow()
         externalSubtitleName = null
         externalSubtitlePath = null
@@ -662,39 +683,51 @@ class DirectMemoryVideoPlayer(
     }
 
     private object LibVlcLiveSubScale {
-        private const val VLC_VAR_INTEGER = 0x0010
+        private const val VLC_VAR_TYPE_MASK = 0x00F0
+        private const val VLC_VAR_INTEGER = 0x0030
 
         private val vlcCore: NativeLibrary? by lazy {
             try {
-                NativeLibrary.getInstance(RuntimeUtil.getLibVlcCoreLibraryName())
-            } catch (_: Throwable) {
-                try {
-                    NativeLibrary.getInstance("libvlccore")
-                } catch (_: Throwable) {
-                    null
-                }
-            }
-        }
-
-        private val libvlcInstanceField: java.lang.reflect.Field? by lazy {
-            try {
-                MediaPlayerFactory::class.java.getDeclaredField("libvlcInstance").apply {
-                    isAccessible = true
-                }
+                NativeLibrary.getInstance("libvlccore")
             } catch (_: Throwable) {
                 null
             }
         }
 
-        fun applyLiveScale(factory: MediaPlayerFactory, mediaPlayer: MediaPlayer, scalePercent: Int) {
+        private val isBadReadPtrFn: com.sun.jna.Function? by lazy {
+            try {
+                NativeLibrary.getInstance("kernel32").getFunction("IsBadReadPtr")
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        private fun isReadable(ptr: Pointer?, bytes: Long = 16L): Boolean {
+            if (ptr == null || ptr == Pointer.NULL) return false
+            val addr = Pointer.nativeValue(ptr)
+            if (addr < 0x10000L || (addr and 0x7L) != 0L) return false
+            val fn = isBadReadPtrFn ?: return true
+            return try {
+                fn.invokeInt(arrayOf<Any>(ptr, com.sun.jna.platform.win32.BaseTSD.SIZE_T(bytes))) == 0
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        fun applyLiveScale(mediaPlayer: MediaPlayer, scalePercent: Int) {
             val core = vlcCore ?: return
             val clamped = scalePercent.coerceIn(25, 300)
 
-            // Update global config variable for any newly spawned decoders/vouts
             try {
                 val configPutInt = core.getFunction("config_PutInt")
-                configPutInt.invokeVoid(arrayOf(Pointer.NULL, "sub-text-scale", clamped.toLong()))
+                configPutInt.invokeVoid(arrayOf<Any>("sub-text-scale", clamped.toLong()))
             } catch (_: Throwable) {}
+
+            val varTypeFn = try {
+                core.getFunction("var_Type")
+            } catch (_: Throwable) {
+                return
+            }
 
             val varSetChecked = try {
                 core.getFunction("var_SetChecked")
@@ -702,68 +735,82 @@ class DirectMemoryVideoPlayer(
                 return
             }
 
-            fun setIntVar(objPtr: Pointer?) {
-                if (objPtr == null || objPtr == Pointer.NULL) return
-                try {
-                    varSetChecked.invokeVoid(arrayOf(objPtr, "sub-text-scale", VLC_VAR_INTEGER, clamped.toLong()))
-                } catch (_: Throwable) {}
-            }
-
-            // Set on root LibVLC instance object
-            try {
-                val inst = libvlcInstanceField?.get(factory) as? PointerType
-                val instPtr = inst?.pointer
-                if (instPtr != null && instPtr != Pointer.NULL) {
-                    val rootObj = instPtr.getPointer(0)
-                    if (rootObj != null && rootObj != Pointer.NULL) {
-                        setIntVar(rootObj)
-                        propagateToChildren(core, rootObj, ::setIntVar, depth = 0)
-                    }
-                }
-            } catch (_: Throwable) {}
-
-            // Set on libvlc_media_player_t instance and all child objects (input_thread_t, vout_thread_t, spu)
             val mpPtr = try {
                 mediaPlayer.mediaPlayerInstance()?.pointer
             } catch (_: Throwable) {
                 null
             } ?: return
+            if (!isReadable(mpPtr, 160L)) return
 
-            setIntVar(mpPtr)
-            propagateToChildren(core, mpPtr, ::setIntVar, depth = 0)
-        }
+            var updatedCount = 0
 
-        private fun propagateToChildren(
-            core: NativeLibrary,
-            parentPtr: Pointer,
-            setter: (Pointer?) -> Unit,
-            depth: Int
-        ) {
-            if (depth > 4) return
-            try {
-                val listChildren = core.getFunction("vlc_list_children")
-                val releaseList = core.getFunction("vlc_list_release")
-                val listPtr = listChildren.invokePointer(arrayOf(parentPtr)) ?: return
-                if (listPtr == Pointer.NULL) return
+            fun getObjectType(obj: Pointer?): String? {
+                if (!isReadable(obj, 40L)) return null
+                return try {
+                    val typeStrPtr = obj!!.getPointer(0L)
+                    if (!isReadable(typeStrPtr, 16L)) null else typeStrPtr.getString(0L)
+                } catch (_: Throwable) {
+                    null
+                }
+            }
 
+            fun applyToObjectIfHasVar(obj: Pointer?) {
+                if (!isReadable(obj, 40L)) return
+                val target = obj ?: return
                 try {
-                    val count = listPtr.getInt(0)
-                    if (count in 1..64) {
-                        val valuesPtr = listPtr.getPointer(8)
-                        if (valuesPtr != null && valuesPtr != Pointer.NULL) {
-                            for (i in 0 until count) {
-                                val childPtr = valuesPtr.getPointer(i * 8L)
-                                if (childPtr != null && childPtr != Pointer.NULL) {
-                                    setter(childPtr)
-                                    propagateToChildren(core, childPtr, setter, depth + 1)
+                    val existingType = varTypeFn.invokeInt(arrayOf<Any>(target, "sub-text-scale"))
+                    if ((existingType and VLC_VAR_TYPE_MASK) == VLC_VAR_INTEGER) {
+                        varSetChecked.invokeInt(
+                            arrayOf<Any>(target, "sub-text-scale", VLC_VAR_INTEGER, clamped.toLong())
+                        )
+                        updatedCount++
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            try {
+                val findNameFn = core.getFunction("vlc_object_find_name")
+                val releaseFn = core.getFunction("vlc_object_release")
+                val vmemPtr = findNameFn.invokePointer(arrayOf<Any>(mpPtr, "vmem"))
+                if (isReadable(vmemPtr, 40L) && vmemPtr != null) {
+                    try {
+                        applyToObjectIfHasVar(vmemPtr)
+                        val parentVout = vmemPtr.getPointer(24L)
+                        if (isReadable(parentVout, 40L) && parentVout != null) {
+                            applyToObjectIfHasVar(parentVout)
+                            val grandParent = parentVout.getPointer(24L)
+                            applyToObjectIfHasVar(grandParent)
+                        }
+                    } finally {
+                        releaseFn.invokeVoid(arrayOf<Any>(vmemPtr))
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            if (updatedCount == 0) {
+                try {
+                    for (mpOffset in 40L..224L step 8L) {
+                        val resPtr = mpPtr.getPointer(mpOffset)
+                        if (!isReadable(resPtr, 224L)) continue
+                        if (resPtr.getPointer(8L) != mpPtr) continue
+
+                        for (resOffset in 104L..224L step 8L) {
+                            val entryPtr = resPtr.getPointer(resOffset)
+                            if (!isReadable(entryPtr, 40L)) continue
+
+                            if (getObjectType(entryPtr) == "video output") {
+                                applyToObjectIfHasVar(entryPtr)
+                            } else {
+                                val firstVout = entryPtr.getPointer(0L)
+                                if (getObjectType(firstVout) == "video output") {
+                                    applyToObjectIfHasVar(firstVout)
                                 }
                             }
                         }
+                        break
                     }
-                } finally {
-                    releaseList.invokeVoid(arrayOf(listPtr))
-                }
-            } catch (_: Throwable) {}
+                } catch (_: Throwable) {}
+            }
         }
     }
 }

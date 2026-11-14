@@ -29,6 +29,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.pointerInput
@@ -38,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.awt.event.InputEvent
 import java.io.File
 
 data class SubtitleCue(
@@ -154,8 +156,10 @@ fun Modifier.onCtrlScrollSubtitleScale(
     this.pointerInput(Unit) {
         awaitPointerEventScope {
             while (true) {
-                val event = awaitPointerEvent()
-                if (event.type == PointerEventType.Scroll && event.keyboardModifiers.isCtrlPressed) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val isCtrlHeld = event.keyboardModifiers.isCtrlPressed ||
+                    ((event.nativeEvent as? InputEvent)?.isControlDown == true)
+                if (event.type == PointerEventType.Scroll && isCtrlHeld) {
                     val deltaY = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
                     if (deltaY != 0f) {
                         event.changes.forEach { it.consume() }

@@ -82,6 +82,7 @@ import com.clotube.desktop.ui.components.DesktopFramePacer
 import com.clotube.desktop.ui.motion.FluidEntranceContainer
 import com.clotube.desktop.ui.motion.FluidMotionKit
 import com.clotube.desktop.lifecycle.AppLifecycleManager
+import com.clotube.desktop.network.DesktopNetworkMonitor
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent
@@ -99,14 +100,14 @@ private data class SearchEpisodeMatch(
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
     MOVIES("Movies", Icons.Rounded.Movie),
-    TV_SERIES("TV Series", Icons.Rounded.Tv),
+    SERIES("Series", Icons.Rounded.Tv),
     WATCHLIST("Watchlist", Icons.Rounded.Bookmarks),
     RECENTS("Recents", Icons.Rounded.History),
     SETTINGS("Settings", Icons.Rounded.Settings);
 
     companion object {
-        // Compatibility alias so legacy DesktopNavSection.SERIES calls resolve to TV_SERIES
-        val SERIES: DesktopNavSection get() = TV_SERIES
+        // Compatibility alias so legacy DesktopNavSection.TV_SERIES calls resolve to SERIES
+        val TV_SERIES: DesktopNavSection get() = SERIES
     }
 }
 
@@ -826,7 +827,7 @@ fun DesktopHomeScreen(
                         )
                     } else if (initialState is DesktopActiveView.Library && targetState is DesktopActiveView.Library) {
                         // DIRECTION-AWARE HORIZON SLIDE & DEPTH CROSS-DISSOLVE
-                        // (Home <-> Movies <-> TV Series <-> Watchlist <-> Recents <-> Settings)
+                        // (Home <-> Movies <-> Series <-> Watchlist <-> Recents <-> Settings)
                         val fromSection = (initialState as DesktopActiveView.Library).section
                         val toSection = (targetState as DesktopActiveView.Library).section
                         val isMovingForward = toSection.ordinal > fromSection.ordinal
@@ -985,7 +986,7 @@ fun DesktopHomeScreen(
                                     }
                                 )
                             }
-                            DesktopNavSection.TV_SERIES -> {
+                            DesktopNavSection.SERIES -> {
                                 FigmaSeriesContent(
                                     series = filteredSeries,
                                     userEmail = userEmail,
@@ -1155,27 +1156,15 @@ private fun DesktopFigmaSidebar(
                 .fillMaxWidth()
                 .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                com.clotube.desktop.ui.components.ClotubeGlyphIcon(size = 32.dp)
-                Text(
-                    text = "Clotube",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = (-0.3).sp
-                )
-            }
-
-            Icon(
-                imageVector = Icons.Rounded.Menu,
-                contentDescription = "Menu",
-                tint = Color(0xFF64748B),
-                modifier = Modifier.size(18.dp)
+            com.clotube.desktop.ui.components.ClotubeGlyphIcon(size = 32.dp)
+            Text(
+                text = "Clotube",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = (-0.3).sp
             )
         }
 
@@ -1197,7 +1186,7 @@ private fun DesktopFigmaSidebar(
         val navItems = listOf(
             DesktopNavSection.HOME,
             DesktopNavSection.MOVIES,
-            DesktopNavSection.TV_SERIES,
+            DesktopNavSection.SERIES,
             DesktopNavSection.WATCHLIST,
             DesktopNavSection.RECENTS
         )
@@ -1463,11 +1452,13 @@ private fun DesktopFigmaTopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // STUDIO ONLINE STATUS PILL (Non-fluorescent)
+            val isOnline by DesktopNetworkMonitor.isOnline.collectAsState()
+
+            // STUDIO ONLINE / OFFLINE STATUS PILL (Non-fluorescent, reactive)
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = Color(0xFF0E131C),
-                border = BorderStroke(1.dp, Color(0xFF1B2433))
+                color = if (isOnline) Color(0xFF0E131C) else Color(0xFF1A1014),
+                border = BorderStroke(1.dp, if (isOnline) Color(0xFF1B2433) else Color(0xFF3B1822))
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -1478,17 +1469,17 @@ private fun DesktopFigmaTopBar(
                         modifier = Modifier
                             .size(6.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF10B981)) // Quiet emerald status dot
+                            .background(if (isOnline) Color(0xFF10B981) else Color(0xFFEF4444)) // Emerald when online, Red when offline
                     )
                     Icon(
-                        imageVector = Icons.Rounded.Wifi,
-                        contentDescription = "Online",
-                        tint = Color(0xFF94A3B8),
+                        imageVector = if (isOnline) Icons.Rounded.Wifi else Icons.Rounded.WifiOff,
+                        contentDescription = if (isOnline) "Online" else "Offline",
+                        tint = if (isOnline) Color(0xFF94A3B8) else Color(0xFFF87171),
                         modifier = Modifier.size(13.dp)
                     )
                     Text(
-                        text = "Online",
-                        color = Color(0xFFCBD5E1),
+                        text = if (isOnline) "Online" else "Offline",
+                        color = if (isOnline) Color(0xFFCBD5E1) else Color(0xFFFCA5A5),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )

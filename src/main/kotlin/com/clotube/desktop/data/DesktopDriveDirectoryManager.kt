@@ -1,7 +1,9 @@
 package com.clotube.desktop.data
 
+import com.clotube.desktop.network.DesktopNetworkMonitor
 import com.google.api.services.drive.Drive
 import com.google.api.services.drive.model.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,34 +28,54 @@ object DesktopDriveDirectoryManager {
     private val resolveMutex = Mutex()
 
     suspend fun resolveHierarchy(driveService: Drive): ResolvedDriveDirectories = withContext(Dispatchers.IO) {
+        if (!DesktopNetworkMonitor.isOnline.value) {
+            return@withContext ResolvedDriveDirectories(
+                clotubeRootId = "",
+                moviesFolderId = null,
+                seriesFolderId = null,
+                historyFolderId = ""
+            )
+        }
         resolveMutex.withLock {
-            val clotubeRootId = getOrCreateFolder(driveService, "clotube", parentId = null)
-            val historyFolderId = getOrCreateFolder(driveService, "History", parentId = clotubeRootId)
+            try {
+                val clotubeRootId = getOrCreateFolder(driveService, "clotube", parentId = null)
+                val historyFolderId = getOrCreateFolder(driveService, "History", parentId = clotubeRootId)
 
-            val scopedMoviesId = findChildFolder(driveService, "Movies", clotubeRootId)
-            val moviesFolderId = resolveMediaFolder(
-                driveService = driveService,
-                clotubeRootId = clotubeRootId,
-                scopedFolderId = scopedMoviesId,
-                defaultFolderName = "Movies",
-                legacyNames = MOVIE_LEGACY_NAMES
-            )
+                val scopedMoviesId = findChildFolder(driveService, "Movies", clotubeRootId)
+                val moviesFolderId = resolveMediaFolder(
+                    driveService = driveService,
+                    clotubeRootId = clotubeRootId,
+                    scopedFolderId = scopedMoviesId,
+                    defaultFolderName = "Movies",
+                    legacyNames = MOVIE_LEGACY_NAMES
+                )
 
-            val scopedSeriesId = findChildFolder(driveService, "Series", clotubeRootId)
-            val seriesFolderId = resolveMediaFolder(
-                driveService = driveService,
-                clotubeRootId = clotubeRootId,
-                scopedFolderId = scopedSeriesId,
-                defaultFolderName = "Series",
-                legacyNames = SERIES_LEGACY_NAMES
-            )
+                val scopedSeriesId = findChildFolder(driveService, "Series", clotubeRootId)
+                val seriesFolderId = resolveMediaFolder(
+                    driveService = driveService,
+                    clotubeRootId = clotubeRootId,
+                    scopedFolderId = scopedSeriesId,
+                    defaultFolderName = "Series",
+                    legacyNames = SERIES_LEGACY_NAMES
+                )
 
-            ResolvedDriveDirectories(
-                clotubeRootId = clotubeRootId,
-                moviesFolderId = moviesFolderId,
-                seriesFolderId = seriesFolderId,
-                historyFolderId = historyFolderId
-            )
+                ResolvedDriveDirectories(
+                    clotubeRootId = clotubeRootId,
+                    moviesFolderId = moviesFolderId,
+                    seriesFolderId = seriesFolderId,
+                    historyFolderId = historyFolderId
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                System.err.println("[DesktopDriveDirectoryManager] Network/Drive error in resolveHierarchy: ${e.message}")
+                ResolvedDriveDirectories(
+                    clotubeRootId = "",
+                    moviesFolderId = null,
+                    seriesFolderId = null,
+                    historyFolderId = ""
+                )
+            }
         }
     }
 
@@ -75,6 +97,7 @@ object DesktopDriveDirectoryManager {
     }
 
     fun getOrCreateFolder(driveService: Drive, folderName: String, parentId: String?): String {
+        if (!DesktopNetworkMonitor.isOnline.value) return ""
         val existingId = if (parentId != null) {
             findChildFolder(driveService, folderName, parentId)
         } else {
@@ -83,70 +106,93 @@ object DesktopDriveDirectoryManager {
 
         if (existingId != null) return existingId
 
-        val folderMetadata = File().apply {
-            name = folderName
-            mimeType = FOLDER_MIME
-            if (parentId != null) {
-                parents = listOf(parentId)
+        return try {
+            val folderMetadata = File().apply {
+                name = folderName
+                mimeType = FOLDER_MIME
+                if (parentId != null) {
+                    parents = listOf(parentId)
+                }
             }
+
+            val created = driveService.files().create(folderMetadata)
+                .setFields("id, name")
+                .setSupportsAllDrives(true)
+                .execute()
+
+            println("[DesktopDriveDirectoryManager] Created directory '$folderName' (ID: ${created.id})")
+            created.id
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveDirectoryManager] Network/Drive error in getOrCreateFolder: ${e.message}")
+            ""
         }
-
-        val created = driveService.files().create(folderMetadata)
-            .setFields("id, name")
-            .setSupportsAllDrives(true)
-            .execute()
-
-        println("[DesktopDriveDirectoryManager] Created directory '$folderName' (ID: ${created.id})")
-        return created.id
     }
 
     private fun findRootFolder(driveService: Drive, name: String): String? {
-        val escapedName = escapeDriveQueryLiteral(name)
+        if (!DesktopNetworkMonitor.isOnline.value) return null
+        return try {
+            val escapedName = escapeDriveQueryLiteral(name)
 
-        // Prefer My Drive root first so nested unrelated folders of the same name are not hijacked
-        val rootQuery = "'root' in parents and name = '$escapedName' and (mimeType = '$FOLDER_MIME' or mimeType = '$SHORTCUT_MIME') and trashed = false"
-        val rootResponse = driveService.files().list()
-            .setQ(rootQuery)
-            .setSpaces("drive")
-            .setFields("files(id, name, mimeType, shortcutDetails)")
-            .setSupportsAllDrives(true)
-            .setIncludeItemsFromAllDrives(true)
-            .setPageSize(10)
-            .execute()
+            // Prefer My Drive root first so nested unrelated folders of the same name are not hijacked
+            val rootQuery = "'root' in parents and name = '$escapedName' and (mimeType = '$FOLDER_MIME' or mimeType = '$SHORTCUT_MIME') and trashed = false"
+            val rootResponse = driveService.files().list()
+                .setQ(rootQuery)
+                .setSpaces("drive")
+                .setFields("files(id, name, mimeType, shortcutDetails)")
+                .setSupportsAllDrives(true)
+                .setIncludeItemsFromAllDrives(true)
+                .setPageSize(10)
+                .execute()
 
-        val rootMatch = rootResponse.files?.firstOrNull { isFolderOrFolderShortcut(it) }
-        if (rootMatch != null) return resolveTargetId(rootMatch)
+            val rootMatch = rootResponse.files?.firstOrNull { isFolderOrFolderShortcut(it) }
+            if (rootMatch != null) return resolveTargetId(rootMatch)
 
-        // Fallback for top-level Shared Drive folders (whose parent is the shared drive ID rather than 'root')
-        val sharedQuery = "name = '$escapedName' and (mimeType = '$FOLDER_MIME' or mimeType = '$SHORTCUT_MIME') and trashed = false"
-        val sharedResponse = driveService.files().list()
-            .setQ(sharedQuery)
-            .setSpaces("drive")
-            .setFields("files(id, name, mimeType, shortcutDetails, parents, driveId)")
-            .setSupportsAllDrives(true)
-            .setIncludeItemsFromAllDrives(true)
-            .setPageSize(10)
-            .execute()
+            // Fallback for top-level Shared Drive folders (whose parent is the shared drive ID rather than 'root')
+            val sharedQuery = "name = '$escapedName' and (mimeType = '$FOLDER_MIME' or mimeType = '$SHORTCUT_MIME') and trashed = false"
+            val sharedResponse = driveService.files().list()
+                .setQ(sharedQuery)
+                .setSpaces("drive")
+                .setFields("files(id, name, mimeType, shortcutDetails, parents, driveId)")
+                .setSupportsAllDrives(true)
+                .setIncludeItemsFromAllDrives(true)
+                .setPageSize(10)
+                .execute()
 
-        val sharedTopMatch = sharedResponse.files?.firstOrNull { file ->
-            isFolderOrFolderShortcut(file) && file.driveId != null && file.parents?.contains(file.driveId) == true
+            val sharedTopMatch = sharedResponse.files?.firstOrNull { file ->
+                isFolderOrFolderShortcut(file) && file.driveId != null && file.parents?.contains(file.driveId) == true
+            }
+            sharedTopMatch?.let { resolveTargetId(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveDirectoryManager] Network/Drive error in findRootFolder: ${e.message}")
+            null
         }
-        return sharedTopMatch?.let { resolveTargetId(it) }
     }
 
     private fun findChildFolder(driveService: Drive, name: String, parentId: String): String? {
-        val escapedName = escapeDriveQueryLiteral(name)
-        val query = "'$parentId' in parents and name = '$escapedName' and (mimeType = '$FOLDER_MIME' or mimeType = '$SHORTCUT_MIME') and trashed = false"
-        val response = driveService.files().list()
-            .setQ(query)
-            .setFields("files(id, name, mimeType, shortcutDetails)")
-            .setSupportsAllDrives(true)
-            .setIncludeItemsFromAllDrives(true)
-            .setPageSize(10)
-            .execute()
+        if (!DesktopNetworkMonitor.isOnline.value) return null
+        return try {
+            val escapedName = escapeDriveQueryLiteral(name)
+            val query = "'$parentId' in parents and name = '$escapedName' and (mimeType = '$FOLDER_MIME' or mimeType = '$SHORTCUT_MIME') and trashed = false"
+            val response = driveService.files().list()
+                .setQ(query)
+                .setFields("files(id, name, mimeType, shortcutDetails)")
+                .setSupportsAllDrives(true)
+                .setIncludeItemsFromAllDrives(true)
+                .setPageSize(10)
+                .execute()
 
-        val file = response.files?.firstOrNull { isFolderOrFolderShortcut(it) } ?: return null
-        return resolveTargetId(file)
+            val file = response.files?.firstOrNull { isFolderOrFolderShortcut(it) } ?: return null
+            resolveTargetId(file)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveDirectoryManager] Network/Drive error in findChildFolder: ${e.message}")
+            null
+        }
     }
 
     private fun resolveLegacyFolder(

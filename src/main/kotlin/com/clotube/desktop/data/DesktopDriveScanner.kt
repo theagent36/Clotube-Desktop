@@ -1,5 +1,6 @@
 package com.clotube.desktop.data
 
+import com.clotube.desktop.network.DesktopNetworkMonitor
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
@@ -9,6 +10,7 @@ import com.google.api.client.json.gson.GsonFactory
 import com.google.api.services.drive.Drive
 import com.clotube.desktop.auth.DesktopAuthManager
 import com.google.api.client.auth.oauth2.Credential
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -76,6 +78,11 @@ class DesktopDriveScanner(
      * 3. Flushes remaining items upon completion without sudden large-batch dumps.
      */
     fun streamMovies(): Flow<List<DesktopMediaItem>> = flow {
+        if (!DesktopNetworkMonitor.isOnline.value) {
+            System.err.println("[DesktopDriveScanner] Device is offline. Skipping movie stream.")
+            emit(emptyList())
+            return@flow
+        }
         val service = driveService ?: return@flow
         println("[DesktopDriveScanner] Resolving Movies folder...")
         val dirs = getResolvedDirectories(service)
@@ -97,60 +104,70 @@ class DesktopDriveScanner(
         var emittedFirstChunk = false
         var lastEmittedCount = 0
 
-        while (folderQueue.isNotEmpty()) {
-            val currentNode = folderQueue.poll() ?: break
-            val items = fetchFolderContents(currentNode.folderId)
+        try {
+            while (folderQueue.isNotEmpty()) {
+                if (!DesktopNetworkMonitor.isOnline.value) {
+                    System.err.println("[DesktopDriveScanner] Internet connection dropped during movie scan. Emitting discovered items.")
+                    break
+                }
+                val currentNode = folderQueue.poll() ?: break
+                val items = fetchFolderContents(currentNode.folderId)
 
-            for (item in items) {
-                val resolvedId = resolveTargetId(item)
-                val isFolder = item.mimeType == "application/vnd.google-apps.folder" ||
-                        (item.mimeType == "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+                for (item in items) {
+                    val resolvedId = resolveTargetId(item)
+                    val isFolder = item.mimeType == "application/vnd.google-apps.folder" ||
+                            (item.mimeType == "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
 
-                if (isFolder) {
-                    if (visitedFolders.add(resolvedId)) {
-                        val folderName = item.name ?: ""
-                        val folderLanguage = detectLanguageFromFolderName(folderName) ?: currentNode.inheritedLanguage
-                        folderQueue.add(FolderQueueNode(resolvedId, folderName, folderLanguage))
-                    }
-                } else if (item.mimeType?.startsWith("video/") == true || item.name.endsWith(".mkv", true) || item.name.endsWith(".mp4", true)) {
-                    val rawName = item.name ?: "Unknown"
-                    val durationMs = item.videoMediaMetadata?.durationMillis ?: 0L
-                    val driveThumb = item.thumbnailLink?.replace("s220", "s800")
-                        ?: "https://drive.google.com/thumbnail?id=$resolvedId&sz=w800"
+                    if (isFolder) {
+                        if (visitedFolders.add(resolvedId)) {
+                            val folderName = item.name ?: ""
+                            val folderLanguage = detectLanguageFromFolderName(folderName) ?: currentNode.inheritedLanguage
+                            folderQueue.add(FolderQueueNode(resolvedId, folderName, folderLanguage))
+                        }
+                    } else if (item.mimeType?.startsWith("video/") == true || item.name.endsWith(".mkv", true) || item.name.endsWith(".mp4", true)) {
+                        val rawName = item.name ?: "Unknown"
+                        val durationMs = item.videoMediaMetadata?.durationMillis ?: 0L
+                        val driveThumb = item.thumbnailLink?.replace("s220", "s800")
+                            ?: "https://drive.google.com/thumbnail?id=$resolvedId&sz=w800"
 
-                    val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
+                        val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
 
-                    val effectiveLanguage = currentNode.inheritedLanguage
-                        ?: detectLanguageFromFolderName(currentNode.folderName)
-                        ?: meta.language.ifBlank { DesktopOnlineMetadataResolver.deduceLanguageFromTitle(meta.officialTitle) }
+                        val effectiveLanguage = currentNode.inheritedLanguage
+                            ?: detectLanguageFromFolderName(currentNode.folderName)
+                            ?: meta.language.ifBlank { DesktopOnlineMetadataResolver.deduceLanguageFromTitle(meta.officialTitle) }
 
-                    discoveredMovies.add(
-                        DesktopMediaItem(
-                            id = resolvedId,
-                            title = meta.officialTitle,
-                            thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
-                            fallbackThumbnailUrl = driveThumb,
-                            genre = meta.genre,
-                            durationMs = durationMs,
-                            language = effectiveLanguage
+                        discoveredMovies.add(
+                            DesktopMediaItem(
+                                id = resolvedId,
+                                title = meta.officialTitle,
+                                thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
+                                fallbackThumbnailUrl = driveThumb,
+                                genre = meta.genre,
+                                durationMs = durationMs,
+                                language = effectiveLanguage
+                            )
                         )
-                    )
 
-                    // 1. FAST FIRST PAINT: Emit initial 4 movies immediately to unlock UI
-                    if (!emittedFirstChunk && discoveredMovies.size >= CHUNK_SIZE) {
-                        emittedFirstChunk = true
-                        lastEmittedCount = discoveredMovies.size
-                        println("[DesktopDriveScanner] Fast first paint: Emitting initial $CHUNK_SIZE movies to UI.")
-                        emit(discoveredMovies.toList())
-                    }
-                    // 2. PROGRESSIVE PACKETS: Emit every time 4 new movies are resolved
-                    else if (emittedFirstChunk && (discoveredMovies.size - lastEmittedCount) >= CHUNK_SIZE) {
-                        lastEmittedCount = discoveredMovies.size
-                        println("[DesktopDriveScanner] Progressive chunk emitted: ${discoveredMovies.size} total movies.")
-                        emit(discoveredMovies.toList())
+                        // 1. FAST FIRST PAINT: Emit initial 4 movies immediately to unlock UI
+                        if (!emittedFirstChunk && discoveredMovies.size >= CHUNK_SIZE) {
+                            emittedFirstChunk = true
+                            lastEmittedCount = discoveredMovies.size
+                            println("[DesktopDriveScanner] Fast first paint: Emitting initial $CHUNK_SIZE movies to UI.")
+                            emit(discoveredMovies.toList())
+                        }
+                        // 2. PROGRESSIVE PACKETS: Emit every time 4 new movies are resolved
+                        else if (emittedFirstChunk && (discoveredMovies.size - lastEmittedCount) >= CHUNK_SIZE) {
+                            lastEmittedCount = discoveredMovies.size
+                            println("[DesktopDriveScanner] Progressive chunk emitted: ${discoveredMovies.size} total movies.")
+                            emit(discoveredMovies.toList())
+                        }
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveScanner] Movie scan aborted safely due to network error: ${e.message}")
         }
 
         // 3. FINAL FLUSH: Emit any remaining items that didn't hit an exact multiple of 4
@@ -165,6 +182,11 @@ class DesktopDriveScanner(
      * Streams TV series folders in gradual, progressive packets.
      */
     fun streamSeriesFolders(): Flow<List<DesktopMediaItem>> = flow {
+        if (!DesktopNetworkMonitor.isOnline.value) {
+            System.err.println("[DesktopDriveScanner] Device is offline. Skipping series stream.")
+            emit(emptyList())
+            return@flow
+        }
         val service = driveService ?: return@flow
         println("[DesktopDriveScanner] Resolving TV Series folder...")
         val dirs = getResolvedDirectories(service)
@@ -175,46 +197,56 @@ class DesktopDriveScanner(
             return@flow
         }
 
-        val items = fetchFolderContents(rootId)
-        val seriesFolders = items.filter {
-            it.mimeType == "application/vnd.google-apps.folder" ||
-                    (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
-        }
-
         val discoveredSeries = mutableListOf<DesktopMediaItem>()
         var emittedFirstChunk = false
         var lastEmittedCount = 0
 
-        for (folder in seriesFolders) {
-            val rawName = folder.name ?: "Unknown"
-            val targetId = resolveTargetId(folder)
-            val driveThumb = folder.thumbnailLink?.replace("s220", "s800")
-                ?: "https://drive.google.com/thumbnail?id=$targetId&sz=w800"
-            val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
+        try {
+            val items = fetchFolderContents(rootId)
+            val seriesFolders = items.filter {
+                it.mimeType == "application/vnd.google-apps.folder" ||
+                        (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+            }
 
-            discoveredSeries.add(
-                DesktopMediaItem(
-                    id = targetId,
-                    title = meta.officialTitle,
-                    thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
-                    fallbackThumbnailUrl = driveThumb,
-                    genre = meta.genres
+            for (folder in seriesFolders) {
+                if (!DesktopNetworkMonitor.isOnline.value) {
+                    System.err.println("[DesktopDriveScanner] Internet connection dropped during series scan. Emitting discovered items.")
+                    break
+                }
+                val rawName = folder.name ?: "Unknown"
+                val targetId = resolveTargetId(folder)
+                val driveThumb = folder.thumbnailLink?.replace("s220", "s800")
+                    ?: "https://drive.google.com/thumbnail?id=$targetId&sz=w800"
+                val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
+
+                discoveredSeries.add(
+                    DesktopMediaItem(
+                        id = targetId,
+                        title = meta.officialTitle,
+                        thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
+                        fallbackThumbnailUrl = driveThumb,
+                        genre = meta.genres
+                    )
                 )
-            )
 
-            // Emit initial 4 series immediately
-            if (!emittedFirstChunk && discoveredSeries.size >= CHUNK_SIZE) {
-                emittedFirstChunk = true
-                lastEmittedCount = discoveredSeries.size
-                println("[DesktopDriveScanner] Fast first paint: Emitting initial $CHUNK_SIZE series to UI.")
-                emit(discoveredSeries.toList())
+                // Emit initial 4 series immediately
+                if (!emittedFirstChunk && discoveredSeries.size >= CHUNK_SIZE) {
+                    emittedFirstChunk = true
+                    lastEmittedCount = discoveredSeries.size
+                    println("[DesktopDriveScanner] Fast first paint: Emitting initial $CHUNK_SIZE series to UI.")
+                    emit(discoveredSeries.toList())
+                }
+                // Emit subsequent 4-series chunks
+                else if (emittedFirstChunk && (discoveredSeries.size - lastEmittedCount) >= CHUNK_SIZE) {
+                    lastEmittedCount = discoveredSeries.size
+                    println("[DesktopDriveScanner] Progressive chunk emitted: ${discoveredSeries.size} total series.")
+                    emit(discoveredSeries.toList())
+                }
             }
-            // Emit subsequent 4-series chunks
-            else if (emittedFirstChunk && (discoveredSeries.size - lastEmittedCount) >= CHUNK_SIZE) {
-                lastEmittedCount = discoveredSeries.size
-                println("[DesktopDriveScanner] Progressive chunk emitted: ${discoveredSeries.size} total series.")
-                emit(discoveredSeries.toList())
-            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveScanner] Series scan aborted safely due to network error: ${e.message}")
         }
 
         // Final flush for series
@@ -230,56 +262,68 @@ class DesktopDriveScanner(
      * without emitting intermediate partial packets.
      */
     suspend fun loadMovies(): List<DesktopMediaItem> = withContext(Dispatchers.IO) {
+        if (!DesktopNetworkMonitor.isOnline.value) {
+            System.err.println("[DesktopDriveScanner] Device is offline. Skipping loadMovies.")
+            return@withContext emptyList()
+        }
         val service = driveService ?: return@withContext emptyList()
-        val dirs = getResolvedDirectories(service)
-        val rootId = dirs.moviesFolderId ?: return@withContext emptyList()
-        val discoveredMovies = mutableListOf<DesktopMediaItem>()
-        val folderQueue = ArrayDeque<FolderQueueNode>()
-        val visitedFolders = mutableSetOf<String>()
+        try {
+            val dirs = getResolvedDirectories(service)
+            val rootId = dirs.moviesFolderId ?: return@withContext emptyList()
+            val discoveredMovies = mutableListOf<DesktopMediaItem>()
+            val folderQueue = ArrayDeque<FolderQueueNode>()
+            val visitedFolders = mutableSetOf<String>()
 
-        folderQueue.add(FolderQueueNode(rootId, "Movies", null))
-        visitedFolders.add(rootId)
+            folderQueue.add(FolderQueueNode(rootId, "Movies", null))
+            visitedFolders.add(rootId)
 
-        while (folderQueue.isNotEmpty()) {
-            val currentNode = folderQueue.poll() ?: break
-            val items = fetchFolderContents(currentNode.folderId)
+            while (folderQueue.isNotEmpty()) {
+                if (!DesktopNetworkMonitor.isOnline.value) break
+                val currentNode = folderQueue.poll() ?: break
+                val items = fetchFolderContents(currentNode.folderId)
 
-            for (item in items) {
-                val resolvedId = resolveTargetId(item)
-                val isFolder = item.mimeType == "application/vnd.google-apps.folder" ||
-                        (item.mimeType == "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+                for (item in items) {
+                    val resolvedId = resolveTargetId(item)
+                    val isFolder = item.mimeType == "application/vnd.google-apps.folder" ||
+                            (item.mimeType == "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
 
-                if (isFolder) {
-                    if (visitedFolders.add(resolvedId)) {
-                        val folderName = item.name ?: ""
-                        val folderLanguage = detectLanguageFromFolderName(folderName) ?: currentNode.inheritedLanguage
-                        folderQueue.add(FolderQueueNode(resolvedId, folderName, folderLanguage))
-                    }
-                } else if (item.mimeType?.startsWith("video/") == true || item.name.endsWith(".mkv", true) || item.name.endsWith(".mp4", true)) {
-                    val rawName = item.name ?: "Unknown"
-                    val durationMs = item.videoMediaMetadata?.durationMillis ?: 0L
-                    val driveThumb = item.thumbnailLink?.replace("s220", "s800") ?: ""
+                    if (isFolder) {
+                        if (visitedFolders.add(resolvedId)) {
+                            val folderName = item.name ?: ""
+                            val folderLanguage = detectLanguageFromFolderName(folderName) ?: currentNode.inheritedLanguage
+                            folderQueue.add(FolderQueueNode(resolvedId, folderName, folderLanguage))
+                        }
+                    } else if (item.mimeType?.startsWith("video/") == true || item.name.endsWith(".mkv", true) || item.name.endsWith(".mp4", true)) {
+                        val rawName = item.name ?: "Unknown"
+                        val durationMs = item.videoMediaMetadata?.durationMillis ?: 0L
+                        val driveThumb = item.thumbnailLink?.replace("s220", "s800") ?: ""
 
-                    val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
-                    val effectiveLanguage = currentNode.inheritedLanguage
-                        ?: detectLanguageFromFolderName(currentNode.folderName)
-                        ?: meta.language.ifBlank { DesktopOnlineMetadataResolver.deduceLanguageFromTitle(meta.officialTitle) }
+                        val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
+                        val effectiveLanguage = currentNode.inheritedLanguage
+                            ?: detectLanguageFromFolderName(currentNode.folderName)
+                            ?: meta.language.ifBlank { DesktopOnlineMetadataResolver.deduceLanguageFromTitle(meta.officialTitle) }
 
-                    discoveredMovies.add(
-                        DesktopMediaItem(
-                            id = resolvedId,
-                            title = meta.officialTitle,
-                            thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
-                            fallbackThumbnailUrl = driveThumb,
-                            genre = meta.genre,
-                            durationMs = durationMs,
-                            language = effectiveLanguage
+                        discoveredMovies.add(
+                            DesktopMediaItem(
+                                id = resolvedId,
+                                title = meta.officialTitle,
+                                thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
+                                fallbackThumbnailUrl = driveThumb,
+                                genre = meta.genre,
+                                durationMs = durationMs,
+                                language = effectiveLanguage
+                            )
                         )
-                    )
+                    }
                 }
             }
+            discoveredMovies.sortedBy { it.title }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveScanner] loadMovies aborted safely due to network error: ${e.message}")
+            emptyList()
         }
-        discoveredMovies.sortedBy { it.title }
     }
 
     /**
@@ -287,32 +331,44 @@ class DesktopDriveScanner(
      * without emitting intermediate partial packets.
      */
     suspend fun loadSeriesFolders(): List<DesktopMediaItem> = withContext(Dispatchers.IO) {
+        if (!DesktopNetworkMonitor.isOnline.value) {
+            System.err.println("[DesktopDriveScanner] Device is offline. Skipping loadSeriesFolders.")
+            return@withContext emptyList()
+        }
         val service = driveService ?: return@withContext emptyList()
-        val dirs = getResolvedDirectories(service)
-        val rootId = dirs.seriesFolderId ?: return@withContext emptyList()
-        val items = fetchFolderContents(rootId)
-        val seriesFolders = items.filter {
-            it.mimeType == "application/vnd.google-apps.folder" ||
-                    (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
-        }
+        try {
+            val dirs = getResolvedDirectories(service)
+            val rootId = dirs.seriesFolderId ?: return@withContext emptyList()
+            val items = fetchFolderContents(rootId)
+            val seriesFolders = items.filter {
+                it.mimeType == "application/vnd.google-apps.folder" ||
+                        (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+            }
 
-        val discoveredSeries = mutableListOf<DesktopMediaItem>()
-        for (folder in seriesFolders) {
-            val rawName = folder.name ?: "Unknown"
-            val driveThumb = folder.thumbnailLink?.replace("s220", "s800") ?: ""
-            val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
+            val discoveredSeries = mutableListOf<DesktopMediaItem>()
+            for (folder in seriesFolders) {
+                if (!DesktopNetworkMonitor.isOnline.value) break
+                val rawName = folder.name ?: "Unknown"
+                val driveThumb = folder.thumbnailLink?.replace("s220", "s800") ?: ""
+                val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
 
-            discoveredSeries.add(
-                DesktopMediaItem(
-                    id = resolveTargetId(folder),
-                    title = meta.officialTitle,
-                    thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
-                    fallbackThumbnailUrl = driveThumb,
-                    genre = meta.genres
+                discoveredSeries.add(
+                    DesktopMediaItem(
+                        id = resolveTargetId(folder),
+                        title = meta.officialTitle,
+                        thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
+                        fallbackThumbnailUrl = driveThumb,
+                        genre = meta.genres
+                    )
                 )
-            )
+            }
+            discoveredSeries.sortedBy { it.title }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveScanner] loadSeriesFolders aborted safely due to network error: ${e.message}")
+            emptyList()
         }
-        discoveredSeries.sortedBy { it.title }
     }
 
     private fun detectLanguageFromFolderName(folderName: String): String? {
@@ -326,6 +382,7 @@ class DesktopDriveScanner(
     }
 
     private fun fetchFolderContents(folderId: String): List<com.google.api.services.drive.model.File> {
+        if (!DesktopNetworkMonitor.isOnline.value) return emptyList()
         val service = driveService ?: return emptyList()
         val resultList = mutableListOf<com.google.api.services.drive.model.File>()
         var pageToken: String? = null
@@ -344,12 +401,13 @@ class DesktopDriveScanner(
 
                 response.files?.let { resultList.addAll(it) }
                 pageToken = response.nextPageToken
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 System.err.println("[DesktopDriveScanner] API error fetching folder contents ($folderId): ${e.message}")
-                e.printStackTrace()
                 break
             }
-        } while (pageToken != null)
+        } while (pageToken != null && DesktopNetworkMonitor.isOnline.value)
 
         return resultList
     }
@@ -458,154 +516,186 @@ class DesktopDriveScanner(
         val cached = DesktopSeriesCache.get(seriesFolderId)
         if (cached != null) return@withContext cached
 
+        if (!DesktopNetworkMonitor.isOnline.value) {
+            System.err.println("[DesktopDriveScanner] Device is offline and series is not cached: $seriesTitle")
+            return@withContext DesktopSeries(
+                id = seriesFolderId,
+                title = seriesTitle,
+                backdropUrl = "",
+                posterUrl = "",
+                tagline = "",
+                synopsis = "",
+                genres = "Series",
+                releaseYear = "",
+                seasons = emptyList()
+            )
+        }
+
         println("[DesktopDriveScanner] Fast first-time scan for series: $seriesTitle")
 
-        // 1. Fetch Google Drive folder hierarchy and Batch TVMaze metadata in parallel
-        val metadataDeferred = async(Dispatchers.IO) {
-            DesktopOnlineMetadataResolver.resolveSeriesBatch(seriesTitle)
-        }
+        try {
+            // 1. Fetch Google Drive folder hierarchy and Batch TVMaze metadata in parallel
+            val metadataDeferred = async(Dispatchers.IO) {
+                DesktopOnlineMetadataResolver.resolveSeriesBatch(seriesTitle)
+            }
 
-        val folderItems = fetchFolderContents(seriesFolderId)
-        val seasonFolders = folderItems.filter {
-            it.mimeType == "application/vnd.google-apps.folder" ||
-            (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
-        }.sortedBy { it.name }
+            val folderItems = fetchFolderContents(seriesFolderId)
+            val seasonFolders = folderItems.filter {
+                it.mimeType == "application/vnd.google-apps.folder" ||
+                (it.mimeType == "application/vnd.google-apps.shortcut" && it.shortcutDetails?.targetMimeType == "application/vnd.google-apps.folder")
+            }.sortedBy { it.name }
 
-        val seriesMeta = metadataDeferred.await()
+            val seriesMeta = metadataDeferred.await()
 
-        // 2. Fetch all season subfolders concurrently
-        val seasons = coroutineScope {
-            if (seasonFolders.isNotEmpty()) {
-                seasonFolders.mapIndexed { index, sFolder ->
-                    async(Dispatchers.IO) {
-                        val sId = resolveTargetId(sFolder)
-                        val sName = sFolder.name ?: "Season ${index + 1}"
-                        val sNum = DesktopOnlineMetadataResolver.parseSeasonNumber(sName, index + 1)
-                        val epFiles = fetchFolderContents(sId).filter {
-                            it.mimeType?.startsWith("video/") == true ||
-                            it.name.endsWith(".mkv", true) ||
-                            it.name.endsWith(".mp4", true)
-                        }
+            // 2. Fetch all season subfolders concurrently
+            val seasons = coroutineScope {
+                if (seasonFolders.isNotEmpty()) {
+                    seasonFolders.mapIndexed { index, sFolder ->
+                        async(Dispatchers.IO) {
+                            val sId = resolveTargetId(sFolder)
+                            val sName = sFolder.name ?: "Season ${index + 1}"
+                            val sNum = DesktopOnlineMetadataResolver.parseSeasonNumber(sName, index + 1)
+                            val epFiles = fetchFolderContents(sId).filter {
+                                it.mimeType?.startsWith("video/") == true ||
+                                it.name.endsWith(".mkv", true) ||
+                                it.name.endsWith(".mp4", true)
+                            }
 
-                        val episodes = epFiles.mapIndexed { epIndex, epFile ->
-                            val epId = resolveTargetId(epFile)
-                            val rawEpName = epFile.name ?: "Episode ${epIndex + 1}"
-                            val epNum = DesktopOnlineMetadataResolver.parseEpisodeNumber(rawEpName, epIndex + 1)
-                            val driveThumb = epFile.thumbnailLink?.replace("s220", "s800")
-                                ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800"
-                            val durMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
+                            val episodes = epFiles.mapIndexed { epIndex, epFile ->
+                                val epId = resolveTargetId(epFile)
+                                val rawEpName = epFile.name ?: "Episode ${epIndex + 1}"
+                                val epNum = DesktopOnlineMetadataResolver.parseEpisodeNumber(rawEpName, epIndex + 1)
+                                val driveThumb = epFile.thumbnailLink?.replace("s220", "s800")
+                                    ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800"
+                                val durMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
 
-                            // Instant O(1) in-memory metadata resolution
-                            val batchMeta = seriesMeta.episodesBySeasonAndNum[Pair(sNum, epNum)]
-                            val epMeta = if (batchMeta == null || batchMeta.thumbnailUrl.isBlank()) {
-                                DesktopOnlineMetadataResolver.resolveEpisode(
-                                    seriesName = seriesTitle,
+                                // Instant O(1) in-memory metadata resolution
+                                val batchMeta = seriesMeta.episodesBySeasonAndNum[Pair(sNum, epNum)]
+                                val epMeta = if (batchMeta == null || batchMeta.thumbnailUrl.isBlank()) {
+                                    DesktopOnlineMetadataResolver.resolveEpisode(
+                                        seriesName = seriesTitle,
+                                        seasonNumber = sNum,
+                                        episodeNumber = epNum,
+                                        rawFileName = rawEpName
+                                    )
+                                } else null
+
+                                val title = batchMeta?.title?.ifBlank { null }
+                                    ?: epMeta?.officialTitle?.ifBlank { null }
+                                    ?: rawEpName.substringBeforeLast(".")
+                                val synopsis = batchMeta?.synopsis?.ifBlank { null }
+                                    ?: epMeta?.synopsis
+                                    ?: ""
+                                val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: (epMeta?.durationMinutes?.times(60_000L) ?: 45L * 60_000L))
+
+                                // Priority: 1. Official TVMaze episode still -> 2. Google Drive video frame snapshot
+                                val officialStill = batchMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                                    ?: epMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                                val resolvedThumbnail = officialStill ?: driveThumb
+
+                                DesktopEpisode(
+                                    id = epId,
+                                    seriesId = seriesFolderId,
+                                    seriesTitle = seriesMeta.title.ifBlank { seriesTitle },
                                     seasonNumber = sNum,
                                     episodeNumber = epNum,
-                                    rawFileName = rawEpName
+                                    title = title,
+                                    synopsis = synopsis,
+                                    durationMs = effectiveDur,
+                                    durationFormatted = "${(effectiveDur / 60000L).coerceAtLeast(1L)} min",
+                                    streamUrl = "",
+                                    thumbnailUrl = resolvedThumbnail
                                 )
-                            } else null
+                            }.sortedBy { it.episodeNumber }
 
-                            val title = batchMeta?.title?.ifBlank { null }
-                                ?: epMeta?.officialTitle?.ifBlank { null }
-                                ?: rawEpName.substringBeforeLast(".")
-                            val synopsis = batchMeta?.synopsis?.ifBlank { null }
-                                ?: epMeta?.synopsis
-                                ?: ""
-                            val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: (epMeta?.durationMinutes?.times(60_000L) ?: 45L * 60_000L))
-
-                            // Priority: 1. Official TVMaze episode still -> 2. Google Drive video frame snapshot
-                            val officialStill = batchMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
-                                ?: epMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
-                            val resolvedThumbnail = officialStill ?: driveThumb
-
-                            DesktopEpisode(
-                                id = epId,
-                                seriesId = seriesFolderId,
-                                seriesTitle = seriesMeta.title.ifBlank { seriesTitle },
-                                seasonNumber = sNum,
-                                episodeNumber = epNum,
-                                title = title,
-                                synopsis = synopsis,
-                                durationMs = effectiveDur,
-                                durationFormatted = "${(effectiveDur / 60000L).coerceAtLeast(1L)} min",
-                                streamUrl = "",
-                                thumbnailUrl = resolvedThumbnail
-                            )
-                        }.sortedBy { it.episodeNumber }
-
-                        DesktopSeason(seasonNumber = sNum, title = sName, episodes = episodes)
+                            DesktopSeason(seasonNumber = sNum, title = sName, episodes = episodes)
+                        }
+                    }.awaitAll().sortedBy { it.seasonNumber }
+                } else {
+                    // Flat series root fallback
+                    val epFiles = folderItems.filter {
+                        it.mimeType?.startsWith("video/") == true || it.name.endsWith(".mkv", true) || it.name.endsWith(".mp4", true)
                     }
-                }.awaitAll().sortedBy { it.seasonNumber }
-            } else {
-                // Flat series root fallback
-                val epFiles = folderItems.filter {
-                    it.mimeType?.startsWith("video/") == true || it.name.endsWith(".mkv", true) || it.name.endsWith(".mp4", true)
-                }
-                val episodes = epFiles.mapIndexed { epIndex, epFile ->
-                    val epId = resolveTargetId(epFile)
-                    val rawEpName = epFile.name ?: "Episode ${epIndex + 1}"
-                    val epNum = DesktopOnlineMetadataResolver.parseEpisodeNumber(rawEpName, epIndex + 1)
-                    val durMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
-                    val driveThumb = epFile.thumbnailLink?.replace("s220", "s800")
-                        ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800"
-                    val batchMeta = seriesMeta.episodesBySeasonAndNum[Pair(1, epNum)]
-                    val epMeta = if (batchMeta == null || batchMeta.thumbnailUrl.isBlank()) {
-                        DesktopOnlineMetadataResolver.resolveEpisode(
-                            seriesName = seriesTitle,
+                    val episodes = epFiles.mapIndexed { epIndex, epFile ->
+                        val epId = resolveTargetId(epFile)
+                        val rawEpName = epFile.name ?: "Episode ${epIndex + 1}"
+                        val epNum = DesktopOnlineMetadataResolver.parseEpisodeNumber(rawEpName, epIndex + 1)
+                        val durMs = epFile.videoMediaMetadata?.durationMillis ?: 0L
+                        val driveThumb = epFile.thumbnailLink?.replace("s220", "s800")
+                            ?: "https://drive.google.com/thumbnail?id=$epId&sz=w800"
+                        val batchMeta = seriesMeta.episodesBySeasonAndNum[Pair(1, epNum)]
+                        val epMeta = if (batchMeta == null || batchMeta.thumbnailUrl.isBlank()) {
+                            DesktopOnlineMetadataResolver.resolveEpisode(
+                                seriesName = seriesTitle,
+                                seasonNumber = 1,
+                                episodeNumber = epNum,
+                                rawFileName = rawEpName
+                            )
+                        } else null
+
+                        val title = batchMeta?.title?.ifBlank { null }
+                            ?: epMeta?.officialTitle?.ifBlank { null }
+                            ?: rawEpName.substringBeforeLast(".")
+                        val synopsis = batchMeta?.synopsis?.ifBlank { null }
+                            ?: epMeta?.synopsis
+                            ?: ""
+                        val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: (epMeta?.durationMinutes?.times(60_000L) ?: 45L * 60_000L))
+
+                        // Priority: 1. Official TVMaze episode still -> 2. Google Drive video frame snapshot
+                        val officialStill = batchMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                            ?: epMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                        val resolvedThumbnail = officialStill ?: driveThumb
+
+                        DesktopEpisode(
+                            id = epId,
+                            seriesId = seriesFolderId,
+                            seriesTitle = seriesMeta.title.ifBlank { seriesTitle },
                             seasonNumber = 1,
                             episodeNumber = epNum,
-                            rawFileName = rawEpName
+                            title = title,
+                            synopsis = synopsis,
+                            durationMs = effectiveDur,
+                            durationFormatted = "${((effectiveDur.takeIf { it > 0 } ?: 2700000L) / 60000L)} min",
+                            streamUrl = "",
+                            thumbnailUrl = resolvedThumbnail
                         )
-                    } else null
+                    }.sortedBy { it.episodeNumber }
 
-                    val title = batchMeta?.title?.ifBlank { null }
-                        ?: epMeta?.officialTitle?.ifBlank { null }
-                        ?: rawEpName.substringBeforeLast(".")
-                    val synopsis = batchMeta?.synopsis?.ifBlank { null }
-                        ?: epMeta?.synopsis
-                        ?: ""
-                    val effectiveDur = if (durMs > 0L) durMs else (batchMeta?.durationMs ?: (epMeta?.durationMinutes?.times(60_000L) ?: 45L * 60_000L))
-
-                    // Priority: 1. Official TVMaze episode still -> 2. Google Drive video frame snapshot
-                    val officialStill = batchMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
-                        ?: epMeta?.thumbnailUrl?.takeIf { it.isNotBlank() }
-                    val resolvedThumbnail = officialStill ?: driveThumb
-
-                    DesktopEpisode(
-                        id = epId,
-                        seriesId = seriesFolderId,
-                        seriesTitle = seriesMeta.title.ifBlank { seriesTitle },
-                        seasonNumber = 1,
-                        episodeNumber = epNum,
-                        title = title,
-                        synopsis = synopsis,
-                        durationMs = effectiveDur,
-                        durationFormatted = "${((effectiveDur.takeIf { it > 0 } ?: 2700000L) / 60000L)} min",
-                        streamUrl = "",
-                        thumbnailUrl = resolvedThumbnail
-                    )
-                }.sortedBy { it.episodeNumber }
-
-                listOf(DesktopSeason(seasonNumber = 1, title = "Season 1", episodes = episodes))
+                    listOf(DesktopSeason(seasonNumber = 1, title = "Season 1", episodes = episodes))
+                }
             }
+
+            val resolved = DesktopSeries(
+                id = seriesFolderId,
+                title = seriesMeta.title.ifBlank { seriesTitle },
+                backdropUrl = seriesMeta.posterUrl,
+                posterUrl = seriesMeta.posterUrl,
+                tagline = "",
+                synopsis = seriesMeta.synopsis,
+                genres = seriesMeta.genres.ifBlank { "Series" },
+                releaseYear = seriesMeta.releaseYear,
+                seasons = seasons
+            )
+
+            DesktopSeriesCache.save(resolved)
+            println("[DesktopDriveScanner] Indexed ${seasons.size} seasons and ${seasons.sumOf { it.episodes.size }} episodes for $seriesTitle in ~1.5s")
+            resolved
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            System.err.println("[DesktopDriveScanner] Error loading series details for $seriesTitle: ${e.message}")
+            DesktopSeries(
+                id = seriesFolderId,
+                title = seriesTitle,
+                backdropUrl = "",
+                posterUrl = "",
+                tagline = "",
+                synopsis = "",
+                genres = "Series",
+                releaseYear = "",
+                seasons = emptyList()
+            )
         }
-
-        val resolved = DesktopSeries(
-            id = seriesFolderId,
-            title = seriesMeta.title.ifBlank { seriesTitle },
-            backdropUrl = seriesMeta.posterUrl,
-            posterUrl = seriesMeta.posterUrl,
-            tagline = "",
-            synopsis = seriesMeta.synopsis,
-            genres = seriesMeta.genres.ifBlank { "Series" },
-            releaseYear = seriesMeta.releaseYear,
-            seasons = seasons
-        )
-
-        DesktopSeriesCache.save(resolved)
-        println("[DesktopDriveScanner] Indexed ${seasons.size} seasons and ${seasons.sumOf { it.episodes.size }} episodes for $seriesTitle in ~1.5s")
-        resolved
     }
 
     private fun extractSeasonNumber(name: String, fallback: Int): Int {

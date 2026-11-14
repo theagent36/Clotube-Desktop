@@ -17,7 +17,7 @@ enum class WatchlistStatus(val label: String) {
 
 enum class WatchlistMediaType(val label: String) {
     MOVIE("Movie"),
-    SERIES("TV Series")
+    SERIES("Series")
 }
 
 data class WatchlistEntry(

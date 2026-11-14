@@ -17,6 +17,8 @@ import com.clotube.desktop.data.DesktopThumbnailPrefetcher
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.data.DesktopWatchlistSync
 import com.clotube.desktop.model.DesktopMediaItem
+import com.clotube.desktop.network.DesktopNetworkMonitor
+import com.clotube.desktop.ui.components.OfflineConnectionPopup
 import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
 import com.clotube.desktop.ui.screens.DesktopLoginScreen
@@ -62,17 +64,38 @@ fun App(
     var rescanTrigger by remember { mutableIntStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
+    val isOnline by DesktopNetworkMonitor.isOnline.collectAsState()
+    val showOfflinePopup by DesktopNetworkMonitor.showOfflinePopup.collectAsState()
+    val isCheckingNow by DesktopNetworkMonitor.isCheckingNow.collectAsState()
+
+    var wasOffline by remember { mutableStateOf(!isOnline) }
+    LaunchedEffect(isOnline) {
+        if (isOnline && wasOffline) {
+            println("[App] Internet connection restored. Triggering silent library rescan...")
+            rescanTrigger++
+        }
+        wasOffline = !isOnline
+    }
+
     // Synchronize Android/Drive Watch History in Background
     LaunchedEffect(activeEmail, authState.accessToken) {
         val email = activeEmail
         val token = authState.accessToken
         if (email.isNotBlank() && token.isNotBlank() && authState.isSignedIn) {
-            DesktopWatchHistorySync.startAutoRecoveryWorker(email) {
-                DesktopAuthManager.getCredential(email)?.accessToken ?: token
-            }
-            withContext(Dispatchers.IO) {
-                DesktopWatchHistorySync.pullAndMerge(email, token)
-                DesktopWatchlistSync.pullRemoteWatchlist(email, token)
+            try {
+                if (DesktopNetworkMonitor.isOnline.value) {
+                    DesktopWatchHistorySync.startAutoRecoveryWorker(email) {
+                        DesktopAuthManager.getCredential(email)?.accessToken ?: token
+                    }
+                    withContext(Dispatchers.IO) {
+                        DesktopWatchHistorySync.pullAndMerge(email, token)
+                        DesktopWatchlistSync.pullRemoteWatchlist(email, token)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                System.err.println("[App] Background sync/scan skipped due to network error: ${e.message}")
             }
         }
     }
@@ -109,6 +132,12 @@ fun App(
             }
 
             try {
+                if (!DesktopNetworkMonitor.isOnline.value) {
+                    System.err.println("[App] Device is offline. Skipping library scan.")
+                    isScanning = false
+                    return@LaunchedEffect
+                }
+
                 val scanner = withContext(Dispatchers.IO) {
                     DesktopDriveScanner(token)
                 }
@@ -181,15 +210,16 @@ fun App(
         }
     }
 
-    Crossfade(
-        targetState = when {
-            !hasSecrets -> "wizard"
-            !authState.isSignedIn -> "login"
-            else -> "home"
-        },
-        animationSpec = tween(durationMillis = 350),
-        label = "AuthSessionCrossfade"
-    ) { screen ->
+    Box(modifier = Modifier.fillMaxSize()) {
+        Crossfade(
+            targetState = when {
+                !hasSecrets -> "wizard"
+                !authState.isSignedIn -> "login"
+                else -> "home"
+            },
+            animationSpec = tween(durationMillis = 350),
+            label = "AuthSessionCrossfade"
+        ) { screen ->
         when (screen) {
             "wizard" -> {
                 DesktopSetupWizardScreen(
@@ -297,6 +327,14 @@ fun App(
             }
         }
     }
+
+    OfflineConnectionPopup(
+        visible = showOfflinePopup,
+        isCheckingNow = isCheckingNow,
+        onRetryNow = { DesktopNetworkMonitor.retryConnectionNow() },
+        onDismiss = { DesktopNetworkMonitor.dismissOfflinePopup() }
+    )
+}
 }
 
 /**

@@ -148,6 +148,28 @@ fun setupLibVlcEnvironment() {
 }
 
 fun main() {
+    // 0. Install Global Uncaught Exception Handler to prevent native Swing Error popups on network drops
+    val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        val isNetworkException = generateSequence(throwable) { it.cause }.any {
+            it is java.net.SocketTimeoutException ||
+            it is java.net.UnknownHostException ||
+            it is java.net.NoRouteToHostException ||
+            it is java.net.SocketException ||
+            it is java.io.IOException
+        }
+        if (isNetworkException) {
+            System.err.println("[Main] Caught network exception safely on thread '${thread.name}': ${throwable.message}")
+        } else {
+            if (defaultHandler != null) {
+                defaultHandler.uncaughtException(thread, throwable)
+            } else {
+                System.err.println("[Main] Uncaught exception on thread '${thread.name}':")
+                throwable.printStackTrace()
+            }
+        }
+    }
+
     setupLibVlcEnvironment()
 
     // 1. Network & DNS Stabilization (Fixes UnknownHostException: www.googleapis.com and api.tvmaze.com)

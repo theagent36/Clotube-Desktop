@@ -23,7 +23,7 @@ object DesktopUpdateManager {
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.0.8"
+    private const val DEV_FALLBACK_VERSION = "2.1.0"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
     private const val CONNECT_TIMEOUT_MS = 25_000
@@ -77,14 +77,15 @@ object DesktopUpdateManager {
             - **Silent GUI Installation:** Background VBScript runner via `wscript.exe` eliminates command prompt window popups and batch file errors during updates.
             - **Next App Boot Scheduling:** Schedules pending updates cleanly to install on the next Clotube launch.
 
-            ### First-Boot Optimization & Playback Readiness
-            - **First-Boot Setup Indicator:** Added a setup spinner below the boot logo on first launch after install, update, or Windows restart.
-            - **Full Parallel LibVLC Caching:** Pre-warms bundled LibVLC DLLs and initializes module bank before entering the Home screen.
+            ### Dedicated Watchlist & Cross-Device Watch Sync
+            - **Watchlist Sidebar Tab:** Filter your library with Studio Obsidian capsule chips (All, Watched, Watch Later, Rewatch, Not in Drive).
+            - **Off-Drive Artwork Derivation:** Add custom movies and TV series not in Google Drive with automatic poster derivation and caching.
+            - **Sticky Watched Status:** Watchlist entries are tracked independently of Drive IDs, preserving watch history if files are moved.
 
-            ### Playback Stability & Watchlist Integration
-            - **Watchlist & Off-Drive Artwork:** Automatic poster thumbnail derivation and caching for custom movies and TV series not in Google Drive.
-            - **Display Sleep Prevention:** Keeps your Windows laptop screen awake automatically while video playback is active.
-            - **Instant Scrubber Sync:** Play Next (`N`) scrubber instant reset and robust watch history synchronization.
+            ### Self-Contained 64-Bit LibVLC Engine & Playback Readiness
+            - **Zero External Dependencies:** Bundled 64-bit LibVLC with pre-indexed plugins.dat—no external VLC installation required.
+            - **First-Boot Setup Indicator:** Pre-warms LibVLC DLLs and initializes module bank before entering the Home screen.
+            - **Hardware-Accelerated Direct3D 11:** Skia GPU CinemaColorFilter contrast correction, thread-safe scrubbing, and display sleep prevention.
         """.trimIndent()
 
         return CachedReleaseNoteEntry(
