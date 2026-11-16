@@ -653,6 +653,46 @@ object DesktopWatchHistoryManager {
         return if (item.positionMs > 1500L) item.positionMs else 0L
     }
 
+    fun getPlaybackDuration(email: String, fileId: String): Long {
+        if (email.isBlank() || fileId.isBlank()) return 0L
+        ensureProfileLoaded(email)
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        val item = activeItemsCache[sanitized]?.get(fileId)
+        if (item != null && item.durationMs > 0L) {
+            return item.durationMs
+        }
+        val resume = seriesResumeCache[sanitized]?.values?.firstOrNull { it.episodeId == fileId }
+        if (resume != null && resume.durationMs > 0L) {
+            return resume.durationMs
+        }
+        return 0L
+    }
+
+    /**
+     * Returns true only if the user has watched at least 1 second (>= 1000ms) of this media item
+     * in watch history. Returns false for new/unwatched episodes so playback can bypass cloud sync.
+     */
+    fun hasSavedWatchProgress(email: String, fileId: String): Boolean {
+        if (email.isBlank() || fileId.isBlank()) return false
+        ensureProfileLoaded(email)
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+
+        val activePos = activeItemsCache[sanitized]?.get(fileId)?.positionMs ?: 0L
+        if (activePos >= 1000L) return true
+
+        val resumePos = seriesResumeCache[sanitized]?.values
+            ?.firstOrNull { it.episodeId == fileId }
+            ?.positionMs ?: 0L
+        if (resumePos >= 1000L) return true
+
+        val archivePos = overflowArchiveCache[sanitized]
+            ?.firstOrNull { it.id == fileId }
+            ?.positionMs ?: 0L
+        if (archivePos >= 1000L) return true
+
+        return false
+    }
+
     fun getContinueWatching(
         email: String,
         movies: List<DesktopMediaItem>,

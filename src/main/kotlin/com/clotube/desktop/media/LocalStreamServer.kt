@@ -119,7 +119,7 @@ object LocalStreamServer {
             parts[0] to (parts.getOrNull(1) ?: "")
         }
         val fileId = params["id"]
-        val tokenParam = params["token"] ?: ""
+        val queryToken = params["token"] ?: ""
 
         if (fileId.isNullOrBlank()) {
             exchange.sendResponseHeaders(400, -1)
@@ -127,10 +127,11 @@ object LocalStreamServer {
             return
         }
 
-        val effectiveToken = try {
-            DesktopAuthManager.getCredential()?.accessToken?.ifBlank { tokenParam } ?: tokenParam
+        val freshToken = try {
+            DesktopAuthManager.getCredential()?.accessToken?.takeIf { it.isNotBlank() }
+                ?: queryToken
         } catch (_: Exception) {
-            tokenParam
+            queryToken
         }
         val clientRange = exchange.requestHeaders.getFirst("Range")
 
@@ -139,7 +140,7 @@ object LocalStreamServer {
         var output: OutputStream? = null
 
         try {
-            conn = openDriveConnection(fileId, effectiveToken, clientRange, exchange.requestMethod)
+            conn = openDriveConnection(fileId, freshToken, clientRange, exchange.requestMethod)
             val responseCode = conn.responseCode
 
             // Always announce byte-range support to LibVLC
@@ -185,17 +186,20 @@ object LocalStreamServer {
                     try {
                         output.write(buffer, 0, read)
                         bytesWritten += read
+                    } catch (e: java.io.IOException) {
+                        // Client closed connection (player switched episodes / closed old stream). Abort immediately.
+                        break
                     } catch (_: Exception) {
-                        // LibVLC disconnected (e.g. user scrubbed elsewhere). Cleanly abort.
                         break
                     }
                 } else if (read == -2) {
                     // Try to reconnect if network dropped mid-stream
                     try { currentInput?.close() } catch (_: Exception) {}
-                    val freshToken = try {
-                        DesktopAuthManager.getCredential()?.accessToken ?: effectiveToken
+                    val retryToken = try {
+                        DesktopAuthManager.getCredential()?.accessToken?.takeIf { it.isNotBlank() }
+                            ?: queryToken
                     } catch (_: Exception) {
-                        effectiveToken
+                        queryToken
                     }
                     val startOffset = if (!clientRange.isNullOrBlank()) {
                         val start = clientRange.removePrefix("bytes=").substringBefore('-').toLongOrNull() ?: 0L
@@ -209,7 +213,7 @@ object LocalStreamServer {
                     for (attempt in 1..20) {
                         try {
                             Thread.sleep(1500L)
-                            val retryConn = openDriveConnection(fileId, freshToken, resumeRange, exchange.requestMethod)
+                            val retryConn = openDriveConnection(fileId, retryToken, resumeRange, exchange.requestMethod)
                             if (retryConn.responseCode in 200..299) {
                                 currentInput = retryConn.inputStream
                                 conn = retryConn
@@ -223,8 +227,10 @@ object LocalStreamServer {
                     if (!reconnected) break
                 }
             }
+        } catch (e: java.io.IOException) {
+            // Client closed connection (e.g. player switched episodes / closed old stream)
         } catch (e: Exception) {
-            // Client closed connection during scrub
+            // Client closed connection during scrub or network dropped
         } finally {
             try { currentInput?.close() } catch (_: Exception) {}
             try { output?.close() } catch (_: Exception) {}

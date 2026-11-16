@@ -23,7 +23,7 @@ object DesktopUpdateManager {
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.1.0"
+    private const val DEV_FALLBACK_VERSION = "2.1.1"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
     private const val CONNECT_TIMEOUT_MS = 25_000
@@ -70,28 +70,34 @@ object DesktopUpdateManager {
     }
 
     private fun getEmbeddedLatestRelease(version: String): CachedReleaseNoteEntry {
+        val targetVersion = if (version.isBlank() || version == "2.0.9" || version == "2.1.1") "2.1.1" else version
+        val title = if (targetVersion == "2.1.1") {
+            "Playback Stability, Offline Resilience & UI Polish"
+        } else {
+            "What's New in Clotube v$targetVersion"
+        }
+
         val body = """
-            ### Resilient In-App Updater & Seamless Installation
-            - **IPv4 Connection Priority & Auto-Retry:** Resolves dual-stack connection stalls and connects reliably over IPv4 with up to 5 progressive retries.
-            - **HTTP Range Resumption:** Automatically resumes partial `.msi` downloads instead of restarting from zero.
-            - **Silent GUI Installation:** Background VBScript runner via `wscript.exe` eliminates command prompt window popups and batch file errors during updates.
-            - **Next App Boot Scheduling:** Schedules pending updates cleanly to install on the next Clotube launch.
+            ### Fullscreen Playback & Episode-Switching Fixes
+            - **Fullscreen Next-Episode Transition Fix:** Eliminated the native LibVLC teardown/initialization race and keyboard focus loss when pressing `N` or clicking **Next Episode** / **Play Next** while in fullscreen—ensuring the outgoing player releases sequentially before starting the next episode and automatically re-acquiring keyboard focus.
+            - **Dynamic OAuth Token Refresh & Stream Watchdog:** `LocalStreamServer` now resolves fresh Google Drive OAuth credentials dynamically on every `/stream` connection and range-resume retry (preventing HTTP 401 stalls during extended fullscreen binge sessions), paired with a 3.5-second stream-start watchdog (`restartStream`) that automatically recovers transient proxy handoffs.
+            - **Immediate Controls, Scrubber & Smooth 320ms Fade-In:** Player HUD controls and the timeline scrubber now render immediately once watch-history sync completes—displaying the exact resume timestamp and duration even while `"Loading video..."` finishes buffering—and smoothly dissolve the pitch-black loading overlay over 320ms into the first decoded frame with zero duplicate spinners.
+            - **Synchronous Unwatched Fast-Path & Progress Guard:** Unwatched episodes bypass redundant Drive history sync waits to display `"Loading video..."` on Frame 0, while `boundMediaId` strictly isolates progress tracking so rapid episode switching never falsely marks the incoming episode as watched.
+            - **60+ FPS Draw-Scope Rendering & Fullscreen Toggle Stability:** Bound video frame ticks directly inside Compose's `Canvas` draw scope and switched to immutable per-frame bitmaps to prevent native Skiko memory access violations (`0xc0000005`) when entering or exiting fullscreen.
 
-            ### Dedicated Watchlist & Cross-Device Watch Sync
-            - **Watchlist Sidebar Tab:** Filter your library with Studio Obsidian capsule chips (All, Watched, Watch Later, Rewatch, Not in Drive).
-            - **Off-Drive Artwork Derivation:** Add custom movies and TV series not in Google Drive with automatic poster derivation and caching.
-            - **Sticky Watched Status:** Watchlist entries are tracked independently of Drive IDs, preserving watch history if files are moved.
+            ### Offline Resilience & Automatic Reconnection
+            - **Zero-Crash Offline Handling:** Guarded all Google Drive directory lookups, library scans, and background sync coroutines against `SocketTimeoutException`, `UnknownHostException`, and `IOException`, eliminating uncaught coroutine crashes and native Windows Swing `Error` popups when internet connectivity drops.
+            - **10s × 5-Attempt Auto-Reconnect & Animated Offline Modal:** Added `DesktopNetworkMonitor` to probe internet reachability and automatically retry every **10 seconds (up to 5 attempts)** upon disconnection—presenting a spring-animated **Offline Connection** modal if still offline, with one-click **Retry**, **Continue Offline**, and automatic silent library and watch-history resync as soon as connectivity returns.
 
-            ### Self-Contained 64-Bit LibVLC Engine & Playback Readiness
-            - **Zero External Dependencies:** Bundled 64-bit LibVLC with pre-indexed plugins.dat—no external VLC installation required.
-            - **First-Boot Setup Indicator:** Pre-warms LibVLC DLLs and initializes module bank before entering the Home screen.
-            - **Hardware-Accelerated Direct3D 11:** Skia GPU CinemaColorFilter contrast correction, thread-safe scrubbing, and display sleep prevention.
+            ### UI & Navigation Polish
+            - **Live Online / Offline Top-Bar Status Badge:** Wired the top-right status capsule to `DesktopNetworkMonitor` so it dynamically transitions between green **Online** and crimson **Offline** indicators in real time.
+            - **Cleaner Sidebar & Unified "Series" Naming:** Removed the redundant 3-bar menu icon next to the **Clotube** logo in the sidebar and standardized all remaining `"TV Series"` labels, Watchlist filters, and breadcrumbs to **"Series"**.
         """.trimIndent()
 
         return CachedReleaseNoteEntry(
-            version = version,
-            tagName = "v$version",
-            title = "What's New in Clotube v$version",
+            version = targetVersion,
+            tagName = if (targetVersion == "2.1.1") "v2.1.1" else "v$targetVersion",
+            title = title,
             body = body
         )
     }

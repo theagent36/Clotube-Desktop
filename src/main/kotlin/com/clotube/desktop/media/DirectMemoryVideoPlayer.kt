@@ -138,10 +138,10 @@ class DirectMemoryVideoPlayer(
     private var nativePitch: Int = 0
 
     private val nativeLifecycleLock = Any()
-    private val disposedFlag = AtomicBoolean(false)
+    private val isReleased = AtomicBoolean(false)
 
     val isDisposed: Boolean
-        get() = disposedFlag.get()
+        get() = isReleased.get()
     private val hasAppliedPreferences = AtomicBoolean(false)
     private val hasAppliedInitialSeek = AtomicBoolean(false)
     private val asyncExecutor = Executors.newSingleThreadScheduledExecutor()
@@ -266,11 +266,11 @@ class DirectMemoryVideoPlayer(
             },
             object : RenderCallback {
                 override fun display(mp: MediaPlayer, nativeBuffers: Array<out ByteBuffer>, bufferFormat: BufferFormat) {
-                    if (isDisposed || nativeBuffers.isEmpty()) return
+                    if (isReleased.get() || isDisposed || nativeBuffers.isEmpty()) return
                     val directBuf = nativeBuffers[0]
 
                     synchronized(frameLock) {
-                        if (isDisposed) return
+                        if (isReleased.get() || isDisposed) return
                         val info = imageInfo ?: return
                         val writeBytes = if (useBufferA) pixelBufferA else pixelBufferB
                         val writeBmp = if (useBufferA) skiaBitmapA else skiaBitmapB
@@ -319,6 +319,7 @@ class DirectMemoryVideoPlayer(
 
         mediaPlayer.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
             override fun playing(mp: MediaPlayer) {
+                if (isReleased.get()) return
                 updatePlayingState(true)
                 isBuffering = false
 
@@ -342,32 +343,39 @@ class DirectMemoryVideoPlayer(
             }
 
             override fun videoOutput(mp: MediaPlayer, newCount: Int) {
+                if (isReleased.get()) return
                 if (newCount > 0) {
                     LibVlcLiveSubScale.applyLiveScale(mp, currentSubtitleScalePercent)
                 }
             }
 
             override fun buffering(mp: MediaPlayer, newCache: Float) {
+                if (isReleased.get()) return
                 isBuffering = newCache < 100.0f
             }
 
             override fun paused(mp: MediaPlayer) {
+                if (isReleased.get()) return
                 updatePlayingState(false)
             }
 
             override fun stopped(mp: MediaPlayer) {
+                if (isReleased.get()) return
                 updatePlayingState(false)
             }
 
             override fun finished(mp: MediaPlayer) {
+                if (isReleased.get()) return
                 updatePlayingState(false)
             }
 
             override fun error(mp: MediaPlayer) {
+                if (isReleased.get()) return
                 updatePlayingState(false)
             }
 
             override fun timeChanged(mp: MediaPlayer, newTime: Long) {
+                if (isReleased.get()) return
                 if (!isResumeSeekSettled && targetResumeMs > 1500L) {
                     val minAcceptableMs = (targetResumeMs - 3000L).coerceAtLeast(1500L)
                     if (newTime >= minAcceptableMs) {
@@ -386,6 +394,7 @@ class DirectMemoryVideoPlayer(
             }
 
             override fun lengthChanged(mp: MediaPlayer, newLength: Long) {
+                if (isReleased.get()) return
                 if (newLength > 0L) {
                     totalDurationMs = newLength
                     if (!isResumeSeekSettled && targetResumeMs > 1500L) {
@@ -396,6 +405,7 @@ class DirectMemoryVideoPlayer(
             }
 
             override fun positionChanged(mp: MediaPlayer, newPosition: Float) {
+                if (isReleased.get()) return
                 if (!isResumeSeekSettled && targetResumeMs > 1500L) {
                     if (totalDurationMs > 0L) {
                         positionFraction = (targetResumeMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
@@ -625,7 +635,7 @@ class DirectMemoryVideoPlayer(
 
     fun addSafeEventListener(listener: uk.co.caprica.vlcj.player.base.MediaPlayerEventListener): Boolean {
         synchronized(nativeLifecycleLock) {
-            if (disposedFlag.get()) return false
+            if (isReleased.get()) return false
             return try {
                 mediaPlayer.events().addMediaPlayerEventListener(listener)
                 true
@@ -637,7 +647,7 @@ class DirectMemoryVideoPlayer(
 
     fun removeSafeEventListener(listener: uk.co.caprica.vlcj.player.base.MediaPlayerEventListener) {
         synchronized(nativeLifecycleLock) {
-            if (disposedFlag.get()) return
+            if (isReleased.get()) return
             try {
                 mediaPlayer.events().removeMediaPlayerEventListener(listener)
             } catch (_: Throwable) {}
@@ -645,8 +655,8 @@ class DirectMemoryVideoPlayer(
     }
 
     fun release() {
+        if (!isReleased.compareAndSet(false, true)) return
         WindowsScreenWakeLock.setPlaybackActive(this, false)
-        if (!disposedFlag.compareAndSet(false, true)) return
         pendingScaleFuture?.cancel(false)
         subScaleExecutor.shutdownNow()
         asyncExecutor.shutdownNow()
@@ -679,6 +689,31 @@ class DirectMemoryVideoPlayer(
         }, "Clotube-VLC-Release").apply {
             isDaemon = true
             start()
+        }
+    }
+
+    fun restartStream(newMediaUrl: String, seekMs: Long = 0L) {
+        if (isReleased.get()) return
+        try {
+            if (mediaPlayer.status().isPlaying) {
+                mediaPlayer.controls().stop()
+            }
+        } catch (_: Throwable) {}
+
+        isBuffering = true
+        val mediaArgs = mutableListOf(
+            ":network-caching=2500",
+            ":file-caching=1500",
+            ":http-reconnect=true",
+            ":sub-text-scale=$currentSubtitleScalePercent"
+        )
+        if (seekMs > 1500L) {
+            mediaArgs.add(":start-time=${seekMs / 1000L}")
+        }
+        try {
+            mediaPlayer.media().play(newMediaUrl, *mediaArgs.toTypedArray())
+        } catch (t: Throwable) {
+            System.err.println("[DirectMemoryVideoPlayer] restartStream failed: ${t.message}")
         }
     }
 

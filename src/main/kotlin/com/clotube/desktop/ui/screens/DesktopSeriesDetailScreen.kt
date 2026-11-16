@@ -7,6 +7,15 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import com.clotube.desktop.auth.DesktopAuthManager
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -86,6 +95,7 @@ fun DesktopSeriesDetailScreen(
     accessToken: String,
     userEmail: String = "",
     initialEpisodeId: String? = null,
+    initialSeekMs: Long = 0L,
     isFullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
     onBack: () -> Unit,
@@ -300,46 +310,71 @@ fun DesktopSeriesDetailScreen(
     val prevEpisode = if (hasPrevGlobal) allEpisodes[globalEpIndex - 1] else null
 
     val activeStreamUrl = remember(activeEpisode?.id, accessToken) {
-        activeEpisode?.let { ep ->
-            if (ep.streamUrl.isNotBlank()) ep.streamUrl else LocalStreamServer.getStreamUrl(ep.id, accessToken)
-        } ?: ""
+        val ep = activeEpisode
+        if (ep != null && ep.id.isNotBlank()) {
+            val port = LocalStreamServer.start()
+            val token = DesktopAuthManager.getCredential()?.accessToken?.takeIf { it.isNotBlank() } ?: accessToken
+            "http://127.0.0.1:$port/stream?id=${ep.id}&token=$token"
+        } else ""
     }
 
     val cinemaColor = DesktopAppSettings.state.cinemaColorEnhancement
     val shouldResume = DesktopAppSettings.state.resumePlayback
 
+    fun episodeRequiresDriveSync(ep: DesktopEpisode?): Boolean {
+        if (ep == null || !DesktopAppSettings.state.resumePlayback || userEmail.isBlank()) return false
+        val hasExplicitSeek = (ep.id == initialEpisodeId && initialSeekMs >= 1000L)
+        return hasExplicitSeek || DesktopWatchHistoryManager.hasSavedWatchProgress(userEmail, ep.id)
+    }
+
     // 1. Resolve saved position for the active episode from Google Drive watch history BEFORE creating player
-    var isDriveTimestampLoaded by remember(activeEpisode?.id) { mutableStateOf(false) }
-    var resolvedInitialSeekMs by remember(activeEpisode?.id) { mutableLongStateOf(0L) }
+    val needsDriveHistorySync = episodeRequiresDriveSync(activeEpisode)
+
+    var isDriveTimestampLoaded by remember(activeEpisode?.id) {
+        mutableStateOf(!needsDriveHistorySync)
+    }
+    var resolvedInitialSeekMs by remember(activeEpisode?.id) {
+        mutableLongStateOf(0L)
+    }
+    var resolvedInitialDurationMs by remember(activeEpisode?.id) {
+        mutableLongStateOf(activeEpisode?.durationMs?.coerceAtLeast(0L) ?: 0L)
+    }
 
     LaunchedEffect(activeEpisode?.id, userEmail) {
         val ep = activeEpisode ?: return@LaunchedEffect
-        isDriveTimestampLoaded = false
-        val resumeEnabled = DesktopAppSettings.state.resumePlayback
-        if (!resumeEnabled || userEmail.isBlank()) {
+
+        if (!episodeRequiresDriveSync(ep)) {
+            // New episode (< 1s watched): skip "Syncing watch history..." and Drive pull completely
             resolvedInitialSeekMs = 0L
+            resolvedInitialDurationMs = ep.durationMs.coerceAtLeast(0L)
             isDriveTimestampLoaded = true
             return@LaunchedEffect
         }
 
-        val targetSeek = withContext(Dispatchers.IO) {
+        isDriveTimestampLoaded = false
+        val (targetSeek, targetDur) = withContext(Dispatchers.IO) {
             if (accessToken.isNotBlank() && DesktopWatchHistorySync.isInternetAvailable()) {
                 withTimeoutOrNull(4000L) {
                     DesktopWatchHistorySync.pullAndMerge(userEmail, accessToken)
                 }
             }
-            DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
+            val syncedPos = DesktopWatchHistoryManager.getPlaybackPosition(userEmail, ep.id)
+            val syncedDur = DesktopWatchHistoryManager.getPlaybackDuration(userEmail, ep.id)
+            val fallbackSeek = if (ep.id == initialEpisodeId && initialSeekMs >= 1000L) initialSeekMs else 0L
+            val finalSeek = if (syncedPos >= 1000L) syncedPos else fallbackSeek
+            val finalDur = if (syncedDur > 0L) syncedDur else ep.durationMs.coerceAtLeast(0L)
+            finalSeek to finalDur
         }
 
         if (activeEpisode?.id == ep.id) {
             resolvedInitialSeekMs = targetSeek
+            resolvedInitialDurationMs = targetDur
             isDriveTimestampLoaded = true
         }
     }
 
-    var player by remember(activeEpisode?.id, activeStreamUrl, cinemaColor) {
-        mutableStateOf<DirectMemoryVideoPlayer?>(null)
-    }
+    var player by remember { mutableStateOf<DirectMemoryVideoPlayer?>(null) }
+    var pendingReleasePlayer by remember { mutableStateOf<DirectMemoryVideoPlayer?>(null) }
 
     var subtitleScalePercent by remember {
         mutableIntStateOf(DesktopAppSettings.state.subtitleScalePercent)
@@ -361,16 +396,30 @@ fun DesktopSeriesDetailScreen(
         }
     }
 
-    LaunchedEffect(activeEpisode?.id, activeStreamUrl, isDriveTimestampLoaded, cinemaColor) {
+    LaunchedEffect(activeEpisode?.id, activeStreamUrl, isDriveTimestampLoaded, subtitleScalePercent, cinemaColor) {
         val targetEp = activeEpisode ?: return@LaunchedEffect
+
+        // 1. Complete teardown of any previous player on Dispatchers.IO BEFORE initializing the next player
+        val toRelease = pendingReleasePlayer
+        pendingReleasePlayer = null
+        if (toRelease != null) {
+            withContext(Dispatchers.IO) {
+                try {
+                    toRelease.release()
+                } catch (_: Throwable) {}
+            }
+        }
+
         if (!isDriveTimestampLoaded || activeStreamUrl.isBlank()) return@LaunchedEffect
         if (player != null) return@LaunchedEffect
+
         delay(60L)
         if (!isActive || activeEpisode?.id != targetEp.id) return@LaunchedEffect
+        val initialSeekTarget = resolvedInitialSeekMs
         try {
             player = DirectMemoryVideoPlayer(
                 mediaUrl = activeStreamUrl,
-                initialSeekMs = resolvedInitialSeekMs,
+                initialSeekMs = initialSeekTarget,
                 boundMediaId = targetEp.id
             )
         } catch (t: Throwable) {
@@ -421,6 +470,17 @@ fun DesktopSeriesDetailScreen(
         // Flush outgoing episode progress while activeEpisode & player still match
         saveActiveEpisodeProgress(false)
 
+        val outgoing = player
+        player = null
+        if (outgoing != null) {
+            pendingReleasePlayer = outgoing
+        }
+
+        val requiresSync = episodeRequiresDriveSync(targetEpisode)
+        isDriveTimestampLoaded = !requiresSync
+        resolvedInitialSeekMs = 0L
+        resolvedInitialDurationMs = targetEpisode.durationMs.coerceAtLeast(0L)
+
         if (targetEpisode.seasonNumber != selectedSeasonNumber) {
             selectedSeasonNumber = targetEpisode.seasonNumber
         }
@@ -445,153 +505,113 @@ fun DesktopSeriesDetailScreen(
     DisposableEffect(Unit) {
         onDispose {
             saveActiveEpisodeProgress(false)
+            val p = player
+            val pending = pendingReleasePlayer
+            player = null
+            pendingReleasePlayer = null
+            Thread({
+                try { p?.release() } catch (_: Throwable) {}
+                try { pending?.release() } catch (_: Throwable) {}
+            }, "Clotube-SeriesDetail-Dispose").apply {
+                isDaemon = true
+                start()
+            }
         }
     }
 
-    DisposableEffect(player) {
-        val activePlayer = player
-        onDispose {
-            activePlayer?.release()
+    val handleNextEpisode: (() -> Unit)? = if (hasNextGlobal && nextEpisode != null) {
+        {
+            activeEpisode?.let { currentEp ->
+                watchedEpisodeIds = watchedEpisodeIds + currentEp.id
+                coroutineScope.launch {
+                    DesktopWatchHistoryManager.setEpisodeWatched(
+                        email = userEmail,
+                        fileId = currentEp.id,
+                        isWatched = true,
+                        seriesId = series.id,
+                        seasonNumber = currentEp.seasonNumber,
+                        episodeNumber = currentEp.episodeNumber,
+                        title = currentEp.title,
+                        durationMs = currentEp.durationMs
+                    )
+                    // Advance series resume pointer to next episode
+                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                        email = userEmail,
+                        fileId = nextEpisode.id,
+                        title = nextEpisode.title,
+                        positionMs = 0L,
+                        durationMs = nextEpisode.durationMs,
+                        isSeries = true,
+                        seriesId = series.id,
+                        seasonNumber = nextEpisode.seasonNumber,
+                        episodeNumber = nextEpisode.episodeNumber
+                    )
+                    DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                }
+            }
+            switchToEpisode(nextEpisode)
         }
-    }
+    } else null
+
+    val handlePreviousEpisode: (() -> Unit)? = if (hasPrevGlobal && prevEpisode != null) {
+        {
+            switchToEpisode(prevEpisode)
+        }
+    } else null
 
     // Fullscreen Cinema Overlay
     if (isFullscreen) {
-        val activeP = player
-        if (activeP != null) {
-            DesktopSeriesPlayerScreen(
-                player = activeP,
-                currentEpisode = activeEpisode ?: currentEpisode,
-                seriesTitle = series.title,
-                episodeTitle = activeEpisode?.title ?: "",
-                seasonNumber = activeEpisode?.seasonNumber ?: 1,
-                episodeNumber = activeEpisode?.episodeNumber ?: 1,
-                nextEpisodeTitle = nextEpisode?.title ?: "",
-                nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
-                nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
-                initialSeekMs = resolvedInitialSeekMs,
-                isDriveTimestampLoaded = isDriveTimestampLoaded,
-                onInitialSeekApplied = null,
-                onProgressUpdate = { currentPos ->
-                    activeEpisode?.let { ep ->
-                        val p = player
-                        if (!isDriveTimestampLoaded) return@let
-                        if (p == null || !p.isTargetFrameReady) return@let
-                        if (p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
-                        DesktopWatchHistoryManager.recordPlaybackProgress(
-                            email = userEmail,
-                            fileId = ep.id,
-                            title = ep.title,
-                            positionMs = currentPos,
-                            durationMs = ep.durationMs,
-                            isSeries = true,
-                            seriesId = series.id,
-                            seasonNumber = ep.seasonNumber,
-                            episodeNumber = ep.episodeNumber
-                        )
-                        // Quiet background sync to Drive
-                        if (accessToken.isNotBlank()) {
-                            progressSaveScope.launch {
-                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-                            }
+        DesktopSeriesPlayerScreen(
+            player = player,
+            currentEpisode = activeEpisode ?: currentEpisode,
+            seriesTitle = series.title,
+            episodeTitle = activeEpisode?.title ?: "",
+            seasonNumber = activeEpisode?.seasonNumber ?: 1,
+            episodeNumber = activeEpisode?.episodeNumber ?: 1,
+            nextEpisodeTitle = nextEpisode?.title ?: "",
+            nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
+            nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
+            initialSeekMs = resolvedInitialSeekMs,
+            initialDurationMs = resolvedInitialDurationMs,
+            isDriveTimestampLoaded = isDriveTimestampLoaded,
+            onInitialSeekApplied = null,
+            onProgressUpdate = { currentPos ->
+                activeEpisode?.let { ep ->
+                    val p = player
+                    if (!isDriveTimestampLoaded) return@let
+                    if (p == null || !p.isTargetFrameReady) return@let
+                    if (p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
+                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                        email = userEmail,
+                        fileId = ep.id,
+                        title = ep.title,
+                        positionMs = currentPos,
+                        durationMs = ep.durationMs,
+                        isSeries = true,
+                        seriesId = series.id,
+                        seasonNumber = ep.seasonNumber,
+                        episodeNumber = ep.episodeNumber
+                    )
+                    // Quiet background sync to Drive
+                    if (accessToken.isNotBlank()) {
+                        progressSaveScope.launch {
+                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
                         }
                     }
-                },
-                isFullscreen = true,
-                onToggleFullscreen = onToggleFullscreen,
-                onNavigateBack = {
-                    saveActiveEpisodeProgress()
-                    onToggleFullscreen()
-                },
-                onNextEpisode = if (hasNextGlobal && nextEpisode != null) {
-                    {
-                        activeEpisode?.let { currentEp ->
-                            watchedEpisodeIds = watchedEpisodeIds + currentEp.id
-                            coroutineScope.launch {
-                                DesktopWatchHistoryManager.setEpisodeWatched(
-                                    email = userEmail,
-                                    fileId = currentEp.id,
-                                    isWatched = true,
-                                    seriesId = series.id,
-                                    seasonNumber = currentEp.seasonNumber,
-                                    episodeNumber = currentEp.episodeNumber,
-                                    title = currentEp.title,
-                                    durationMs = currentEp.durationMs
-                                )
-                                // Advance series resume pointer to next episode
-                                DesktopWatchHistoryManager.recordPlaybackProgress(
-                                    email = userEmail,
-                                    fileId = nextEpisode.id,
-                                    title = nextEpisode.title,
-                                    positionMs = 0L,
-                                    durationMs = nextEpisode.durationMs,
-                                    isSeries = true,
-                                    seriesId = series.id,
-                                    seasonNumber = nextEpisode.seasonNumber,
-                                    episodeNumber = nextEpisode.episodeNumber
-                                )
-                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
-                            }
-                        }
-                        switchToEpisode(nextEpisode)
-                    }
-                } else null,
-                onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
-                    {
-                        switchToEpisode(prevEpisode)
-                    }
-                } else null,
-                hasNextEpisode = hasNextGlobal,
-                hasPreviousEpisode = hasPrevGlobal,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF06080C)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    PacedLoadingSpinner(
-                        color = Color(0xFF38BDF8),
-                        modifier = Modifier.size(46.dp),
-                        strokeWidth = 3.5.dp
-                    )
-                    Text(
-                        text = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video...",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
                 }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.TopStart
-                ) {
-                    IconButton(
-                        onClick = onToggleFullscreen,
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(Color(0x660F172A))
-                            .pointerHoverIcon(PointerIcon.Hand)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                            contentDescription = "Exit Fullscreen",
-                            tint = Color.White
-                        )
-                    }
-                }
-            }
-        }
+            },
+            isFullscreen = true,
+            onToggleFullscreen = onToggleFullscreen,
+            onNavigateBack = {
+                saveActiveEpisodeProgress()
+                onToggleFullscreen()
+            },
+            onNextEpisode = handleNextEpisode,
+            onPreviousEpisode = handlePreviousEpisode,
+            hasNextEpisode = hasNextGlobal,
+            hasPreviousEpisode = hasPrevGlobal,
+            modifier = Modifier.fillMaxSize()
+        )
         return
     }
 
@@ -632,10 +652,35 @@ fun DesktopSeriesDetailScreen(
         )
     }
 
+    val screenFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        try {
+            screenFocusRequester.requestFocus()
+        } catch (_: Throwable) {}
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF06080C)),
+            .background(Color(0xFF06080C))
+            .focusRequester(screenFocusRequester)
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.N -> {
+                            nextEpisode?.let { switchToEpisode(it) }
+                            true
+                        }
+                        Key.P -> {
+                            prevEpisode?.let { switchToEpisode(it) }
+                            true
+                        }
+                        else -> false
+                    }
+                } else false
+            },
         contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 12.dp, bottom = 48.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
@@ -942,114 +987,57 @@ fun DesktopSeriesDetailScreen(
                                 }
                             )
                     ) {
-                        val activeP = player
-                        if (activeP != null) {
-                            DesktopSeriesPlayerScreen(
-                                player = activeP,
-                                currentEpisode = activeEpisode ?: currentEpisode,
-                                seriesTitle = series.title,
-                                episodeTitle = activeEpisode?.title ?: "",
-                                seasonNumber = activeEpisode?.seasonNumber ?: 1,
-                                episodeNumber = activeEpisode?.episodeNumber ?: 1,
-                                nextEpisodeTitle = nextEpisode?.title ?: "",
-                                nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
-                                nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
-                                initialSeekMs = resolvedInitialSeekMs,
-                                isDriveTimestampLoaded = isDriveTimestampLoaded,
-                                onInitialSeekApplied = null,
-                                onProgressUpdate = { currentPos ->
-                                    activeEpisode?.let { ep ->
-                                        val p = player
-                                        if (!isDriveTimestampLoaded) return@let
-                                        if (p == null || !p.isTargetFrameReady) return@let
-                                        if (p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
-                                        DesktopWatchHistoryManager.recordPlaybackProgress(
-                                            email = userEmail,
-                                            fileId = ep.id,
-                                            title = ep.title,
-                                            positionMs = currentPos,
-                                            durationMs = ep.durationMs,
-                                            isSeries = true,
-                                            seriesId = series.id,
-                                            seasonNumber = ep.seasonNumber,
-                                            episodeNumber = ep.episodeNumber
-                                        )
-                                        // Quiet background sync to Drive
-                                        if (accessToken.isNotBlank()) {
-                                            progressSaveScope.launch {
-                                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-                                            }
+                        DesktopSeriesPlayerScreen(
+                            player = player,
+                            currentEpisode = activeEpisode ?: currentEpisode,
+                            seriesTitle = series.title,
+                            episodeTitle = activeEpisode?.title ?: "",
+                            seasonNumber = activeEpisode?.seasonNumber ?: 1,
+                            episodeNumber = activeEpisode?.episodeNumber ?: 1,
+                            nextEpisodeTitle = nextEpisode?.title ?: "",
+                            nextSeasonNumber = nextEpisode?.seasonNumber ?: 1,
+                            nextEpisodeNumber = nextEpisode?.episodeNumber ?: 1,
+                            initialSeekMs = resolvedInitialSeekMs,
+                            initialDurationMs = resolvedInitialDurationMs,
+                            isDriveTimestampLoaded = isDriveTimestampLoaded,
+                            onInitialSeekApplied = null,
+                            onProgressUpdate = { currentPos ->
+                                activeEpisode?.let { ep ->
+                                    val p = player
+                                    if (!isDriveTimestampLoaded) return@let
+                                    if (p == null || !p.isTargetFrameReady) return@let
+                                    if (p.boundMediaId.isNotEmpty() && p.boundMediaId != ep.id) return@let
+                                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                                        email = userEmail,
+                                        fileId = ep.id,
+                                        title = ep.title,
+                                        positionMs = currentPos,
+                                        durationMs = ep.durationMs,
+                                        isSeries = true,
+                                        seriesId = series.id,
+                                        seasonNumber = ep.seasonNumber,
+                                        episodeNumber = ep.episodeNumber
+                                    )
+                                    // Quiet background sync to Drive
+                                    if (accessToken.isNotBlank()) {
+                                        progressSaveScope.launch {
+                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
                                         }
                                     }
-                                },
-                                isFullscreen = false,
-                                onToggleFullscreen = onToggleFullscreen,
-                                onNavigateBack = {
-                                    saveActiveEpisodeProgress()
-                                    onBack()
-                                },
-                                onNextEpisode = if (hasNextGlobal && nextEpisode != null) {
-                                    {
-                                        activeEpisode?.let { currentEp ->
-                                            watchedEpisodeIds = watchedEpisodeIds + currentEp.id
-                                            coroutineScope.launch {
-                                                DesktopWatchHistoryManager.setEpisodeWatched(
-                                                    email = userEmail,
-                                                    fileId = currentEp.id,
-                                                    isWatched = true,
-                                                    seriesId = series.id,
-                                                    seasonNumber = currentEp.seasonNumber,
-                                                    episodeNumber = currentEp.episodeNumber,
-                                                    title = currentEp.title,
-                                                    durationMs = currentEp.durationMs
-                                                )
-                                                // Advance series resume pointer to next episode
-                                                DesktopWatchHistoryManager.recordPlaybackProgress(
-                                                    email = userEmail,
-                                                    fileId = nextEpisode.id,
-                                                    title = nextEpisode.title,
-                                                    positionMs = 0L,
-                                                    durationMs = nextEpisode.durationMs,
-                                                    isSeries = true,
-                                                    seriesId = series.id,
-                                                    seasonNumber = nextEpisode.seasonNumber,
-                                                    episodeNumber = nextEpisode.episodeNumber
-                                                )
-                                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
-                                            }
-                                        }
-                                        switchToEpisode(nextEpisode)
-                                    }
-                                } else null,
-                                onPreviousEpisode = if (hasPrevGlobal && prevEpisode != null) {
-                                    {
-                                        switchToEpisode(prevEpisode)
-                                    }
-                                } else null,
-                                hasNextEpisode = hasNextGlobal,
-                                hasPreviousEpisode = hasPrevGlobal,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                                ) {
-                                    PacedLoadingSpinner(
-                                        color = Color(0xFF38BDF8),
-                                        modifier = Modifier.size(46.dp),
-                                        strokeWidth = 3.5.dp
-                                    )
-                                    Text(
-                                        text = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video...",
-                                        color = Color(0xFF94A3B8),
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
                                 }
-                            }
-                        }
+                            },
+                            isFullscreen = false,
+                            onToggleFullscreen = onToggleFullscreen,
+                            onNavigateBack = {
+                                saveActiveEpisodeProgress()
+                                onBack()
+                            },
+                            onNextEpisode = handleNextEpisode,
+                            onPreviousEpisode = handlePreviousEpisode,
+                            hasNextEpisode = hasNextGlobal,
+                            hasPreviousEpisode = hasPrevGlobal,
+                            modifier = Modifier.fillMaxSize()
+                        )
 
                         SubtitleScaleOsdBadge(
                             scalePercent = subtitleScalePercent,

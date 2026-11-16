@@ -1,9 +1,11 @@
 package com.clotube.desktop.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -89,16 +91,43 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.ui.input.pointer.PointerEventPass
+import java.awt.AWTEvent
+import java.awt.Container
 import java.awt.Cursor
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
 import java.awt.Point
 import java.awt.Toolkit
+import java.awt.Window
+import java.awt.event.AWTEventListener
 import java.awt.event.KeyEvent
+import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+private fun applyPlayerWindowCursor(targetCursor: Cursor) {
+    try {
+        for (win in Window.getWindows()) {
+            if (win.isDisplayable) {
+                win.cursor = targetCursor
+                if (win is Container) {
+                    for (child in win.components) {
+                        child.cursor = targetCursor
+                        if (child is Container) {
+                            for (grandChild in child.components) {
+                                grandChild.cursor = targetCursor
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (_: Throwable) {}
+}
 
 data class DesktopMovieItem(
     val id: String,
@@ -146,29 +175,40 @@ fun DesktopMoviePlayerScreen(
     var showSubtitleScaleOsd by remember { mutableStateOf(false) }
     var subtitleScaleTrigger by remember { mutableIntStateOf(0) }
 
-    var isDriveTimestampLoaded by remember(currentPlayingMovie.id) { mutableStateOf(false) }
+    fun movieRequiresDriveSync(movieId: String): Boolean {
+        if (!DesktopAppSettings.state.resumePlayback || userEmail.isBlank() || movieId.isBlank()) return false
+        val hasExplicitSeek = initialSeekMs >= 1000L
+        return hasExplicitSeek || DesktopWatchHistoryManager.hasSavedWatchProgress(userEmail, movieId)
+    }
+
+    val needsDriveHistorySync = movieRequiresDriveSync(currentPlayingMovie.id)
+    var isDriveTimestampLoaded by remember(currentPlayingMovie.id) { mutableStateOf(!needsDriveHistorySync) }
     var resolvedInitialSeekMs by remember(currentPlayingMovie.id) { mutableLongStateOf(0L) }
+    var resolvedInitialDurationMs by remember(currentPlayingMovie.id) { mutableLongStateOf(0L) }
 
     LaunchedEffect(currentPlayingMovie.id, userEmail) {
-        isDriveTimestampLoaded = false
-        val resumeEnabled = DesktopAppSettings.state.resumePlayback
-        if (!resumeEnabled || userEmail.isBlank()) {
+        if (!movieRequiresDriveSync(currentPlayingMovie.id)) {
             resolvedInitialSeekMs = 0L
+            resolvedInitialDurationMs = 0L
             isDriveTimestampLoaded = true
             return@LaunchedEffect
         }
 
-        val targetSeek = withContext(Dispatchers.IO) {
+        isDriveTimestampLoaded = false
+        val (targetSeek, targetDur) = withContext(Dispatchers.IO) {
             if (accessToken.isNotBlank() && DesktopWatchHistorySync.isInternetAvailable()) {
                 withTimeoutOrNull(4000L) {
                     DesktopWatchHistorySync.pullAndMerge(userEmail, accessToken)
                 }
             }
             val syncedPos = DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)
-            if (syncedPos > 1500L) syncedPos else initialSeekMs.coerceAtLeast(0L)
+            val syncedDur = DesktopWatchHistoryManager.getPlaybackDuration(userEmail, currentPlayingMovie.id)
+            val finalPos = if (syncedPos > 1500L) syncedPos else initialSeekMs.coerceAtLeast(0L)
+            finalPos to syncedDur.coerceAtLeast(0L)
         }
 
         resolvedInitialSeekMs = targetSeek
+        resolvedInitialDurationMs = targetDur
         isDriveTimestampLoaded = true
     }
 
@@ -193,10 +233,47 @@ fun DesktopMoviePlayerScreen(
     }
 
     val activePlayer = player
-    val areVideoControlsReady = isDriveTimestampLoaded &&
+    val isVideoFrameReady = isDriveTimestampLoaded &&
         activePlayer != null &&
         activePlayer.isTargetFrameReady &&
         (activePlayer.boundMediaId.isEmpty() || activePlayer.boundMediaId == currentPlayingMovie.id)
+
+    // Controls & scrubber appear immediately once Google Drive timestamp details are fetched
+    val areVideoControlsReady = isDriveTimestampLoaded
+
+    // Watch-history recording remains strictly locked until the actual video frame at the target timestamp is playing
+    val canRecordPlaybackProgress = isVideoFrameReady
+
+    val shouldShowInitialOverlay = !isVideoFrameReady
+    val movieInitialOverlayState = remember(currentPlayingMovie.id) {
+        MutableTransitionState(shouldShowInitialOverlay)
+    }
+    movieInitialOverlayState.targetState = shouldShowInitialOverlay
+    val isMovieInitialOverlayActive = movieInitialOverlayState.currentState || movieInitialOverlayState.targetState
+
+    val currentMovieLoadingLabel = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video..."
+    var displayedMovieLoadingLabel by remember(currentPlayingMovie.id) { mutableStateOf(currentMovieLoadingLabel) }
+    if (shouldShowInitialOverlay) {
+        displayedMovieLoadingLabel = currentMovieLoadingLabel
+    }
+
+    val effectiveCurrentTimeMs: () -> Long = {
+        val p = activePlayer
+        if (p != null && p.isTargetFrameReady) {
+            p.currentTimeMs
+        } else {
+            resolvedInitialSeekMs
+        }
+    }
+
+    val effectiveTotalDurationMs: () -> Long = {
+        val p = activePlayer
+        when {
+            p != null && p.totalDurationMs > 0L -> p.totalDurationMs
+            resolvedInitialDurationMs > 0L -> resolvedInitialDurationMs
+            else -> 0L
+        }
+    }
 
     LaunchedEffect(DesktopAppSettings.state.subtitleScalePercent) {
         val newScale = DesktopAppSettings.state.subtitleScalePercent
@@ -218,7 +295,7 @@ fun DesktopMoviePlayerScreen(
     // Periodic Progress Recording (every 5 seconds during playback, and on pause)
     val saveMovieProgress = {
         val p = activePlayer
-        if (areVideoControlsReady && p != null) {
+        if (canRecordPlaybackProgress && p != null) {
             val curMs = p.currentTimeMs
             val durMs = p.totalDurationMs
             if (curMs > 1000L && userEmail.isNotBlank()) {
@@ -243,9 +320,9 @@ fun DesktopMoviePlayerScreen(
         }
     }
 
-    LaunchedEffect(activePlayer?.isPlaying, areVideoControlsReady, currentPlayingMovie.id, userEmail) {
+    LaunchedEffect(activePlayer?.isPlaying, canRecordPlaybackProgress, currentPlayingMovie.id, userEmail) {
         val p = activePlayer ?: return@LaunchedEffect
-        if (!areVideoControlsReady) return@LaunchedEffect
+        if (!canRecordPlaybackProgress) return@LaunchedEffect
         if (p.isPlaying && userEmail.isNotBlank()) {
             while (isActive) {
                 delay(5000L)
@@ -258,17 +335,17 @@ fun DesktopMoviePlayerScreen(
 
     DisposableEffect(activePlayer) {
         onDispose {
-            if (areVideoControlsReady) {
+            if (canRecordPlaybackProgress) {
                 saveMovieProgress()
             }
             activePlayer?.release()
         }
     }
 
-    var controlsVisible by remember(currentPlayingMovie.id) { mutableStateOf(false) }
+    var controlsVisible by remember(currentPlayingMovie.id) { mutableStateOf(true) }
 
-    LaunchedEffect(areVideoControlsReady) {
-        if (areVideoControlsReady) {
+    LaunchedEffect(areVideoControlsReady, isVideoFrameReady) {
+        if (areVideoControlsReady && !isVideoFrameReady) {
             controlsVisible = true
         }
     }
@@ -304,10 +381,10 @@ fun DesktopMoviePlayerScreen(
         }
     }
 
-    // Auto-hide controls timer (paused if a menu is open or scrubbing)
-    LaunchedEffect(controlsVisible, activePlayer?.isPlaying, isScrubbing, activePopup, areVideoControlsReady) {
+    // Auto-hide controls timer (paused if a menu is open or scrubbing, only active once video frame is ready)
+    LaunchedEffect(controlsVisible, activePlayer?.isPlaying, isScrubbing, activePopup, areVideoControlsReady, isVideoFrameReady) {
         val isPlaying = activePlayer?.isPlaying == true
-        if (areVideoControlsReady && controlsVisible && isPlaying && !isScrubbing && activePopup == PlayerPopupType.NONE) {
+        if (areVideoControlsReady && isVideoFrameReady && controlsVisible && isPlaying && !isScrubbing && activePopup == PlayerPopupType.NONE) {
             delay(3500L)
             controlsVisible = false
         }
@@ -323,23 +400,59 @@ fun DesktopMoviePlayerScreen(
     val defaultCursor = remember { Cursor.getDefaultCursor() }
     val hiddenPointerIcon = remember(invisibleCursor) { PointerIcon(invisibleCursor) }
 
-    val isCursorHidden = areVideoControlsReady && !controlsVisible && (activePlayer?.isPlaying == true) && !isScrubbing && activePopup == PlayerPopupType.NONE
+    val isCursorHidden = areVideoControlsReady &&
+        isVideoFrameReady &&
+        !controlsVisible &&
+        (activePlayer?.isPlaying == true) &&
+        !isScrubbing &&
+        activePopup == PlayerPopupType.NONE
 
-    // Instantly sync the AWT window cursor when controls toggle
-    LaunchedEffect(isCursorHidden) {
-        try {
-            val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
-            activeWin?.cursor = if (isCursorHidden) invisibleCursor else defaultCursor
-        } catch (_: Throwable) {}
+    LaunchedEffect(isCursorHidden, isFullscreen) {
+        applyPlayerWindowCursor(if (isCursorHidden) invisibleCursor else defaultCursor)
     }
 
-    // Ensure cursor is restored when leaving the video player screen
+    val wakeControlsAndCursor by rememberUpdatedState {
+        if (!controlsVisible) {
+            controlsVisible = true
+        }
+        applyPlayerWindowCursor(defaultCursor)
+    }
+
     DisposableEffect(Unit) {
+        var lastX = Int.MIN_VALUE
+        var lastY = Int.MIN_VALUE
+        val awtMouseListener = AWTEventListener { event ->
+            if (event is MouseEvent) {
+                when (event.id) {
+                    MouseEvent.MOUSE_MOVED, MouseEvent.MOUSE_DRAGGED -> {
+                        val dx = if (lastX == Int.MIN_VALUE) 999 else abs(event.xOnScreen - lastX)
+                        val dy = if (lastY == Int.MIN_VALUE) 999 else abs(event.yOnScreen - lastY)
+                        lastX = event.xOnScreen
+                        lastY = event.yOnScreen
+                        if (dx >= 2 || dy >= 2) {
+                            wakeControlsAndCursor()
+                        }
+                    }
+                    MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_CLICKED -> {
+                        lastX = event.xOnScreen
+                        lastY = event.yOnScreen
+                        wakeControlsAndCursor()
+                    }
+                }
+            }
+        }
+        try {
+            Toolkit.getDefaultToolkit().addAWTEventListener(
+                awtMouseListener,
+                AWTEvent.MOUSE_MOTION_EVENT_MASK or AWTEvent.MOUSE_EVENT_MASK
+            )
+        } catch (_: Throwable) {}
+
         onDispose {
             try {
-                val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
-                activeWin?.cursor = defaultCursor
+                Toolkit.getDefaultToolkit().removeAWTEventListener(awtMouseListener)
             } catch (_: Throwable) {}
+            applyPlayerWindowCursor(defaultCursor)
         }
     }
 
@@ -352,11 +465,7 @@ fun DesktopMoviePlayerScreen(
                 val p = activePlayer
                 if (areVideoControlsReady && p != null) {
                     // Any key interaction makes controls and cursor visible
-                    controlsVisible = true
-                    try {
-                        val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
-                        activeWin?.cursor = defaultCursor
-                    } catch (_: Throwable) {}
+                    wakeControlsAndCursor()
 
                     when (e.keyCode) {
                         KeyEvent.VK_LEFT -> {
@@ -430,16 +539,12 @@ fun DesktopMoviePlayerScreen(
             .fillMaxSize()
             .background(Color(0xFF07090E))
             .pointerHoverIcon(if (isCursorHidden) hiddenPointerIcon else PointerIcon.Default)
-            .pointerInput(Unit) {
+            .pointerInput(isFullscreen, currentPlayingMovie.id) {
                 awaitPointerEventScope {
                     while (true) {
-                        val event = awaitPointerEvent()
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
                         if (event.type == PointerEventType.Move || event.type == PointerEventType.Press) {
-                            controlsVisible = true
-                            try {
-                                val activeWin = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
-                                activeWin?.cursor = defaultCursor
-                            } catch (_: Throwable) {}
+                            wakeControlsAndCursor()
                         }
                     }
                 }
@@ -497,45 +602,39 @@ fun DesktopMoviePlayerScreen(
                     }
                 }
 
-                if (!areVideoControlsReady) {
-                    Box(modifier = Modifier.fillMaxSize()) {
+                // 1. Initial Load Overlay (Instant pure-black mount, smooth 320ms fade-out into first frame)
+                AnimatedVisibility(
+                    visibleState = movieInitialOverlayState,
+                    enter = EnterTransition.None,
+                    exit = fadeOut(animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing)),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Column(
-                            modifier = Modifier.align(Alignment.Center),
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
                             PacedBufferingSpinner(
                                 color = Color(0xFF38BDF8),
                                 size = 46.dp
                             )
                             Text(
-                                text = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video...",
+                                text = displayedMovieLoadingLabel,
                                 color = Color(0xFF94A3B8),
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium
                             )
                         }
-
-                        // Minimal top-left Exit/Back button so the user is never trapped
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 24.dp, vertical = 20.dp)
-                                .align(Alignment.TopStart),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(
-                                onClick = onToggleFullscreen,
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                    .pointerHoverIcon(PointerIcon.Hand)
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Exit Fullscreen", tint = Color.White)
-                            }
-                        }
                     }
-                } else if (activePlayer?.isBuffering == true) {
+                }
+
+                // 2. Mid-Playback Buffering Indicator (Strictly blocked until initial overlay fade-out finishes)
+                if (!isMovieInitialOverlayActive && activePlayer?.isBuffering == true) {
                     PacedBufferingSpinner(
                         color = Color(0xFF38BDF8),
                         size = 46.dp,
@@ -543,7 +642,7 @@ fun DesktopMoviePlayerScreen(
                     )
                 }
 
-                if (areVideoControlsReady && activePlayer != null) {
+                if (areVideoControlsReady) {
                     // Left (-10) Indicator
                     SeekFeedbackIndicator(
                         direction = SeekFeedbackDirection.REWIND,
@@ -610,23 +709,30 @@ fun DesktopMoviePlayerScreen(
                             // Bottom Transport Bar
                             BottomTransportBar(
                                 player = activePlayer,
-                                timeMsProvider = { activePlayer.currentTimeMs },
-                                durationMsProvider = { activePlayer.totalDurationMs },
+                                timeMsProvider = effectiveCurrentTimeMs,
+                                durationMsProvider = effectiveTotalDurationMs,
                                 onScrubbingStateChange = { isScrubbing = it },
                                 isFullscreen = true,
                                 currentSpeed = currentSpeed,
                                 activePopup = activePopup,
                                 onTogglePopup = { popup ->
-                                    if (popup == PlayerPopupType.SUBTITLES) {
-                                        if (currentSubtitleId != -99) {
-                                            currentSubtitleId = try { activePlayer.mediaPlayer.subpictures().track() } catch (_: Throwable) { -1 }
+                                    val p = activePlayer
+                                    if (p != null) {
+                                        if (popup == PlayerPopupType.SUBTITLES) {
+                                            if (currentSubtitleId != -99) {
+                                                currentSubtitleId = try { p.mediaPlayer.subpictures().track() } catch (_: Throwable) { -1 }
+                                            }
+                                        } else if (popup == PlayerPopupType.AUDIO) {
+                                            currentAudioId = try { p.mediaPlayer.audio().track() } catch (_: Throwable) { -1 }
                                         }
-                                    } else if (popup == PlayerPopupType.AUDIO) {
-                                        currentAudioId = try { activePlayer.mediaPlayer.audio().track() } catch (_: Throwable) { -1 }
                                     }
                                     activePopup = if (activePopup == popup) PlayerPopupType.NONE else popup
                                 },
                                 onToggleFullscreen = onToggleFullscreen,
+                                onSeek = { targetMs ->
+                                    resolvedInitialSeekMs = targetMs
+                                    activePlayer?.seekToTime(targetMs)
+                                },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .align(Alignment.BottomCenter)
@@ -636,40 +742,42 @@ fun DesktopMoviePlayerScreen(
                     }
 
                     // In-Player Floating Settings Panel (Inside Viewport, Highest Z-Order)
-                    InPlayerSettingsPopup(
-                        activePopup = activePopup,
-                        player = activePlayer,
-                        currentSubtitleId = currentSubtitleId,
-                        currentAudioId = currentAudioId,
-                        currentSpeed = currentSpeed,
-                        onSelectSubtitle = { id ->
-                            currentSubtitleId = id
-                            if (id == -99) {
-                                activePlayer.reactivateExternalSubtitle()
-                            } else {
-                                activePlayer.setSubtitleTrack(id, isOff = (id == -1))
-                            }
-                            activePopup = PlayerPopupType.NONE
-                        },
-                        onSelectAudio = { id ->
-                            currentAudioId = id
-                            activePlayer.mediaPlayer.audio().setTrack(id)
-                            activePopup = PlayerPopupType.NONE
-                        },
-                        onSelectSpeed = { speed ->
-                            currentSpeed = speed
-                            activePlayer.setPlaybackRate(speed)
-                            activePopup = PlayerPopupType.NONE
-                        },
-                        onDismiss = { activePopup = PlayerPopupType.NONE },
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(bottom = 68.dp, end = 24.dp)
-                    )
+                    if (activePlayer != null) {
+                        InPlayerSettingsPopup(
+                            activePopup = activePopup,
+                            player = activePlayer,
+                            currentSubtitleId = currentSubtitleId,
+                            currentAudioId = currentAudioId,
+                            currentSpeed = currentSpeed,
+                            onSelectSubtitle = { id ->
+                                currentSubtitleId = id
+                                if (id == -99) {
+                                    activePlayer.reactivateExternalSubtitle()
+                                } else {
+                                    activePlayer.setSubtitleTrack(id, isOff = (id == -1))
+                                }
+                                activePopup = PlayerPopupType.NONE
+                            },
+                            onSelectAudio = { id ->
+                                currentAudioId = id
+                                activePlayer.mediaPlayer.audio().setTrack(id)
+                                activePopup = PlayerPopupType.NONE
+                            },
+                            onSelectSpeed = { speed ->
+                                currentSpeed = speed
+                                activePlayer.setPlaybackRate(speed)
+                                activePopup = PlayerPopupType.NONE
+                            },
+                            onDismiss = { activePopup = PlayerPopupType.NONE },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 24.dp, bottom = 80.dp)
+                        )
+                    }
 
                     SubtitleCanvasOverlay(
-                        cues = activePlayer.externalSubtitleCues,
-                        currentTimeMs = activePlayer.currentTimeMs,
+                        cues = activePlayer?.externalSubtitleCues ?: emptyList(),
+                        currentTimeMs = activePlayer?.currentTimeMs ?: 0L,
                         scalePercent = subtitleScalePercent,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -772,7 +880,7 @@ fun DesktopMoviePlayerScreen(
                                 .fillMaxWidth()
                                 .aspectRatio(16f / 9.5f)
                         ) {
-                            Box(modifier = Modifier.fillMaxSize()) {
+                            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
                                 val tick = activePlayer?.frameTick ?: 0
                                 val frame = tick.let { activePlayer?.currentFrame }
 
@@ -809,24 +917,39 @@ fun DesktopMoviePlayerScreen(
                                     }
                                 }
 
-                                if (!areVideoControlsReady) {
-                                    Column(
-                                        modifier = Modifier.align(Alignment.Center),
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                                // 1. Initial Load Overlay (Instant pure-black mount, smooth 320ms fade-out into first frame)
+                                androidx.compose.animation.AnimatedVisibility(
+                                    visibleState = movieInitialOverlayState,
+                                    enter = EnterTransition.None,
+                                    exit = fadeOut(animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing)),
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black),
+                                        contentAlignment = Alignment.Center
                                     ) {
-                                        PacedBufferingSpinner(
-                                            color = Color(0xFF38BDF8),
-                                            size = 46.dp
-                                        )
-                                        Text(
-                                            text = if (!isDriveTimestampLoaded) "Syncing watch history..." else "Loading video...",
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium
-                                        )
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                                        ) {
+                                            PacedBufferingSpinner(
+                                                color = Color(0xFF38BDF8),
+                                                size = 46.dp
+                                            )
+                                            Text(
+                                                text = displayedMovieLoadingLabel,
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
                                     }
-                                } else if (activePlayer?.isBuffering == true) {
+                                }
+
+                                // 2. Mid-Playback Buffering Indicator (Strictly blocked until initial overlay fade-out finishes)
+                                if (!isMovieInitialOverlayActive && activePlayer?.isBuffering == true) {
                                     PacedBufferingSpinner(
                                         color = Color(0xFF38BDF8),
                                         size = 46.dp,
@@ -834,7 +957,7 @@ fun DesktopMoviePlayerScreen(
                                     )
                                 }
 
-                                if (areVideoControlsReady && activePlayer != null) {
+                                if (areVideoControlsReady) {
                                     // Left (-10) Indicator
                                     SeekFeedbackIndicator(
                                         direction = SeekFeedbackDirection.REWIND,
@@ -867,29 +990,37 @@ fun DesktopMoviePlayerScreen(
                                     ) {
                                         BottomTransportBar(
                                             player = activePlayer,
-                                            timeMsProvider = { activePlayer.currentTimeMs },
-                                            durationMsProvider = { activePlayer.totalDurationMs },
+                                            timeMsProvider = effectiveCurrentTimeMs,
+                                            durationMsProvider = effectiveTotalDurationMs,
                                             onScrubbingStateChange = { isScrubbing = it },
                                             isFullscreen = false,
                                             currentSpeed = currentSpeed,
                                             activePopup = activePopup,
                                             onTogglePopup = { popup ->
-                                                if (popup == PlayerPopupType.SUBTITLES) {
-                                                    if (currentSubtitleId != -99) {
-                                                        currentSubtitleId = try { activePlayer.mediaPlayer.subpictures().track() } catch (_: Throwable) { -1 }
+                                                val p = activePlayer
+                                                if (p != null) {
+                                                    if (popup == PlayerPopupType.SUBTITLES) {
+                                                        if (currentSubtitleId != -99) {
+                                                            currentSubtitleId = try { p.mediaPlayer.subpictures().track() } catch (_: Throwable) { -1 }
+                                                        }
+                                                    } else if (popup == PlayerPopupType.AUDIO) {
+                                                        currentAudioId = try { p.mediaPlayer.audio().track() } catch (_: Throwable) { -1 }
                                                     }
-                                                } else if (popup == PlayerPopupType.AUDIO) {
-                                                    currentAudioId = try { activePlayer.mediaPlayer.audio().track() } catch (_: Throwable) { -1 }
                                                 }
                                                 activePopup = if (activePopup == popup) PlayerPopupType.NONE else popup
                                             },
                                             onToggleFullscreen = onToggleFullscreen,
+                                            onSeek = { targetMs ->
+                                                resolvedInitialSeekMs = targetMs
+                                                activePlayer?.seekToTime(targetMs)
+                                            },
                                             modifier = Modifier.fillMaxWidth()
                                         )
                                     }
 
                                     // IN-PLAYER FLOATING SETTINGS MENU (Renders strictly inside the 16:9.5 viewport above transport bar)
-                                    InPlayerSettingsPopup(
+                                    if (activePlayer != null) {
+                                        InPlayerSettingsPopup(
                                         activePopup = activePopup,
                                         player = activePlayer,
                                         currentSubtitleId = currentSubtitleId,
@@ -931,6 +1062,7 @@ fun DesktopMoviePlayerScreen(
                                 }
                             }
                         }
+                    }
 
                         Spacer(modifier = Modifier.height(18.dp))
 
@@ -1612,10 +1744,11 @@ private fun IsolatedPlayerTimecode(
 
 @Composable
 private fun IsolatedPlayerScrubber(
-    player: DirectMemoryVideoPlayer,
+    player: DirectMemoryVideoPlayer?,
     timeMsProvider: () -> Long,
     durationMsProvider: () -> Long,
     onScrubbingStateChange: ((Boolean) -> Unit)? = null,
+    onSeek: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var isScrubbing by remember { mutableStateOf(false) }
@@ -1657,10 +1790,10 @@ private fun IsolatedPlayerScrubber(
     }
 
     val onValueChangeFinished: () -> Unit = {
-        val totalDur = if (durationMsProvider() > 0L) durationMsProvider() else player.mediaPlayer.status().length()
+        val totalDur = durationMsProvider()
         if (totalDur > 0L) {
             val targetMs = (scrubProgress * totalDur).toLong()
-            player.seekToTime(targetMs)
+            if (onSeek != null) onSeek(targetMs) else player?.seekToTime(targetMs)
         }
         isScrubbing = false
         onScrubbingStateChange?.invoke(false)
@@ -1673,7 +1806,7 @@ private fun IsolatedPlayerScrubber(
     ) {
         val containerWidthPx = with(density) { maxWidth.toPx() }
         val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
-        val isSeekable = player.isFirstFrameRendered && durationMsProvider() > 0L
+        val isSeekable = durationMsProvider() > 0L
 
         Box(
             modifier = Modifier
@@ -1815,7 +1948,7 @@ private fun IsolatedPlayerScrubber(
 
 @Composable
 private fun BottomTransportBar(
-    player: DirectMemoryVideoPlayer,
+    player: DirectMemoryVideoPlayer?,
     timeMsProvider: () -> Long,
     durationMsProvider: () -> Long,
     onScrubbingStateChange: (Boolean) -> Unit,
@@ -1824,6 +1957,7 @@ private fun BottomTransportBar(
     activePopup: PlayerPopupType,
     onTogglePopup: (PlayerPopupType) -> Unit,
     onToggleFullscreen: () -> Unit,
+    onSeek: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier) {
@@ -1832,7 +1966,8 @@ private fun BottomTransportBar(
             player = player,
             timeMsProvider = timeMsProvider,
             durationMsProvider = durationMsProvider,
-            onScrubbingStateChange = onScrubbingStateChange
+            onScrubbingStateChange = onScrubbingStateChange,
+            onSeek = onSeek
         )
 
         Spacer(modifier = Modifier.height(2.dp))
@@ -1856,8 +1991,9 @@ private fun BottomTransportBar(
                     onClick = {
                         val currentMs = timeMsProvider()
                         val totalMs = durationMsProvider()
-                        if (player.isFirstFrameRendered && totalMs > 0L) {
-                            player.seekToTime((currentMs - stepMs).coerceIn(0L, totalMs))
+                        if (totalMs > 0L) {
+                            val newTime = (currentMs - stepMs).coerceIn(0L, totalMs)
+                            if (onSeek != null) onSeek(newTime) else player?.seekToTime(newTime)
                         }
                     },
                     icon = when (seekSec) {
@@ -1886,7 +2022,7 @@ private fun BottomTransportBar(
                 )
 
                 IconButton(
-                    onClick = { player.togglePlayPause() },
+                    onClick = { player?.togglePlayPause() },
                     interactionSource = playInteraction,
                     modifier = Modifier
                         .size(32.dp)
@@ -1897,7 +2033,7 @@ private fun BottomTransportBar(
                         .pointerHoverIcon(PointerIcon.Hand)
                 ) {
                     Icon(
-                        imageVector = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        imageVector = if (player?.isPlaying == true) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = "Play/Pause",
                         tint = Color.White,
                         modifier = Modifier.size(24.dp)
@@ -1909,8 +2045,9 @@ private fun BottomTransportBar(
                     onClick = {
                         val currentMs = timeMsProvider()
                         val totalMs = durationMsProvider()
-                        if (player.isFirstFrameRendered && totalMs > 0L) {
-                            player.seekToTime((currentMs + stepMs).coerceIn(0L, totalMs))
+                        if (totalMs > 0L) {
+                            val newTime = (currentMs + stepMs).coerceIn(0L, totalMs)
+                            if (onSeek != null) onSeek(newTime) else player?.seekToTime(newTime)
                         }
                     },
                     icon = when (seekSec) {
@@ -1927,13 +2064,18 @@ private fun BottomTransportBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    val isMuted = player?.isMuted == true || (player?.volume ?: 100) == 0
+                    val vol = player?.volume ?: 100
                     IconButton(
                         onClick = {
-                            if (player.isMuted || player.volume == 0) {
-                                player.setMuted(false)
-                                if (player.volume == 0) player.setVolumeLevel(100)
-                            } else {
-                                player.setMuted(true)
+                            val p = player
+                            if (p != null) {
+                                if (p.isMuted || p.volume == 0) {
+                                    p.setMuted(false)
+                                    if (p.volume == 0) p.setVolumeLevel(100)
+                                } else {
+                                    p.setMuted(true)
+                                }
                             }
                         },
                         modifier = Modifier
@@ -1942,8 +2084,8 @@ private fun BottomTransportBar(
                     ) {
                         Icon(
                             imageVector = when {
-                                player.isMuted || player.volume == 0 -> Icons.AutoMirrored.Filled.VolumeMute
-                                player.volume < 50 -> Icons.AutoMirrored.Filled.VolumeDown
+                                isMuted -> Icons.AutoMirrored.Filled.VolumeMute
+                                vol < 50 -> Icons.AutoMirrored.Filled.VolumeDown
                                 else -> Icons.AutoMirrored.Filled.VolumeUp
                             },
                             contentDescription = "Volume",
@@ -1953,8 +2095,8 @@ private fun BottomTransportBar(
                     }
 
                     SlickVolumeSlider(
-                        volume = if (player.isMuted) 0 else player.volume,
-                        onVolumeChange = { newVol -> player.setVolumeLevel(newVol) },
+                        volume = if (player?.isMuted == true) 0 else (player?.volume ?: 100),
+                        onVolumeChange = { newVol -> player?.setVolumeLevel(newVol) },
                         modifier = Modifier.padding(end = 4.dp)
                     )
                 }
