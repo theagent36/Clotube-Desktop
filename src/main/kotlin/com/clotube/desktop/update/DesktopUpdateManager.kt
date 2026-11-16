@@ -8,14 +8,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.Inet4Address
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.net.ProxySelector
+import java.net.URI
 import java.net.URL
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLSocketFactory
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.time.Duration
 import kotlin.system.exitProcess
 
 object DesktopUpdateManager {
@@ -26,8 +27,8 @@ object DesktopUpdateManager {
     private const val DEV_FALLBACK_VERSION = "2.1.1"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
-    private const val CONNECT_TIMEOUT_MS = 25_000
-    private const val READ_TIMEOUT_MS = 30_000
+    private const val CONNECT_TIMEOUT_SEC = 20L
+    private const val STALL_TIMEOUT_MS = 30_000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var activeDownloadJob: Job? = null
@@ -465,6 +466,10 @@ object DesktopUpdateManager {
                     }
                 )
 
+                if (release.msiSizeBytes > 0L && tempFile.length() != release.msiSizeBytes) {
+                    throw IOException("Incomplete download (${tempFile.length()} / ${release.msiSizeBytes} bytes)")
+                }
+
                 if (targetFile.exists()) targetFile.delete()
                 if (!tempFile.renameTo(targetFile)) {
                     tempFile.copyTo(targetFile, overwrite = true)
@@ -495,59 +500,6 @@ object DesktopUpdateManager {
                 )
             }
         }
-    }
-
-    private suspend fun downloadWithAutoRetry(
-        initialUrl: String,
-        destination: File,
-        expectedTotalBytes: Long,
-        onStatus: (statusText: String, downloaded: Long, total: Long) -> Unit,
-        onProgress: (downloaded: Long, total: Long) -> Unit
-    ) {
-        val backoffDelaysMs = longArrayOf(1200L, 2500L, 4000L, 6000L)
-        var lastError: Exception? = null
-
-        for (attempt in 1..MAX_DOWNLOAD_ATTEMPTS) {
-            currentCoroutineContext().ensureActive()
-            val existingBytes = if (destination.exists()) destination.length() else 0L
-
-            if (attempt == 1) {
-                onStatus("Connecting to GitHub release server…", existingBytes, expectedTotalBytes)
-            } else {
-                onStatus(
-                    "Connection slow — retrying automatically (attempt $attempt of $MAX_DOWNLOAD_ATTEMPTS)…",
-                    existingBytes,
-                    expectedTotalBytes
-                )
-            }
-
-            try {
-                downloadFileWithRedirects(
-                    initialUrl = initialUrl,
-                    destination = destination,
-                    expectedTotalBytes = expectedTotalBytes,
-                    onProgress = onProgress
-                )
-                return
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                lastError = e
-                System.err.println("[DesktopUpdateManager] Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: ${e.message}")
-                if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
-                    val waitMs = backoffDelaysMs[(attempt - 1).coerceAtMost(backoffDelaysMs.lastIndex)]
-                    val currentBytes = if (destination.exists()) destination.length() else 0L
-                    onStatus(
-                        "Timed out — retrying in ${waitMs / 1000}s (attempt ${attempt + 1} of $MAX_DOWNLOAD_ATTEMPTS)…",
-                        currentBytes,
-                        expectedTotalBytes
-                    )
-                    delay(waitMs)
-                }
-            }
-        }
-
-        throw lastError ?: IOException("Connect timed out")
     }
 
     fun cancelDownload() {
@@ -778,155 +730,248 @@ object DesktopUpdateManager {
         }
     }
 
-    private suspend fun downloadFileWithRedirects(
+    private suspend fun downloadWithAutoRetry(
+        initialUrl: String,
+        destination: File,
+        expectedTotalBytes: Long,
+        onStatus: (statusText: String, downloaded: Long, total: Long) -> Unit,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) {
+        val backoffDelaysMs = longArrayOf(1200L, 2000L, 3000L, 4500L)
+        var lastError: Exception? = null
+
+        for (attempt in 1..MAX_DOWNLOAD_ATTEMPTS) {
+            currentCoroutineContext().ensureActive()
+            val existingBytes = if (destination.exists()) destination.length() else 0L
+            val useNativeCurl = attempt >= 3 && isWindowsCurlAvailable()
+
+            if (attempt == 1) {
+                onStatus("Connecting to GitHub release server…", existingBytes, expectedTotalBytes)
+            } else if (useNativeCurl) {
+                onStatus(
+                    "Switching to Windows native downloader (attempt $attempt of $MAX_DOWNLOAD_ATTEMPTS)…",
+                    existingBytes,
+                    expectedTotalBytes
+                )
+            } else {
+                onStatus(
+                    "Connection slow — retrying automatically (attempt $attempt of $MAX_DOWNLOAD_ATTEMPTS)…",
+                    existingBytes,
+                    expectedTotalBytes
+                )
+            }
+
+            try {
+                if (useNativeCurl) {
+                    downloadWithWindowsCurl(
+                        initialUrl = initialUrl,
+                        destination = destination,
+                        expectedTotalBytes = expectedTotalBytes,
+                        onProgress = onProgress
+                    )
+                } else {
+                    downloadWithJdkHttpClient(
+                        initialUrl = initialUrl,
+                        destination = destination,
+                        expectedTotalBytes = expectedTotalBytes,
+                        onProgress = onProgress
+                    )
+                }
+
+                if (!destination.exists() || destination.length() <= 0L) {
+                    throw IOException("Downloaded file is empty")
+                }
+                if (expectedTotalBytes > 0L && destination.length() != expectedTotalBytes) {
+                    throw IOException(
+                        "Incomplete download (${destination.length()} / $expectedTotalBytes bytes)"
+                    )
+                }
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                val reason = (e.message ?: e.javaClass.simpleName).take(70)
+                System.err.println("[DesktopUpdateManager] Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: $reason")
+                if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
+                    val waitMs = backoffDelaysMs[(attempt - 1).coerceAtMost(backoffDelaysMs.lastIndex)]
+                    val currentBytes = if (destination.exists()) destination.length() else 0L
+                    onStatus(
+                        "$reason — retrying in ${waitMs / 1000}s (attempt ${attempt + 1} of $MAX_DOWNLOAD_ATTEMPTS)…",
+                        currentBytes,
+                        expectedTotalBytes
+                    )
+                    delay(waitMs)
+                }
+            }
+        }
+
+        throw lastError ?: IOException("Unable to download update from GitHub")
+    }
+
+    private suspend fun downloadWithJdkHttpClient(
         initialUrl: String,
         destination: File,
         expectedTotalBytes: Long,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
-        var currentUrl = initialUrl
-        var redirects = 0
         var resumeOffset = if (destination.exists()) destination.length() else 0L
-
         if (expectedTotalBytes > 0L && resumeOffset >= expectedTotalBytes) {
+            if (resumeOffset == expectedTotalBytes) return
             destination.delete()
             resumeOffset = 0L
         }
 
-        while (redirects < 8) {
-            currentCoroutineContext().ensureActive()
-            var connection: HttpURLConnection? = null
-            try {
-                val url = URL(currentUrl)
-                connection = (url.openConnection() as HttpURLConnection).apply {
-                    if (this is HttpsURLConnection) {
-                        sslSocketFactory = Ipv4PreferringSslSocketFactory(HttpsURLConnection.getDefaultSSLSocketFactory())
-                    }
-                    requestMethod = "GET"
-                    connectTimeout = CONNECT_TIMEOUT_MS
-                    readTimeout = READ_TIMEOUT_MS
-                    instanceFollowRedirects = false
-                    useCaches = false
-                    setRequestProperty("User-Agent", "Clotube-Desktop-Updater/2.0")
-                    setRequestProperty("Accept", "application/octet-stream")
-                    setRequestProperty("Connection", "keep-alive")
-                    if (resumeOffset > 0L) {
-                        setRequestProperty("Range", "bytes=$resumeOffset-")
-                    }
-                }
+        val client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_2)
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SEC))
+            .proxy(ProxySelector.getDefault())
+            .build()
 
-                val code = connection.responseCode
-                if (code in 300..399) {
-                    val location = connection.getHeaderField("Location")
-                        ?: throw IllegalStateException("Redirect without Location header")
-                    currentUrl = if (location.startsWith("http://") || location.startsWith("https://")) {
-                        location
-                    } else {
-                        URL(url, location).toString()
-                    }
-                    redirects++
-                    continue
-                }
+        val requestBuilder = HttpRequest.newBuilder()
+            .uri(URI.create(initialUrl))
+            .timeout(Duration.ofSeconds(30))
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Clotube-Desktop-Updater/2.1")
+            .header("Accept", "application/octet-stream")
+            .GET()
 
-                if (code == 416) {
-                    // Range Not Satisfiable -> delete stale partial file and restart from 0
-                    if (destination.exists()) destination.delete()
-                    resumeOffset = 0L
-                    redirects++
-                    continue
-                }
+        if (resumeOffset > 0L) {
+            requestBuilder.header("Range", "bytes=$resumeOffset-")
+        }
 
-                if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-                    throw IOException("HTTP $code while downloading update")
-                }
+        val response = withContext(Dispatchers.IO) {
+            client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofInputStream())
+        }
 
-                val isPartialAppend = (code == HttpURLConnection.HTTP_PARTIAL && resumeOffset > 0L)
-                if (!isPartialAppend && resumeOffset > 0L) {
-                    // Server ignored Range header and returned full 200 stream -> restart from 0
-                    if (destination.exists()) destination.delete()
-                    resumeOffset = 0L
-                }
+        val code = response.statusCode()
+        if (code == 416) {
+            response.body().close()
+            if (destination.exists()) destination.delete()
+            throw IOException("Range reset required (HTTP 416)")
+        }
 
-                val responseLength = connection.contentLengthLong
-                val totalBytes = when {
-                    isPartialAppend && responseLength > 0L -> resumeOffset + responseLength
-                    responseLength > 0L -> responseLength
-                    else -> expectedTotalBytes
-                }
+        if (code != 200 && code != 206) {
+            response.body().close()
+            throw IOException("HTTP $code from GitHub CDN")
+        }
 
-                var downloaded = resumeOffset
-                var lastEmitTime = 0L
+        val isPartialAppend = (code == 206 && resumeOffset > 0L)
+        if (!isPartialAppend && resumeOffset > 0L) {
+            if (destination.exists()) destination.delete()
+            resumeOffset = 0L
+        }
 
-                onProgress(downloaded, totalBytes)
+        val responseLength = response.headers().firstValueAsLong("Content-Length").orElse(-1L)
+        val totalBytes = when {
+            isPartialAppend && responseLength > 0L -> resumeOffset + responseLength
+            responseLength > 0L -> responseLength
+            else -> expectedTotalBytes
+        }
 
-                connection.inputStream.use { input ->
-                    FileOutputStream(destination, isPartialAppend).use { output ->
-                        val buffer = ByteArray(128 * 1024)
-                        while (true) {
-                            currentCoroutineContext().ensureActive()
-                            val bytesRead = input.read(buffer)
-                            if (bytesRead == -1) break
-                            output.write(buffer, 0, bytesRead)
-                            downloaded += bytesRead
+        var downloaded = resumeOffset
+        var lastEmitTime = 0L
+        onProgress(downloaded, totalBytes)
 
-                            val now = System.currentTimeMillis()
-                            if (now - lastEmitTime >= 80L || (totalBytes > 0L && downloaded >= totalBytes)) {
-                                lastEmitTime = now
-                                onProgress(downloaded, totalBytes)
-                            }
+        withContext(Dispatchers.IO) {
+            response.body().use { input: InputStream ->
+                FileOutputStream(destination, isPartialAppend).use { output ->
+                    val buffer = ByteArray(128 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val bytesRead = withTimeoutOrNull(STALL_TIMEOUT_MS) {
+                            input.read(buffer)
+                        } ?: throw IOException("Stream stalled for ${STALL_TIMEOUT_MS / 1000}s")
+
+                        if (bytesRead == -1) break
+                        output.write(buffer, 0, bytesRead)
+                        downloaded += bytesRead
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmitTime >= 80L || (totalBytes > 0L && downloaded >= totalBytes)) {
+                            lastEmitTime = now
+                            onProgress(downloaded, totalBytes)
                         }
-                        output.flush()
                     }
+                    output.flush()
                 }
-                return
-            } finally {
-                connection?.disconnect()
             }
         }
-        throw IOException("Too many redirects while downloading update")
     }
 
-    /**
-     * Connects to IPv4 addresses first before IPv6 so dual-stack ISPs with broken IPv6 routes
-     * do not stall at 0.0 MB when connecting to objects.githubusercontent.com.
-     */
-    private class Ipv4PreferringSslSocketFactory(
-        private val delegate: SSLSocketFactory
-    ) : SSLSocketFactory() {
-        override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
-        override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
+    private fun resolveWindowsCurlFile(): File {
+        val winDir = System.getenv("SystemRoot") ?: "C:\\Windows"
+        return File(winDir, "System32\\curl.exe")
+    }
 
-        override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
-            delegate.createSocket(s, host, port, autoClose)
+    private fun isWindowsCurlAvailable(): Boolean {
+        return resolveWindowsCurlFile().exists()
+    }
 
-        override fun createSocket(host: String, port: Int): Socket =
-            connectIpv4First(host, port)
+    private suspend fun downloadWithWindowsCurl(
+        initialUrl: String,
+        destination: File,
+        expectedTotalBytes: Long,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) {
+        if (expectedTotalBytes > 0L && destination.exists() && destination.length() >= expectedTotalBytes) {
+            if (destination.length() == expectedTotalBytes) return
+            destination.delete()
+        }
 
-        override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
-            delegate.createSocket(host, port, localHost, localPort)
+        val curlExe = resolveWindowsCurlFile().absolutePath
+        val cmd = mutableListOf(
+            curlExe,
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout", "20",
+            "--speed-limit", "8192",
+            "--speed-time", "20",
+            "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Clotube-Desktop-Updater/2.1"
+        )
+        if (destination.exists() && destination.length() > 0L) {
+            cmd.addAll(listOf("-C", "-"))
+        }
+        cmd.addAll(listOf("-o", destination.absolutePath, initialUrl))
 
-        override fun createSocket(address: InetAddress, port: Int): Socket =
-            delegate.createSocket(address, port)
+        val stderrBuffer = StringBuilder()
+        val process = withContext(Dispatchers.IO) {
+            ProcessBuilder(cmd)
+                .redirectErrorStream(false)
+                .start()
+        }
 
-        override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
-            delegate.createSocket(address, port, localAddress, localPort)
-
-        private fun connectIpv4First(host: String, port: Int): Socket {
-            val allAddresses = InetAddress.getAllByName(host)
-            val ordered = allAddresses.sortedBy { if (it is Inet4Address) 0 else 1 }
-            var lastEx: IOException? = null
-
-            for (addr in ordered) {
-                val rawSocket = Socket()
-                try {
-                    rawSocket.connect(InetSocketAddress(addr, port), CONNECT_TIMEOUT_MS)
-                    return delegate.createSocket(rawSocket, host, port, true)
-                } catch (e: IOException) {
-                    lastEx = e
-                    runCatching { rawSocket.close() }
+        val stderrJob = scope.launch(Dispatchers.IO) {
+            runCatching {
+                process.errorStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                    val text = reader.readText().trim()
+                    if (text.isNotEmpty()) stderrBuffer.append(text)
                 }
             }
-            throw lastEx ?: IOException("Unable to connect to $host:$port")
+        }
+
+        try {
+            while (process.isAlive) {
+                currentCoroutineContext().ensureActive()
+                val currentBytes = if (destination.exists()) destination.length() else 0L
+                onProgress(currentBytes, expectedTotalBytes)
+                delay(150L)
+            }
+            stderrJob.join()
+            val exitCode = process.exitValue()
+            val finalBytes = if (destination.exists()) destination.length() else 0L
+            onProgress(finalBytes, expectedTotalBytes)
+
+            if (exitCode != 0) {
+                val errDetail = stderrBuffer.toString().lineSequence().lastOrNull()?.trim()
+                    ?: "curl exit code $exitCode"
+                throw IOException(errDetail)
+            }
+        } catch (e: CancellationException) {
+            runCatching { process.destroyForcibly() }
+            throw e
         }
     }
 }
