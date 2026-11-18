@@ -17,6 +17,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.system.exitProcess
 
 object DesktopUpdateManager {
@@ -24,11 +25,11 @@ object DesktopUpdateManager {
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.1.2"
+    private const val DEV_FALLBACK_VERSION = "2.1.3"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
-    private const val CONNECT_TIMEOUT_SEC = 20L
-    private const val STALL_TIMEOUT_MS = 30_000L
+    private const val CONNECT_TIMEOUT_SEC = 30L
+    private const val STALL_TIMEOUT_MS = 35_000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var activeDownloadJob: Job? = null
@@ -71,27 +72,25 @@ object DesktopUpdateManager {
     }
 
     private fun getEmbeddedLatestRelease(version: String): CachedReleaseNoteEntry {
-        val targetVersion = if (version.isBlank() || version == "2.0.9" || version == "2.1.1" || version == "2.1.2") "2.1.2" else version
-        val title = if (targetVersion == "2.1.2") {
-            "Smooth 60+ FPS Watchlist Scrolling & UI Responsiveness"
+        val targetVersion = if (version.isBlank() || version == "2.0.9" || version == "2.1.1" || version == "2.1.2" || version == "2.1.3") "2.1.3" else version
+        val title = if (targetVersion == "2.1.3") {
+            "Reliable IPv4 In-App Auto-Updater & Smooth Watchlist Scrolling"
         } else {
             "What's New in Clotube v$targetVersion"
         }
 
         val body = """
-            ### Watchlist Scrolling & UI Performance
-            - **Smooth Virtualized Watchlist Scrolling:** Added stable entry UUID keys and typed item slots to the Watchlist `LazyColumn`, eliminating row recomposition stalls and scroll jitter across large Watchlists.
-            - **Memoized Filter & Drive Title Lookups:** Pre-computed normalized Google Drive title sets, filter-chip counts, and filtered/sorted Watchlist snapshots outside the scroll composition scope—preventing redundant list allocations and string normalization on every scroll tick.
-            - **Lightweight Card Rendering & Downsampled Posters:** Removed per-row shader overhead in favor of flat Studio Obsidian card surfaces with 1dp borders, paired with decode-time downsampled poster bitmaps served from the bounded LRU memory and SSD disk caches.
+            ### Resilient IPv4 In-App Auto-Updater
+            - **3-Tier IPv4 Download Engine:** Upgraded the `.msi` update downloader to use native Windows `curl.exe` with forced IPv4 (`-4`), `--http1.1`, and `--ssl-no-revoke` on initial attempts, backed by an `HTTP/1.1` stream-close watchdog fallback and a PowerShell `WebClient` final fallback—eliminating 5-attempt timeout failures on dual-stack ISPs and Schannel CRL checks.
+            - **Direct Browser Fallback & Diagnostics:** Added a one-click **Open in Browser** fallback button on the update error screen and detailed attempt-by-attempt diagnostics in `clotube.log`.
 
-            ### Inherited Core Capabilities
-            - **Resilient Two-Stage In-App Auto-Updater:** Automatically detects new GitHub Releases on startup and via **Settings -> About -> Check for Updates** with HTTP/2 + native `curl.exe` resumable downloads and silent `wscript.exe` in-place upgrades.
-            - **Fullscreen Playback & Offline Resilience:** Sequential LibVLC episode transitions, dynamic OAuth token refresh during streaming, and automatic 10s x 5-attempt network reconnection with live status indicators.
+            ### Included from v2.1.2
+            - **Smooth Virtualized Watchlist Scrolling:** Keyed `LazyColumn` items, memoized Drive title/filter lookups, and decode-time downsampled posters for stutter-free 60+ FPS Watchlist scrolling.
         """.trimIndent()
 
         return CachedReleaseNoteEntry(
             version = targetVersion,
-            tagName = if (targetVersion == "2.1.2") "v2.1.2" else "v$targetVersion",
+            tagName = if (targetVersion == "2.1.3") "v2.1.3" else "v$targetVersion",
             title = title,
             body = body
         )
@@ -731,45 +730,62 @@ object DesktopUpdateManager {
         onStatus: (statusText: String, downloaded: Long, total: Long) -> Unit,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
-        val backoffDelaysMs = longArrayOf(1200L, 2000L, 3000L, 4500L)
         var lastError: Exception? = null
+        val curlAvailable = isWindowsCurlAvailable()
 
         for (attempt in 1..MAX_DOWNLOAD_ATTEMPTS) {
             currentCoroutineContext().ensureActive()
-            val existingBytes = if (destination.exists()) destination.length() else 0L
-            val useNativeCurl = attempt >= 3 && isWindowsCurlAvailable()
-
-            if (attempt == 1) {
-                onStatus("Connecting to GitHub release server…", existingBytes, expectedTotalBytes)
-            } else if (useNativeCurl) {
-                onStatus(
-                    "Switching to Windows native downloader (attempt $attempt of $MAX_DOWNLOAD_ATTEMPTS)…",
-                    existingBytes,
-                    expectedTotalBytes
-                )
-            } else {
-                onStatus(
-                    "Connection slow — retrying automatically (attempt $attempt of $MAX_DOWNLOAD_ATTEMPTS)…",
-                    existingBytes,
-                    expectedTotalBytes
-                )
-            }
+            val bytesBefore = if (destination.exists()) destination.length() else 0L
 
             try {
-                if (useNativeCurl) {
-                    downloadWithWindowsCurl(
-                        initialUrl = initialUrl,
-                        destination = destination,
-                        expectedTotalBytes = expectedTotalBytes,
-                        onProgress = onProgress
-                    )
-                } else {
-                    downloadWithJdkHttpClient(
-                        initialUrl = initialUrl,
-                        destination = destination,
-                        expectedTotalBytes = expectedTotalBytes,
-                        onProgress = onProgress
-                    )
+                when {
+                    // Tier 1 (Attempts 1-2): Native Windows curl.exe with IPv4 + --ssl-no-revoke + HTTP/1.1
+                    curlAvailable && attempt <= 2 -> {
+                        if (attempt > 1) {
+                            onStatus(
+                                "Retrying download via native Windows transfer (Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS)…",
+                                bytesBefore,
+                                expectedTotalBytes
+                            )
+                        }
+                        downloadWithWindowsCurl(
+                            initialUrl = initialUrl,
+                            destination = destination,
+                            expectedTotalBytes = expectedTotalBytes,
+                            onProgress = onProgress
+                        )
+                    }
+
+                    // Tier 2 (Attempts 3-4, or 1-4 if curl.exe absent): JDK HttpClient forced to HTTP/1.1 + watchdog
+                    attempt <= 4 -> {
+                        onStatus(
+                            "Switching to HTTP/1.1 stream fallback (Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS)…",
+                            bytesBefore,
+                            expectedTotalBytes
+                        )
+                        downloadWithHttp11Client(
+                            initialUrl = initialUrl,
+                            destination = destination,
+                            expectedTotalBytes = expectedTotalBytes,
+                            onProgress = onProgress
+                        )
+                    }
+
+                    // Tier 3 (Attempt 5): PowerShell .NET WebClient / WinINet fallback from clean offset
+                    else -> {
+                        if (destination.exists()) destination.delete()
+                        onStatus(
+                            "Final fallback via Windows WebClient (Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS)…",
+                            0L,
+                            expectedTotalBytes
+                        )
+                        downloadWithPowerShellWebClient(
+                            initialUrl = initialUrl,
+                            destination = destination,
+                            expectedTotalBytes = expectedTotalBytes,
+                            onProgress = onProgress
+                        )
+                    }
                 }
 
                 if (!destination.exists() || destination.length() <= 0L) {
@@ -785,49 +801,59 @@ object DesktopUpdateManager {
                 throw e
             } catch (e: Exception) {
                 lastError = e
-                val reason = (e.message ?: e.javaClass.simpleName).take(70)
-                System.err.println("[DesktopUpdateManager] Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: $reason")
+                val bytesAfter = if (destination.exists()) destination.length() else 0L
+                val madeProgress = bytesAfter > bytesBefore
+                System.err.println(
+                    "[DesktopUpdateManager] Attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed " +
+                        "(bytes: $bytesBefore -> $bytesAfter): ${e.message}"
+                )
+
+                // If the attempt made zero progress or hit a range error, reset .tmp so bad offsets don't poison retries
+                if (!madeProgress && destination.exists()) {
+                    destination.delete()
+                }
+
                 if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
-                    val waitMs = backoffDelaysMs[(attempt - 1).coerceAtMost(backoffDelaysMs.lastIndex)]
                     val currentBytes = if (destination.exists()) destination.length() else 0L
+                    val reason = e.message?.take(70) ?: "Connection timed out"
                     onStatus(
-                        "$reason — retrying in ${waitMs / 1000}s (attempt ${attempt + 1} of $MAX_DOWNLOAD_ATTEMPTS)…",
+                        "Attempt $attempt failed ($reason) — retrying (${attempt + 1}/$MAX_DOWNLOAD_ATTEMPTS)…",
                         currentBytes,
                         expectedTotalBytes
                     )
-                    delay(waitMs)
+                    delay(1500L * attempt)
                 }
             }
         }
 
-        throw lastError ?: IOException("Unable to download update from GitHub")
+        throw lastError ?: IOException("Unable to download update from GitHub after $MAX_DOWNLOAD_ATTEMPTS attempts")
     }
 
-    private suspend fun downloadWithJdkHttpClient(
+    private suspend fun downloadWithHttp11Client(
         initialUrl: String,
         destination: File,
         expectedTotalBytes: Long,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
-        var resumeOffset = if (destination.exists()) destination.length() else 0L
-        if (expectedTotalBytes > 0L && resumeOffset >= expectedTotalBytes) {
-            if (resumeOffset == expectedTotalBytes) return
+        val existingBytes = if (destination.exists()) destination.length() else 0L
+        if (expectedTotalBytes > 0L && existingBytes >= expectedTotalBytes) {
+            if (existingBytes == expectedTotalBytes) return
             destination.delete()
-            resumeOffset = 0L
         }
 
+        val resumeOffset = if (destination.exists()) destination.length() else 0L
         val client = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_2)
+            .version(HttpClient.Version.HTTP_1_1)
             .followRedirects(HttpClient.Redirect.NORMAL)
-            .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SEC))
             .proxy(ProxySelector.getDefault())
+            .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SEC))
             .build()
 
         val requestBuilder = HttpRequest.newBuilder()
             .uri(URI.create(initialUrl))
-            .timeout(Duration.ofSeconds(30))
+            .timeout(Duration.ofMinutes(15))
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Clotube-Desktop-Updater/2.1")
-            .header("Accept", "application/octet-stream")
+            .header("Accept", "application/octet-stream, */*")
             .GET()
 
         if (resumeOffset > 0L) {
@@ -838,56 +864,77 @@ object DesktopUpdateManager {
             client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofInputStream())
         }
 
-        val code = response.statusCode()
-        if (code == 416) {
-            response.body().close()
-            if (destination.exists()) destination.delete()
-            throw IOException("Range reset required (HTTP 416)")
+        val statusCode = response.statusCode()
+        if (statusCode == 416) {
+            runCatching { response.body().close() }
+            destination.delete()
+            throw IOException("HTTP 416 Range Not Satisfiable — resetting partial file")
+        }
+        if (statusCode !in 200..299) {
+            runCatching { response.body().close() }
+            throw IOException("HTTP $statusCode from GitHub CDN")
         }
 
-        if (code != 200 && code != 206) {
-            response.body().close()
-            throw IOException("HTTP $code from GitHub CDN")
+        val isPartial = statusCode == 206 && resumeOffset > 0L
+        if (!isPartial && destination.exists()) {
+            destination.delete()
         }
 
-        val isPartialAppend = (code == 206 && resumeOffset > 0L)
-        if (!isPartialAppend && resumeOffset > 0L) {
-            if (destination.exists()) destination.delete()
-            resumeOffset = 0L
-        }
-
-        val responseLength = response.headers().firstValueAsLong("Content-Length").orElse(-1L)
+        val startBytes = if (isPartial) resumeOffset else 0L
+        val contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1L)
         val totalBytes = when {
-            isPartialAppend && responseLength > 0L -> resumeOffset + responseLength
-            responseLength > 0L -> responseLength
-            else -> expectedTotalBytes
+            expectedTotalBytes > 0L -> expectedTotalBytes
+            contentLength > 0L -> startBytes + contentLength
+            else -> -1L
         }
 
-        var downloaded = resumeOffset
-        var lastEmitTime = 0L
-        onProgress(downloaded, totalBytes)
+        val lastActivityMs = AtomicLong(System.currentTimeMillis())
 
         withContext(Dispatchers.IO) {
             response.body().use { input: InputStream ->
-                FileOutputStream(destination, isPartialAppend).use { output ->
-                    val buffer = ByteArray(128 * 1024)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val bytesRead = withTimeoutOrNull(STALL_TIMEOUT_MS) {
-                            input.read(buffer)
-                        } ?: throw IOException("Stream stalled for ${STALL_TIMEOUT_MS / 1000}s")
-
-                        if (bytesRead == -1) break
-                        output.write(buffer, 0, bytesRead)
-                        downloaded += bytesRead
-
-                        val now = System.currentTimeMillis()
-                        if (now - lastEmitTime >= 80L || (totalBytes > 0L && downloaded >= totalBytes)) {
-                            lastEmitTime = now
-                            onProgress(downloaded, totalBytes)
+                // Active watchdog closes the InputStream on stall so blocking read() unblocks immediately
+                val watchdogJob = launch {
+                    while (isActive) {
+                        delay(2_000L)
+                        if (System.currentTimeMillis() - lastActivityMs.get() > STALL_TIMEOUT_MS) {
+                            runCatching { input.close() }
+                            break
                         }
                     }
-                    output.flush()
+                }
+
+                try {
+                    FileOutputStream(destination, isPartial).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var downloaded = startBytes
+                        var lastEmitTime = 0L
+
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val bytesRead = try {
+                                input.read(buffer)
+                            } catch (ioe: IOException) {
+                                if (System.currentTimeMillis() - lastActivityMs.get() > STALL_TIMEOUT_MS) {
+                                    throw IOException("Stream stalled for ${STALL_TIMEOUT_MS / 1000}s", ioe)
+                                }
+                                throw ioe
+                            }
+
+                            if (bytesRead == -1) break
+                            lastActivityMs.set(System.currentTimeMillis())
+                            output.write(buffer, 0, bytesRead)
+                            downloaded += bytesRead
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmitTime >= 80L || (totalBytes > 0L && downloaded >= totalBytes)) {
+                                lastEmitTime = now
+                                onProgress(downloaded, totalBytes)
+                            }
+                        }
+                        output.flush()
+                    }
+                } finally {
+                    watchdogJob.cancel()
                 }
             }
         }
@@ -916,13 +963,16 @@ object DesktopUpdateManager {
         val curlExe = resolveWindowsCurlFile().absolutePath
         val cmd = mutableListOf(
             curlExe,
+            "-4",                  // Force IPv4 to avoid Windows dual-stack IPv6 timeout blackholes
+            "--http1.1",           // Avoid HTTP/2 stream stalls on objects.githubusercontent.com
+            "--ssl-no-revoke",     // Prevent Windows Schannel CRL/OCSP revocation lookup hangs
             "-L",
             "--fail",
             "--silent",
             "--show-error",
-            "--connect-timeout", "20",
-            "--speed-limit", "8192",
-            "--speed-time", "20",
+            "--connect-timeout", CONNECT_TIMEOUT_SEC.toString(),
+            "--speed-limit", "1024",
+            "--speed-time", "45",
             "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Clotube-Desktop-Updater/2.1"
         )
         if (destination.exists() && destination.length() > 0L) {
@@ -962,6 +1012,65 @@ object DesktopUpdateManager {
                 val errDetail = stderrBuffer.toString().lineSequence().lastOrNull()?.trim()
                     ?: "curl exit code $exitCode"
                 throw IOException(errDetail)
+            }
+        } catch (e: CancellationException) {
+            runCatching { process.destroyForcibly() }
+            throw e
+        }
+    }
+
+    private suspend fun downloadWithPowerShellWebClient(
+        initialUrl: String,
+        destination: File,
+        expectedTotalBytes: Long,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) {
+        val escapedUrl = initialUrl.replace("'", "''")
+        val escapedDest = destination.absolutePath.replace("'", "''")
+        val psScript = """
+            ${'$'}ErrorActionPreference = 'Stop'
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+            ${'$'}wc = New-Object System.Net.WebClient
+            ${'$'}wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Clotube-Desktop-Updater/2.1')
+            ${'$'}wc.DownloadFile('$escapedUrl', '$escapedDest')
+        """.trimIndent()
+
+        val process = withContext(Dispatchers.IO) {
+            ProcessBuilder(
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-Command", psScript
+            ).redirectErrorStream(true).start()
+        }
+
+        val outputBuffer = StringBuilder()
+        val readerJob = scope.launch(Dispatchers.IO) {
+            runCatching {
+                process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                    val text = reader.readText().trim()
+                    if (text.isNotEmpty()) outputBuffer.append(text)
+                }
+            }
+        }
+
+        try {
+            while (process.isAlive) {
+                currentCoroutineContext().ensureActive()
+                val currentBytes = if (destination.exists()) destination.length() else 0L
+                onProgress(currentBytes, expectedTotalBytes)
+                delay(150L)
+            }
+            readerJob.join()
+            val exitCode = process.exitValue()
+            val finalBytes = if (destination.exists()) destination.length() else 0L
+            onProgress(finalBytes, expectedTotalBytes)
+
+            if (exitCode != 0) {
+                val detail = outputBuffer.toString().lineSequence().firstOrNull()?.trim()
+                    ?: "WebClient exit code $exitCode"
+                throw IOException(detail)
             }
         } catch (e: CancellationException) {
             runCatching { process.destroyForcibly() }

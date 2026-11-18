@@ -693,8 +693,28 @@ private fun UpdateErrorContent(state: UpdateUiState.Error) {
             )
             state.retryRelease?.let { release ->
                 Spacer(modifier = Modifier.width(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        runCatching {
+                            if (java.awt.Desktop.isDesktopSupported()) {
+                                java.awt.Desktop.getDesktop().browse(java.net.URI(release.msiDownloadUrl))
+                            }
+                        }
+                        DesktopUpdateManager.dismissDialog()
+                    },
+                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1)),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+                    modifier = Modifier
+                        .height(38.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    Text("Open in Browser", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(modifier = Modifier.width(10.dp))
                 PrimaryStudioWhiteButton(
-                    text = "Retry",
+                    text = "Try Again",
                     icon = Icons.Rounded.Refresh,
                     onClick = {
                         DesktopUpdateManager.startDownload(
