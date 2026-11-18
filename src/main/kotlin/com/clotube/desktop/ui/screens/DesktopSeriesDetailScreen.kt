@@ -755,16 +755,16 @@ fun DesktopSeriesDetailScreen(
                                 color = when (currentSeriesStatus) {
                                     WatchlistStatus.WATCHED -> Color(0x1F10B981)
                                     WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
-                                    WatchlistStatus.REWATCH -> Color(0xFF1E2534)
-                                    else -> Color(0xFF1E293B)
+                                    WatchlistStatus.REWATCH -> Color(0x2B3877EE)
+                                    WatchlistStatus.UNWATCHED, null -> Color(0xFF1E293B)
                                 },
                                 border = BorderStroke(
                                     1.dp,
                                     when (currentSeriesStatus) {
                                         WatchlistStatus.WATCHED -> Color(0x4010B981)
                                         WatchlistStatus.WATCH_LATER -> Color(0x4760A5FA)
-                                        WatchlistStatus.REWATCH -> Color(0x33FFFFFF)
-                                        else -> Color(0xFF334155)
+                                        WatchlistStatus.REWATCH -> Color(0x7360A5FA)
+                                        WatchlistStatus.UNWATCHED, null -> Color(0xFF334155)
                                     }
                                 ),
                                 modifier = Modifier
@@ -782,24 +782,24 @@ fun DesktopSeriesDetailScreen(
                                             WatchlistStatus.WATCHED -> Icons.Rounded.Check
                                             WatchlistStatus.WATCH_LATER -> Icons.Rounded.Bookmark
                                             WatchlistStatus.REWATCH -> Icons.Rounded.Replay
-                                            else -> Icons.Rounded.BookmarkBorder
+                                            WatchlistStatus.UNWATCHED, null -> Icons.Rounded.BookmarkBorder
                                         },
                                         contentDescription = null,
                                         tint = when (currentSeriesStatus) {
                                             WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
                                             WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                                            WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
-                                            else -> Color(0xFF94A3B8)
+                                            WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
+                                            WatchlistStatus.UNWATCHED, null -> Color(0xFF94A3B8)
                                         },
                                         modifier = Modifier.size(13.dp)
                                     )
                                     Text(
-                                        text = currentSeriesStatus?.label ?: "Add to Watchlist",
+                                        text = currentSeriesStatus?.takeIf { it != WatchlistStatus.UNWATCHED }?.label ?: "Add to Watchlist",
                                         color = when (currentSeriesStatus) {
                                             WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
                                             WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                                            WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
-                                            else -> Color(0xFFCBD5E1)
+                                            WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
+                                            WatchlistStatus.UNWATCHED, null -> Color(0xFFCBD5E1)
                                         },
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.SemiBold
@@ -818,12 +818,13 @@ fun DesktopSeriesDetailScreen(
                                 onDismissRequest = { statusDropdownExpanded = false },
                                 modifier = Modifier.background(Color(0xFF0F141F)).border(1.dp, Color(0xFF263248), RoundedCornerShape(8.dp))
                             ) {
-                                WatchlistStatus.entries.forEach { status ->
+                                WatchlistStatus.selectableStatuses.forEach { status ->
                                     val isSelected = currentSeriesStatus == status
                                     val activeColor = when (status) {
                                         WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
                                         WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                                        WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                                        WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
+                                        WatchlistStatus.UNWATCHED -> Color(0xFF94A3B8)
                                     }
                                     DropdownMenuItem(
                                         text = {

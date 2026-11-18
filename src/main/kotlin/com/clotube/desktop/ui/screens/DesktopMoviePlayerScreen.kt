@@ -1296,7 +1296,7 @@ fun DesktopMoviePlayerScreen(
                                                         Icon(
                                                             imageVector = Icons.Rounded.Replay,
                                                             contentDescription = "Rewatch",
-                                                            tint = Color(0xFFCBD5E1),
+                                                            tint = Color(0xFF3877EE),
                                                             modifier = Modifier.size(19.dp)
                                                         )
                                                     }

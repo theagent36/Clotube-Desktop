@@ -277,8 +277,8 @@ fun DesktopFigmaMediaCard(
         } else if (cardWatchlistStatus == WatchlistStatus.REWATCH) {
             Surface(
                 shape = RoundedCornerShape(6.dp),
-                color = Color(0xD90A0E17),
-                border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                color = Color(0xD90A1020),
+                border = BorderStroke(1.dp, Color(0x733877EE)),
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(8.dp)
@@ -291,12 +291,12 @@ fun DesktopFigmaMediaCard(
                     Icon(
                         imageVector = Icons.Rounded.Replay,
                         contentDescription = "Rewatch",
-                        tint = Color(0xFFCBD5E1),
+                        tint = Color(0xFF60A5FA),
                         modifier = Modifier.size(11.dp)
                     )
                     Text(
                         text = "Rewatch",
-                        color = Color(0xFFF1F5F9),
+                        color = Color(0xFF60A5FA),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold
                     )

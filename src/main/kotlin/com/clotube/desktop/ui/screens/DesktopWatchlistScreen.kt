@@ -92,27 +92,35 @@ fun FigmaWatchlistContent(
     val driveTitleSet = remember(movies, series) {
         (movies + series).map { DesktopWatchlistManager.normalizeTitle(it.title) }.toSet()
     }
+    val driveIdSet = remember(movies, series) {
+        (movies + series).map { it.id }.toSet()
+    }
 
-    val filterCounts = remember(allEntries, driveTitleSet) {
+    fun isEntryInDrive(entry: WatchlistEntry): Boolean {
+        val hasMatchedDriveId = !entry.driveId.isNullOrBlank() &&
+            !DesktopWatchlistManager.isExternalCanonicalId(entry.driveId) &&
+            driveIdSet.contains(entry.driveId)
+        return hasMatchedDriveId || driveTitleSet.contains(entry.normalizedTitle)
+    }
+
+    val filterCounts = remember(allEntries, driveTitleSet, driveIdSet) {
         mapOf(
             WatchlistFilter.ALL to allEntries.size,
             WatchlistFilter.WATCHED to allEntries.count { it.status == WatchlistStatus.WATCHED },
             WatchlistFilter.WATCH_LATER to allEntries.count { it.status == WatchlistStatus.WATCH_LATER },
             WatchlistFilter.REWATCH to allEntries.count { it.status == WatchlistStatus.REWATCH },
-            WatchlistFilter.CUSTOM_ONLY to allEntries.count {
-                it.driveId == null && !driveTitleSet.contains(it.normalizedTitle)
-            }
+            WatchlistFilter.CUSTOM_ONLY to allEntries.count { !isEntryInDrive(it) }
         )
     }
 
-    val filteredEntries = remember(allEntries, selectedFilter, filterQuery, driveTitleSet) {
+    val filteredEntries = remember(allEntries, selectedFilter, filterQuery, driveTitleSet, driveIdSet) {
         allEntries.filter { entry ->
             val matchesFilter = when (selectedFilter) {
                 WatchlistFilter.ALL -> true
                 WatchlistFilter.WATCHED -> entry.status == WatchlistStatus.WATCHED
                 WatchlistFilter.WATCH_LATER -> entry.status == WatchlistStatus.WATCH_LATER
                 WatchlistFilter.REWATCH -> entry.status == WatchlistStatus.REWATCH
-                WatchlistFilter.CUSTOM_ONLY -> entry.driveId == null && !driveTitleSet.contains(entry.normalizedTitle)
+                WatchlistFilter.CUSTOM_ONLY -> !isEntryInDrive(entry)
             }
             val matchesQuery = filterQuery.isBlank() ||
                 entry.title.contains(filterQuery.trim(), ignoreCase = true)
@@ -427,7 +435,7 @@ fun FigmaWatchlistContent(
                         title = "Re-watch",
                         subtitle = "Favorites lined up for another watch",
                         icon = Icons.Rounded.Replay,
-                        accentColor = Color(0xFFCBD5E1),
+                        accentColor = Color(0xFF3877EE),
                         emptyPlaceholder = "No titles marked for Re-watch yet.",
                         entries = rewatchEntries,
                         isExpanded = rewatchExpanded,
@@ -827,28 +835,28 @@ private fun WatchlistRowCard(
                     .padding(3.dp),
                 horizontalArrangement = Arrangement.spacedBy(3.dp)
             ) {
-                WatchlistStatus.entries.forEach { statusOption ->
+                WatchlistStatus.selectableStatuses.forEach { statusOption ->
                     val active = entry.status == statusOption
                     val segmentLabel = if (statusOption == WatchlistStatus.REWATCH) "Re-watch" else statusOption.label
                     val segmentFill = when {
                         !active -> Color.Transparent
                         statusOption == WatchlistStatus.WATCHED -> Color(0x1F10B981)
                         statusOption == WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
-                        statusOption == WatchlistStatus.REWATCH -> Color(0xFF1E2534)
+                        statusOption == WatchlistStatus.REWATCH -> Color(0x2B3877EE)
                         else -> Color.Transparent
                     }
                     val segmentBorder = when {
                         !active -> Color.Transparent
                         statusOption == WatchlistStatus.WATCHED -> Color(0x4010B981)
                         statusOption == WatchlistStatus.WATCH_LATER -> Color(0x4760A5FA)
-                        statusOption == WatchlistStatus.REWATCH -> Color(0x33FFFFFF)
+                        statusOption == WatchlistStatus.REWATCH -> Color(0x7360A5FA)
                         else -> Color.Transparent
                     }
                     val textColor = when {
                         !active -> Color(0xFF64748B)
                         statusOption == WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
                         statusOption == WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                        statusOption == WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                        statusOption == WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
                         else -> Color(0xFFCBD5E1)
                     }
 
@@ -1072,7 +1080,7 @@ private fun WatchlistEditorDialog(
                             .padding(3.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        WatchlistStatus.entries.forEach { st ->
+                        WatchlistStatus.selectableStatuses.forEach { st ->
                             val selected = status == st
                             val label = if (st == WatchlistStatus.REWATCH) "Re-watch" else st.label
                             Box(

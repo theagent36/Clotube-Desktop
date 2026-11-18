@@ -8,8 +8,11 @@ import com.google.api.services.drive.model.File as DriveFile
 import com.google.auth.http.HttpCredentialsAdapter
 import com.google.auth.oauth2.AccessToken
 import com.google.auth.oauth2.GoogleCredentials
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -18,6 +21,7 @@ import java.io.ByteArrayOutputStream
 object DesktopWatchlistSync {
     private const val WATCHLIST_FILENAME = "clotube_watchlist.json"
     private val syncMutex = Mutex()
+    private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + NonCancellable)
     private val httpTransport by lazy { GoogleNetHttpTransport.newTrustedTransport() }
     private val jsonFactory by lazy { GsonFactory.getDefaultInstance() }
 
@@ -28,13 +32,25 @@ object DesktopWatchlistSync {
             .build()
     }
 
+    /**
+     * Immediately launches a non-cancellable cloud push to `clotube/History/clotube_watchlist.json`
+     * so Watchlist mutations survive modal dismissal or app exit.
+     */
+    fun pushLocalWatchlistNonCancellable(email: String, accessToken: String) {
+        if (email.isBlank() || accessToken.isBlank()) return
+        syncScope.launch(Dispatchers.IO + NonCancellable) {
+            pushLocalWatchlist(email, accessToken)
+        }
+    }
+
     suspend fun pullRemoteWatchlist(email: String, accessToken: String): Boolean = withContext(Dispatchers.IO) {
         if (email.isBlank() || accessToken.isBlank()) return@withContext false
         syncMutex.withLock {
             try {
                 val drive = buildDriveService(accessToken)
                 val hierarchy = DesktopDriveDirectoryManager.resolveHierarchy(drive)
-                val historyFolderId = hierarchy.historyFolderId ?: return@withLock false
+                val historyFolderId = hierarchy.historyFolderId
+                if (historyFolderId.isBlank()) return@withLock false
 
                 val query = "name = '$WATCHLIST_FILENAME' and '$historyFolderId' in parents and trashed = false"
                 val result = drive.files().list()
@@ -62,7 +78,8 @@ object DesktopWatchlistSync {
             try {
                 val drive = buildDriveService(accessToken)
                 val hierarchy = DesktopDriveDirectoryManager.resolveHierarchy(drive)
-                val historyFolderId = hierarchy.historyFolderId ?: return@withLock
+                val historyFolderId = hierarchy.historyFolderId
+                if (historyFolderId.isBlank()) return@withLock
 
                 val query = "name = '$WATCHLIST_FILENAME' and '$historyFolderId' in parents and trashed = false"
                 val result = drive.files().list()
@@ -73,7 +90,7 @@ object DesktopWatchlistSync {
 
                 val existingFile = result.files?.firstOrNull()
 
-                // Pre-pull to merge any concurrent changes before uploading
+                // Pre-pull to merge any concurrent cross-device changes before uploading
                 if (existingFile != null) {
                     val out = ByteArrayOutputStream()
                     drive.files().get(existingFile.id).executeMediaAndDownloadTo(out)

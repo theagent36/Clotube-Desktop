@@ -27,6 +27,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
@@ -47,7 +49,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.isSecondaryPressed
@@ -55,9 +63,12 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -67,6 +78,8 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import com.clotube.desktop.data.DesktopContinueWatchingItem
+import com.clotube.desktop.data.DesktopGlobalSearchEngine
+import com.clotube.desktop.data.DesktopSearchHistoryManager
 import com.clotube.desktop.data.DesktopSeriesCache
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
@@ -76,6 +89,9 @@ import com.clotube.desktop.data.WatchlistMediaType
 import com.clotube.desktop.data.WatchlistStatus
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
+import com.clotube.desktop.model.GlobalSearchResult
+import com.clotube.desktop.ui.components.DesktopGlobalSearchOverlay
+import com.clotube.desktop.ui.components.ExternalTitlePreviewModal
 import com.clotube.desktop.ui.components.ThumbnailSize
 import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import com.clotube.desktop.ui.components.DesktopFramePacer
@@ -91,11 +107,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-private data class SearchEpisodeMatch(
-    val episode: DesktopEpisode,
-    val parentSeries: DesktopMediaItem
-)
 
 enum class DesktopNavSection(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
@@ -161,18 +172,40 @@ fun DesktopHomeScreen(
     val effectiveFullscreen = isFullscreen || isAppFullscreen
     var currentSection by remember(activeSection) { mutableStateOf(activeSection) }
     var searchQuery by remember { mutableStateOf("") }
+    var isSearchOverlayOpen by remember { mutableStateOf(false) }
+    var previewExternalResult by remember { mutableStateOf<GlobalSearchResult?>(null) }
     var targetedEpisodeId by remember { mutableStateOf<String?>(null) }
     val searchFocusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
 
     var selectedSeriesForDetail by remember { mutableStateOf<DesktopMediaItem?>(null) }
     var selectedMovieForPlayer by remember { mutableStateOf<DesktopMediaItem?>(null) }
     var watchHistoryRevision by remember { mutableIntStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
+    // Reset search UI and clear cached online responses on profile switch
+    LaunchedEffect(userEmail) {
+        searchQuery = ""
+        isSearchOverlayOpen = false
+        previewExternalResult = null
+        DesktopGlobalSearchEngine.clearCache()
+    }
+
+    val handleSignOut: () -> Unit = {
+        searchQuery = ""
+        isSearchOverlayOpen = false
+        previewExternalResult = null
+        DesktopGlobalSearchEngine.clearCache()
+        DesktopSearchHistoryManager.clearMemoryCache()
+        onSignOut()
+    }
+
     val navigateTo: (DesktopNavSection) -> Unit = { section ->
         selectedSeriesForDetail = null
         selectedMovieForPlayer = null
         targetedEpisodeId = null
+        isSearchOverlayOpen = false
+        previewExternalResult = null
         if (effectiveFullscreen) {
             onToggleFullscreen()
         }
@@ -189,81 +222,30 @@ fun DesktopHomeScreen(
         else series.filter { it.title.contains(searchQuery, ignoreCase = true) }
     }
 
-    val cleanSearch = searchQuery.trim()
-    val isSearchActive = cleanSearch.length >= 2
-    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
-
-    val matchedMovies = remember(cleanSearch, movies) {
-        if (!isSearchActive) emptyList()
-        else movies.filter { 
-            it.title.contains(cleanSearch, ignoreCase = true) || 
-            it.genre.contains(cleanSearch, ignoreCase = true) 
-        }.take(6)
-    }
-
-    val matchedSeries = remember(cleanSearch, series) {
-        if (!isSearchActive) emptyList()
-        else series.filter { 
-            it.title.contains(cleanSearch, ignoreCase = true) || 
-            it.genre.contains(cleanSearch, ignoreCase = true) 
-        }.take(6)
-    }
-
-    val matchedEpisodes = remember(cleanSearch, series, userEmail) {
-        if (!isSearchActive) emptyList()
-        else {
-            val list = mutableListOf<SearchEpisodeMatch>()
-            for (s in series) {
-                val cached = DesktopSeriesCache.get(userEmail, s.id) ?: continue
-                for (season in cached.seasons) {
-                    for (ep in season.episodes) {
-                        val epCode = "S%02dE%02d".format(ep.seasonNumber, ep.episodeNumber)
-                        val epCodeAlt = "%dx%02d".format(ep.seasonNumber, ep.episodeNumber)
-                        val epCodeAlt2 = "Ep ${ep.episodeNumber}"
-                        val matches = ep.title.contains(cleanSearch, ignoreCase = true) ||
-                                epCode.contains(cleanSearch, ignoreCase = true) ||
-                                epCodeAlt.contains(cleanSearch, ignoreCase = true) ||
-                                epCodeAlt2.contains(cleanSearch, ignoreCase = true) ||
-                                s.title.contains(cleanSearch, ignoreCase = true)
-                        if (matches) {
-                            list.add(SearchEpisodeMatch(ep, s))
-                        }
-                    }
-                }
-            }
-            list.take(8)
-        }
-    }
-
-    val matchedWatchlistEntries = remember(cleanSearch, userEmail, watchlistRevision, matchedMovies, matchedSeries) {
-        if (!isSearchActive) emptyList()
-        else {
-            val driveNormalized = (matchedMovies + matchedSeries).map { DesktopWatchlistManager.normalizeTitle(it.title) }.toSet()
-            DesktopWatchlistManager.getVisibleEntries(userEmail).filter { entry ->
-                entry.title.contains(cleanSearch, ignoreCase = true) &&
-                    !driveNormalized.contains(entry.normalizedTitle)
-            }.take(6)
-        }
-    }
-
-    val cleanNormalized = remember(cleanSearch) { DesktopWatchlistManager.normalizeTitle(cleanSearch) }
-    val hasExactWatchlistMatch = remember(cleanNormalized, userEmail, watchlistRevision) {
-        if (!isSearchActive) true
-        else DesktopWatchlistManager.getVisibleEntries(userEmail).any { it.normalizedTitle == cleanNormalized }
-    }
-
-    // Keyboard Shortcuts (Ctrl+K to focus search, ESC to clear search)
-    val dispatcher = remember {
+    // Keyboard Shortcuts (Ctrl+K to focus search & open overlay; ESC closes External Modal first, then search)
+    val dispatcher = remember(focusManager) {
         KeyEventDispatcher { e ->
             if (e.id == KeyEvent.KEY_PRESSED) {
                 if ((e.isControlDown || e.isMetaDown) && e.keyCode == KeyEvent.VK_K) {
+                    isSearchOverlayOpen = true
                     try {
                         searchFocusRequester.requestFocus()
                         true
                     } catch (_: Throwable) { false }
-                } else if (e.keyCode == KeyEvent.VK_ESCAPE && searchQuery.isNotBlank()) {
-                    searchQuery = ""
-                    true
+                } else if (e.keyCode == KeyEvent.VK_ESCAPE) {
+                    when {
+                        previewExternalResult != null -> {
+                            previewExternalResult = null
+                            true
+                        }
+                        isSearchOverlayOpen || searchQuery.isNotBlank() -> {
+                            searchQuery = ""
+                            isSearchOverlayOpen = false
+                            focusManager.clearFocus()
+                            true
+                        }
+                        else -> false
+                    }
                 } else false
             } else false
         }
@@ -280,8 +262,13 @@ fun DesktopHomeScreen(
     val isAnyPlayerActive = selectedMovieForPlayer != null || selectedSeriesForDetail != null
     val hideNavigation = effectiveFullscreen
 
-    Row(
+    Box(
         modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF07090E))
+    ) {
+    Row(
+        modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF07090E))
     ) {
@@ -301,482 +288,45 @@ fun DesktopHomeScreen(
             )
         }
 
-        // 2. RIGHT WORKSPACE
-        Column(
+        // 2. RIGHT WORKSPACE (Anchored Top Bar + Floating Hybrid Search Overlay)
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
                 .background(Color(0xFF07090E))
         ) {
-            // Top App Bar & Floating Global Search Overlay (Hidden during active media fullscreen)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF07090E))
+        ) {
+            // Top App Bar (Hidden during active media fullscreen)
             if (!hideNavigation) {
                 Box(modifier = Modifier.fillMaxWidth().zIndex(10f)) {
                     DesktopFigmaTopBar(
                         searchQuery = searchQuery,
-                        onSearchChange = { searchQuery = it },
+                        onSearchChange = { next ->
+                            searchQuery = next
+                            isSearchOverlayOpen = true
+                        },
+                        onSearchFocusChanged = { focused ->
+                            if (focused) {
+                                isSearchOverlayOpen = true
+                            }
+                        },
+                        onSearchSubmit = {
+                            if (searchQuery.trim().length >= 2) {
+                                DesktopSearchHistoryManager.recordSearchQuery(userEmail, searchQuery)
+                            }
+                        },
+                        isSearchActive = isSearchOverlayOpen || searchQuery.isNotBlank(),
                         searchFocusRequester = searchFocusRequester,
                         userName = userName.ifBlank { userEmail.substringBefore('@').ifBlank { "Clotube User" } },
                         userEmail = userEmail,
                         userAvatarUrl = userAvatarUrl,
-                        onSignOut = onSignOut,
+                        onSignOut = handleSignOut,
                         onOpenSettings = { navigateTo(DesktopNavSection.SETTINGS) }
                     )
-
-                    // Floating Global Search Overlay
-                    if (isSearchActive) {
-                        val totalResults = matchedMovies.size + matchedSeries.size + matchedEpisodes.size + matchedWatchlistEntries.size
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = Color(0xF70C111C),
-                            border = BorderStroke(1.dp, Color(0xFF263346)),
-                            shadowElevation = 20.dp,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(start = 28.dp, top = 62.dp)
-                                .widthIn(min = 520.dp, max = 640.dp)
-                                .heightIn(max = 500.dp)
-                        ) {
-                            if (totalResults == 0 && hasExactWatchlistMatch) {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth().padding(28.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "No results found for \"$cleanSearch\"",
-                                        color = Color(0xFF64748B),
-                                        fontSize = 13.sp
-                                    )
-                                }
-                            } else {
-                                LazyColumn(
-                                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                                ) {
-                                    if (totalResults == 0) {
-                                        item(key = "no_res_info") {
-                                            Text(
-                                                text = "No catalog results found for \"$cleanSearch\"",
-                                                color = Color(0xFF64748B),
-                                                fontSize = 12.sp,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
-                                            )
-                                        }
-                                    }
-
-                                    // SERIES SECTION
-                                    if (matchedSeries.isNotEmpty()) {
-                                        item(key = "hdr_series") {
-                                            Text(
-                                                text = "SERIES",
-                                                color = Color(0xFF38BDF8),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                letterSpacing = 1.2.sp,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                            )
-                                        }
-
-                                        items(matchedSeries, key = { "search_series_${it.id}" }) { s ->
-                                            val thumb = rememberThumbnailBitmap(s.thumbnailUrl, s.fallbackThumbnailUrl, accessToken, userEmail, ThumbnailSize.CARD)
-                                            val watchlistStatus = remember(s.id, s.title, userEmail, watchlistRevision) {
-                                                DesktopWatchlistManager.getStatusForMedia(userEmail, s.title, s.id)
-                                            }
-
-                                            SearchResultRowCard(
-                                                onClick = {
-                                                    searchQuery = ""
-                                                    targetedEpisodeId = null
-                                                    selectedSeriesForDetail = s
-                                                }
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    if (thumb != null) {
-                                                        Image(bitmap = thumb, contentDescription = s.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                                    }
-                                                }
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = s.title,
-                                                            color = Color.White,
-                                                            fontSize = 13.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis,
-                                                            modifier = Modifier.weight(1f, fill = false)
-                                                        )
-                                                        if (watchlistStatus == WatchlistStatus.WATCHED) {
-                                                            Surface(
-                                                                shape = RoundedCornerShape(4.dp),
-                                                                color = Color(0x1F10B981),
-                                                                border = BorderStroke(1.dp, Color(0x4010B981))
-                                                            ) {
-                                                                Text(
-                                                                    text = "Watched",
-                                                                    color = Color(0xFF6EE7B7),
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                                )
-                                                            }
-                                                        } else if (watchlistStatus == WatchlistStatus.WATCH_LATER) {
-                                                            Surface(
-                                                                shape = RoundedCornerShape(4.dp),
-                                                                color = Color(0x2460A5FA),
-                                                                border = BorderStroke(1.dp, Color(0x4760A5FA))
-                                                            ) {
-                                                                Text(
-                                                                    text = "Watch Later",
-                                                                    color = Color(0xFF93C5FD),
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                                )
-                                                            }
-                                                        } else if (watchlistStatus == WatchlistStatus.REWATCH) {
-                                                            Surface(
-                                                                shape = RoundedCornerShape(4.dp),
-                                                                color = Color(0xFF1E2534),
-                                                                border = BorderStroke(1.dp, Color(0x33FFFFFF))
-                                                            ) {
-                                                                Text(
-                                                                    text = "Rewatch",
-                                                                    color = Color(0xFFF1F5F9),
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                                )
-                                                            }
-                                                        }
-                                                    }
-                                                    Text(text = s.genre.ifBlank { "Series" }, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                }
-                                                Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
-                                                    Text(text = "Series", color = Color(0xFF00E5FF), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // EPISODES SECTION
-                                    if (matchedEpisodes.isNotEmpty()) {
-                                        item(key = "hdr_episodes") {
-                                            Text(
-                                                text = "EPISODES",
-                                                color = Color(0xFF38BDF8),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                letterSpacing = 1.2.sp,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                            )
-                                        }
-
-                                        items(matchedEpisodes, key = { "search_ep_${it.episode.id}" }) { match ->
-                                            val thumb = rememberThumbnailBitmap(match.episode.thumbnailUrl, null, accessToken, userEmail, ThumbnailSize.CARD)
-                                            SearchResultRowCard(
-                                                onClick = {
-                                                    searchQuery = ""
-                                                    targetedEpisodeId = match.episode.id
-                                                    selectedSeriesForDetail = match.parentSeries
-                                                }
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    if (thumb != null) {
-                                                        Image(bitmap = thumb, contentDescription = match.episode.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                                    }
-                                                    Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                                }
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    val epCode = "S%02dE%02d".format(match.episode.seasonNumber, match.episode.episodeNumber)
-                                                    Text(text = "$epCode • ${match.episode.title}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                    Text(text = "${match.parentSeries.title} • ${match.episode.durationFormatted}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                }
-                                                Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
-                                                    Text(text = "Play Episode", color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // MOVIES SECTION
-                                    if (matchedMovies.isNotEmpty()) {
-                                        item(key = "hdr_movies") {
-                                            Text(
-                                                text = "MOVIES",
-                                                color = Color(0xFF38BDF8),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                letterSpacing = 1.2.sp,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                            )
-                                        }
-
-                                        items(matchedMovies, key = { "search_movie_${it.id}" }) { m ->
-                                            val thumb = rememberThumbnailBitmap(m.thumbnailUrl, m.fallbackThumbnailUrl, accessToken, userEmail, ThumbnailSize.CARD)
-                                            val watchlistStatus = remember(m.id, m.title, userEmail, watchlistRevision) {
-                                                DesktopWatchlistManager.getStatusForMedia(userEmail, m.title, m.id)
-                                                    ?: if (DesktopWatchHistoryManager.isEpisodeWatched(userEmail, m.id)) {
-                                                        WatchlistStatus.WATCHED
-                                                    } else null
-                                            }
-
-                                            SearchResultRowCard(
-                                                onClick = {
-                                                    searchQuery = ""
-                                                    selectedMovieForPlayer = m
-                                                }
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier.width(60.dp).height(38.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1A2232)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    if (thumb != null) {
-                                                        Image(bitmap = thumb, contentDescription = m.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                                    }
-                                                }
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = m.title,
-                                                            color = Color.White,
-                                                            fontSize = 13.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis,
-                                                            modifier = Modifier.weight(1f, fill = false)
-                                                        )
-                                                        if (watchlistStatus == WatchlistStatus.WATCHED) {
-                                                            Surface(
-                                                                shape = RoundedCornerShape(4.dp),
-                                                                color = Color(0x1F10B981),
-                                                                border = BorderStroke(1.dp, Color(0x4010B981))
-                                                            ) {
-                                                                Text(
-                                                                    text = "Watched",
-                                                                    color = Color(0xFF6EE7B7),
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                                )
-                                                            }
-                                                        } else if (watchlistStatus == WatchlistStatus.WATCH_LATER) {
-                                                            Surface(
-                                                                shape = RoundedCornerShape(4.dp),
-                                                                color = Color(0x2460A5FA),
-                                                                border = BorderStroke(1.dp, Color(0x4760A5FA))
-                                                            ) {
-                                                                Text(
-                                                                    text = "Watch Later",
-                                                                    color = Color(0xFF93C5FD),
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                                )
-                                                            }
-                                                        } else if (watchlistStatus == WatchlistStatus.REWATCH) {
-                                                            Surface(
-                                                                shape = RoundedCornerShape(4.dp),
-                                                                color = Color(0xFF1E2534),
-                                                                border = BorderStroke(1.dp, Color(0x33FFFFFF))
-                                                            ) {
-                                                                Text(
-                                                                    text = "Rewatch",
-                                                                    color = Color(0xFFF1F5F9),
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                                )
-                                                            }
-                                                        }
-                                                    }
-                                                    Text(text = "${m.releaseYear} • ${m.genre}", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                }
-                                                Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF1E293B)) {
-                                                    Text(text = "Movie", color = Color(0xFFCBD5E1), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // FROM YOUR WATCHLIST SECTION (Off-Drive / Custom / Deleted Titles)
-                                    if (matchedWatchlistEntries.isNotEmpty()) {
-                                        item(key = "hdr_watchlist") {
-                                            Text(
-                                                text = "FROM YOUR WATCHLIST",
-                                                color = Color(0xFFF59E0B),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                letterSpacing = 1.2.sp,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                            )
-                                        }
-
-                                        items(matchedWatchlistEntries, key = { "search_wl_${it.id}" }) { entry ->
-                                            SearchResultRowCard(
-                                                onClick = {
-                                                    // Toggle status on row click
-                                                    val next = when (entry.status) {
-                                                        WatchlistStatus.WATCHED -> WatchlistStatus.WATCH_LATER
-                                                        WatchlistStatus.WATCH_LATER -> WatchlistStatus.REWATCH
-                                                        WatchlistStatus.REWATCH -> WatchlistStatus.WATCHED
-                                                    }
-                                                    coroutineScope.launch {
-                                                        DesktopWatchlistManager.updateEntryById(userEmail, entry.id, newStatus = next)
-                                                        DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
-                                                    }
-                                                }
-                                            ) {
-                                                val wlThumb = rememberThumbnailBitmap(
-                                                    primaryUrl = entry.posterUrl?.takeIf { it.isNotBlank() },
-                                                    fallbackUrl = null,
-                                                    accessToken = accessToken,
-                                                    userEmail = userEmail,
-                                                    size = ThumbnailSize.CARD
-                                                )
-
-                                                Box(
-                                                    modifier = Modifier
-                                                        .width(40.dp)
-                                                        .height(54.dp)
-                                                        .clip(RoundedCornerShape(5.dp))
-                                                        .background(Color(0xFF1A2232)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    if (wlThumb != null) {
-                                                        Image(
-                                                            bitmap = wlThumb,
-                                                            contentDescription = entry.title,
-                                                            contentScale = ContentScale.Crop,
-                                                            modifier = Modifier.fillMaxSize()
-                                                        )
-                                                    } else {
-                                                        Icon(
-                                                            imageVector = if (entry.mediaType == WatchlistMediaType.SERIES) Icons.Rounded.Tv else Icons.Rounded.Movie,
-                                                            contentDescription = null,
-                                                            tint = Color(0xFF94A3B8),
-                                                            modifier = Modifier.size(20.dp)
-                                                        )
-                                                    }
-                                                }
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(text = entry.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                    Text(text = "${entry.mediaType.label} • Not in Drive", color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 1)
-                                                }
-                                                Surface(
-                                                    shape = RoundedCornerShape(4.dp),
-                                                    color = when (entry.status) {
-                                                        WatchlistStatus.WATCHED -> Color(0x1F10B981)
-                                                        WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
-                                                        WatchlistStatus.REWATCH -> Color(0xFF1E2534)
-                                                    },
-                                                    border = BorderStroke(
-                                                        1.dp,
-                                                        when (entry.status) {
-                                                            WatchlistStatus.WATCHED -> Color(0x4010B981)
-                                                            WatchlistStatus.WATCH_LATER -> Color(0x4760A5FA)
-                                                            WatchlistStatus.REWATCH -> Color(0x33FFFFFF)
-                                                        }
-                                                    ),
-                                                    modifier = Modifier
-                                                        .clip(RoundedCornerShape(4.dp))
-                                                        .clickable {
-                                                            val nextStatus = when (entry.status) {
-                                                                WatchlistStatus.WATCHED -> WatchlistStatus.WATCH_LATER
-                                                                WatchlistStatus.WATCH_LATER -> WatchlistStatus.REWATCH
-                                                                WatchlistStatus.REWATCH -> WatchlistStatus.WATCHED
-                                                            }
-                                                            coroutineScope.launch {
-                                                                DesktopWatchlistManager.updateEntryById(userEmail, entry.id, newStatus = nextStatus)
-                                                                DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
-                                                            }
-                                                        }
-                                                        .pointerHoverIcon(PointerIcon.Hand)
-                                                ) {
-                                                    Text(
-                                                        text = entry.status.label,
-                                                        color = when (entry.status) {
-                                                            WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
-                                                            WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                                                            WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
-                                                        },
-                                                        fontSize = 10.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Quick-Add Off-Drive Title Action Row
-                                    if (isSearchActive && !hasExactWatchlistMatch) {
-                                        item(key = "quick_add_watchlist_row") {
-                                            Surface(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable {
-                                                        coroutineScope.launch {
-                                                            DesktopWatchlistManager.upsertEntry(
-                                                                email = userEmail,
-                                                                title = cleanSearch,
-                                                                mediaType = WatchlistMediaType.MOVIE,
-                                                                status = WatchlistStatus.WATCHED,
-                                                                driveId = null
-                                                            )
-                                                            DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
-                                                            DesktopWatchlistManager.resolveMissingOffDrivePosters(
-                                                                email = userEmail,
-                                                                accessToken = accessToken,
-                                                                driveMovies = movies,
-                                                                driveSeries = series
-                                                            )
-                                                        }
-                                                    }
-                                                    .pointerHoverIcon(PointerIcon.Hand),
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = Color(0xFF10B981).copy(alpha = 0.12f),
-                                                border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.35f))
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.Add,
-                                                        contentDescription = "Add",
-                                                        tint = Color(0xFF34D399),
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Text(
-                                                        text = "Mark \"$cleanSearch\" as Watched (Save to Watchlist)",
-                                                        color = Color(0xFF34D399),
-                                                        fontSize = 12.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
@@ -1038,7 +588,7 @@ fun DesktopHomeScreen(
                                 DesktopSettingsScreen(
                                     userEmail = userEmail,
                                     userName = userName,
-                                    onSignOut = onSignOut,
+                                    onSignOut = handleSignOut,
                                     onRescanLibrary = onRescan,
                                     onClearWatchHistory = {
                                         DesktopWatchHistoryManager.clearLocalHistory(userEmail)
@@ -1053,88 +603,64 @@ fun DesktopHomeScreen(
             }
             }
         }
-    }
-}
 
-@Composable
-private fun SearchResultRowCard(
-    onClick: () -> Unit,
-    content: @Composable RowScope.() -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val coroutineScope = rememberCoroutineScope()
-    val clickFlashAlpha = remember { Animatable(0f) }
-
-    val scale by animateFloatAsState(
-        targetValue = when {
-            isPressed -> 0.985f
-            isHovered -> 1.015f
-            else -> 1.0f
-        },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
-        label = "SearchRowScale"
-    )
-
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isHovered -> Color(0xFF334155)
-            else -> Color(0xFF1E2838)
-        },
-        animationSpec = tween(180),
-        label = "SearchRowBorder"
-    )
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .shadow(
-                elevation = if (isHovered) 8.dp else 0.dp,
-                shape = RoundedCornerShape(8.dp),
-                spotColor = Color(0x99000000),
-                ambientColor = Color(0x40000000)
-            )
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (isHovered) Color(0xFF171F30) else Color(0xFF131824))
-            .border(
-                width = if (isHovered) 1.5.dp else 1.dp,
-                color = borderColor,
-                shape = RoundedCornerShape(8.dp)
-            )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null
-            ) {
-                coroutineScope.launch {
-                    clickFlashAlpha.snapTo(0.3f)
-                    clickFlashAlpha.animateTo(0f, animationSpec = tween(200))
-                }
-                onClick()
-            }
-            .pointerHoverIcon(PointerIcon.Hand)
-    ) {
-        Row(
-            modifier = Modifier.padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            content = content
-        )
-
-        if (clickFlashAlpha.value > 0f) {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(Color.White.copy(alpha = clickFlashAlpha.value * 0.35f))
+        // Floating Hybrid Global Search Overlay (0 ms local Drive + 250 ms debounced external + Recent Searches)
+        if (!hideNavigation && (isSearchOverlayOpen || searchQuery.isNotBlank())) {
+            DesktopGlobalSearchOverlay(
+                searchQuery = searchQuery,
+                userEmail = userEmail,
+                accessToken = accessToken,
+                movies = movies,
+                series = series,
+                onSelectRecentQuery = { selectedQuery ->
+                    searchQuery = selectedQuery
+                    isSearchOverlayOpen = true
+                    try {
+                        searchFocusRequester.requestFocus()
+                    } catch (_: Throwable) {}
+                },
+                onDismiss = {
+                    isSearchOverlayOpen = false
+                    focusManager.clearFocus()
+                },
+                onOpenDriveMovie = { movieItem ->
+                    searchQuery = ""
+                    isSearchOverlayOpen = false
+                    previewExternalResult = null
+                    focusManager.clearFocus()
+                    selectedSeriesForDetail = null
+                    targetedEpisodeId = null
+                    selectedMovieForPlayer = movieItem
+                },
+                onOpenDriveSeries = { seriesItem, episodeId ->
+                    searchQuery = ""
+                    isSearchOverlayOpen = false
+                    previewExternalResult = null
+                    focusManager.clearFocus()
+                    selectedMovieForPlayer = null
+                    targetedEpisodeId = episodeId
+                    selectedSeriesForDetail = seriesItem
+                },
+                onOpenExternalPreview = { externalResult ->
+                    previewExternalResult = externalResult
+                },
+                modifier = Modifier.zIndex(20f)
             )
         }
+        }
+    }
+
+    // Full-Window Obsidian Cinema External Title Preview Modal ("Not in Drive" cards)
+    previewExternalResult?.let { externalItem ->
+        ExternalTitlePreviewModal(
+            result = externalItem,
+            searchQuery = searchQuery,
+            userEmail = userEmail,
+            accessToken = accessToken,
+            onDismiss = { previewExternalResult = null },
+            modifier = Modifier.zIndex(50f)
+        )
+    }
     }
 }
 
@@ -1343,6 +869,9 @@ private fun DesktopFigmaSidebar(
 private fun DesktopFigmaTopBar(
     searchQuery: String,
     onSearchChange: (String) -> Unit,
+    onSearchFocusChanged: (Boolean) -> Unit = {},
+    onSearchSubmit: () -> Unit = {},
+    isSearchActive: Boolean = false,
     searchFocusRequester: FocusRequester,
     userName: String,
     userEmail: String,
@@ -1361,6 +890,12 @@ private fun DesktopFigmaTopBar(
             .ifBlank { "CU" }
     }
 
+    val searchPillBorder by animateColorAsState(
+        targetValue = if (isSearchActive) Color(0xFF3877EE) else Color(0xFF1A2230),
+        animationSpec = tween(160),
+        label = "TopBarSearchBorder"
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1372,11 +907,21 @@ private fun DesktopFigmaTopBar(
         // Search Input Pill
         Surface(
             modifier = Modifier
-                .width(420.dp)
-                .height(40.dp),
+                .width(440.dp)
+                .height(40.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    onSearchFocusChanged(true)
+                    try {
+                        searchFocusRequester.requestFocus()
+                    } catch (_: Throwable) {}
+                },
             shape = RoundedCornerShape(20.dp),
-            color = Color(0xFF0E121B),
-            border = BorderStroke(1.dp, Color(0xFF1A2230))
+            color = Color(0xFF10131B),
+            border = BorderStroke(1.dp, searchPillBorder)
         ) {
             Row(
                 modifier = Modifier
@@ -1393,22 +938,40 @@ private fun DesktopFigmaTopBar(
                     Icon(
                         imageVector = Icons.Rounded.Search,
                         contentDescription = "Search",
-                        tint = Color(0xFF64748B),
+                        tint = if (isSearchActive) Color(0xFF3877EE) else Color(0xFF64748B),
                         modifier = Modifier.size(16.dp)
                     )
                     androidx.compose.foundation.text.BasicTextField(
                         value = searchQuery,
                         onValueChange = onSearchChange,
                         singleLine = true,
+                        cursorBrush = SolidColor(Color(0xFF3877EE)),
                         textStyle = androidx.compose.ui.text.TextStyle(
                             color = Color.White,
                             fontSize = 13.sp
                         ),
-                        modifier = Modifier.fillMaxWidth().focusRequester(searchFocusRequester),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(searchFocusRequester)
+                            .onFocusChanged { focusState ->
+                                onSearchFocusChanged(focusState.isFocused)
+                            }
+                            .onPreviewKeyEvent { keyEvent ->
+                                if (keyEvent.type == KeyEventType.KeyDown &&
+                                    (keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
+                                ) {
+                                    onSearchSubmit()
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
                         decorationBox = { innerTextField ->
                             if (searchQuery.isEmpty()) {
                                 Text(
-                                    text = "Search movies, series...",
+                                    text = "Search Drive, TMDB, movies, series...",
                                     color = Color(0xFF64748B),
                                     fontSize = 13.sp
                                 )
@@ -1426,17 +989,22 @@ private fun DesktopFigmaTopBar(
                         modifier = Modifier
                             .size(16.dp)
                             .clip(CircleShape)
-                            .clickable { onSearchChange("") }
+                            .clickable {
+                                onSearchChange("")
+                                try {
+                                    searchFocusRequester.requestFocus()
+                                } catch (_: Throwable) {}
+                            }
                             .pointerHoverIcon(PointerIcon.Hand)
                     )
                 } else {
                     Surface(
                         shape = RoundedCornerShape(5.dp),
-                        color = Color(0xFF141924),
-                        border = BorderStroke(1.dp, Color(0xFF222B3D))
+                        color = Color(0xFF181C26),
+                        border = BorderStroke(1.dp, Color(0xFF252D3F))
                     ) {
                         Text(
-                            text = "⌘ K",
+                            text = "Ctrl K",
                             color = Color(0xFF94A3B8),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -3203,7 +2771,7 @@ fun MediaCardContextMenuBox(
                         val options = listOf(
                             Triple(WatchlistStatus.WATCHED, Icons.Rounded.CheckCircle, Color(0xFF10B981)),
                             Triple(WatchlistStatus.WATCH_LATER, Icons.Rounded.BookmarkAdd, Color(0xFF60A5FA)),
-                            Triple(WatchlistStatus.REWATCH, Icons.Rounded.Replay, Color(0xFFCBD5E1))
+                            Triple(WatchlistStatus.REWATCH, Icons.Rounded.Replay, Color(0xFF3877EE))
                         )
 
                         options.forEachIndexed { index, (statusOption, iconVector, accentColor) ->
@@ -3213,12 +2781,14 @@ fun MediaCardContextMenuBox(
                             val selectedBg = when (statusOption) {
                                 WatchlistStatus.WATCHED -> Color(0x1F10B981)
                                 WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
-                                WatchlistStatus.REWATCH -> Color(0xFF1E2534)
+                                WatchlistStatus.REWATCH -> Color(0x2B3877EE)
+                                WatchlistStatus.UNWATCHED -> Color(0xFF1E2534)
                             }
                             val selectedTextColor = when (statusOption) {
                                 WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
                                 WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                                WatchlistStatus.REWATCH -> Color(0xFFF1F5F9)
+                                WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
+                                WatchlistStatus.UNWATCHED -> Color(0xFF94A3B8)
                             }
 
                             val itemAlpha = remember { Animatable(0f) }
@@ -3533,8 +3103,8 @@ fun DesktopSeriesGridCard(
             } else if (cardWatchlistStatus == WatchlistStatus.REWATCH) {
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = Color(0xD90A0E17),
-                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                    color = Color(0xD90A1020),
+                    border = BorderStroke(1.dp, Color(0x733877EE)),
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(10.dp)
@@ -3547,12 +3117,12 @@ fun DesktopSeriesGridCard(
                         Icon(
                             imageVector = Icons.Rounded.Replay,
                             contentDescription = "Rewatch",
-                            tint = Color(0xFFCBD5E1),
+                            tint = Color(0xFF60A5FA),
                             modifier = Modifier.size(12.dp)
                         )
                         Text(
                             text = "Rewatch",
-                            color = Color(0xFFF1F5F9),
+                            color = Color(0xFF60A5FA),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold
                         )
