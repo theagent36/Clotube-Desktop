@@ -1,0 +1,30 @@
+---
+description: Bundle Clotube Desktop source code into clotube_desktop_source_bundle.md and replace it in the Clotube Desktop Gemini Notebook.
+---
+
+Role: Principal Desktop Build & Automation Engineer.
+Target Project: Clotube Desktop (`com.clotube.desktop`).
+Task: Export all core desktop source files, build scripts, and configuration files into a single, clean Markdown bundle named `clotube_desktop_source_bundle.md` in the project root, then replace the old source in the `Clotube Desktop` Gemini Notebook.
+
+### Phase 1: Generate & Verify Source Bundle
+1. Scope & File Formats:
+   - Include all desktop source files matching: `.kt`, `.kts`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.cs`, `.html`, `.css`, and root build manifests (`package.json`, `build.gradle.kts`, `pom.xml`, or `.csproj`).
+   - For `.json` files, include only configuration files; exclude large data caches, watch history backups, or database dumps.
+2. Exclusion Rules (Strict):
+   - Completely ignore and exclude: `build/`, `.gradle/`, `node_modules/`, `dist/`, `out/`, `bin/`, `obj/`, `.idea/`, `.git/`, `.vscode/`, `venv/`, and all media/binary files (`.exe`, `.msi`, `.dll`, `.so`, `.png`, `.ico`, `.mp4`, `.mkv`).
+3. Output Formatting:
+   - Title: `# Clotube Desktop Source Code Bundle`
+   - File Header: `## File: <relative_path>`
+   - File Content: Enclose each file's complete contents inside a language-appropriate markdown code fence (e.g., ````kotlin ... ```` or ````typescript ... ````).
+   - Zero stubs or placeholders: preserve 100% of the implementation code.
+4. Execution & Verification:
+   - Run a terminal script from the workspace root to generate `clotube_desktop_source_bundle.md`.
+   - Validate that the file size is verified and non-empty.
+   - Print the total number of files bundled and final file size in KB before proceeding.
+
+### Phase 2: Sync to Gemini Notebook ("Clotube Desktop")
+Using the `gemini-notebook-mcp` tool, perform the following steps in my Gemini Notebook named `Clotube Desktop`:
+1. List all existing sources in the `Clotube Desktop` notebook.
+2. If any existing source is named `clotube_desktop_source_bundle.md`, delete it.
+3. Upload the newly generated local file `clotube_desktop_source_bundle.md` from the workspace root as a new source.
+4. List the notebook's sources again to confirm `clotube_desktop_source_bundle.md` is uploaded and indexed.

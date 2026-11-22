@@ -192,6 +192,34 @@ object DesktopWatchHistorySync {
             }
             // Always trigger UI invalidation after a pull, since mergeRemotePayload may have
             // removed watched IDs from the local cache (deletions from Android).
+            val historyFolderId = target.parentFolderId
+            val archiveFileId = queryFirstFileId(
+                driveService,
+                "'$historyFolderId' in parents and name = '$ARCHIVE_SYNC_FILE' and trashed = false"
+            )
+            if (archiveFileId != null) {
+                try {
+                    val remoteArchiveJson = downloadJsonFile(driveService, archiveFileId)
+                    DesktopWatchHistoryManager.mergeRemoteArchivePayload(email, remoteArchiveJson)
+                } catch (e: Exception) {
+                    System.err.println("[DesktopWatchHistorySync] Archive pull skipped: ${e.message}")
+                }
+            } else if (DesktopWatchHistoryManager.hasArchiveItems(email)) {
+                try {
+                    val archivePayload = DesktopWatchHistoryManager.getArchivePayloadJson(email)
+                    upsertDriveJsonFile(
+                        driveService = driveService,
+                        fileName = ARCHIVE_SYNC_FILE,
+                        parentFolderId = historyFolderId,
+                        existingFileId = null,
+                        jsonPayload = archivePayload
+                    )
+                    DesktopWatchHistoryManager.clearArchiveDirty(email)
+                } catch (e: Exception) {
+                    System.err.println("[DesktopWatchHistorySync] Initial archive upload failed: ${e.message}")
+                }
+            }
+
             DesktopWatchHistoryManager.notifyMutation()
             return@withContext merged
         } catch (e: GoogleJsonResponseException) {
@@ -248,14 +276,22 @@ object DesktopWatchHistorySync {
                     jsonPayload = payload
                 )
 
-                // Best-effort flush of entries pruned beyond the 50-item active window into clotube_archive.json
-                val archiveJson = DesktopWatchHistoryManager.consumeOverflowArchiveJson(email)
-                if (archiveJson != null) {
+                // Archive upload: pull-merge-upsert when pending upload or forced
+                if (DesktopWatchHistoryManager.hasPendingArchiveUpload(email) || (force && DesktopWatchHistoryManager.isArchiveDirty(email))) {
                     try {
                         val existingArchiveId = queryFirstFileId(
                             driveService,
                             "'${target.parentFolderId}' in parents and name = '$ARCHIVE_SYNC_FILE' and trashed = false"
                         )
+                        if (existingArchiveId != null && !DesktopWatchHistoryManager.isArchiveCleared(email)) {
+                            try {
+                                val remoteArchiveJson = downloadJsonFile(driveService, existingArchiveId)
+                                DesktopWatchHistoryManager.mergeRemoteArchivePayload(email, remoteArchiveJson)
+                            } catch (e: Exception) {
+                                System.err.println("[DesktopWatchHistorySync] Failed to pre-pull archive before push: ${e.message}")
+                            }
+                        }
+                        val archiveJson = DesktopWatchHistoryManager.getArchivePayloadJson(email)
                         upsertDriveJsonFile(
                             driveService = driveService,
                             fileName = ARCHIVE_SYNC_FILE,
@@ -263,8 +299,11 @@ object DesktopWatchHistorySync {
                             existingFileId = existingArchiveId,
                             jsonPayload = archiveJson
                         )
+                        DesktopWatchHistoryManager.clearArchiveDirty(email)
+                        DesktopWatchHistoryManager.clearArchiveCleared(email)
+                        println("[DesktopWatchHistorySync] Successfully pushed clotube_archive.json to Google Drive.")
                     } catch (e: Exception) {
-                        System.err.println("[DesktopWatchHistorySync] Archive write skipped: ${e.message}")
+                        System.err.println("[DesktopWatchHistorySync] Archive write failed: ${e.message}")
                     }
                 }
 

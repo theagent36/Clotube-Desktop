@@ -566,6 +566,19 @@ fun DesktopSettingsScreen(
                                     DesktopAppSettings.update { copy(batterySaver60Fps = it) }
                                 }
                             )
+                            HorizontalDivider(color = Color(0xFF161D2B), modifier = Modifier.padding(vertical = 12.dp))
+                            SettingsToggleRow(
+                                title = "Group Movies by Language",
+                                subtitle = "Separate movies into OTT-style language shelves (Bengali, Hindi, English) across the Movies catalog.",
+                                checked = settings.groupMoviesByLanguage,
+                                onCheckedChange = {
+                                    DesktopAppSettings.update { copy(groupMoviesByLanguage = it) }
+                                    showToast(
+                                        if (it) "Grouping movies by language enabled"
+                                        else "Unified movies catalog enabled"
+                                    )
+                                }
+                            )
                         }
                     }
 

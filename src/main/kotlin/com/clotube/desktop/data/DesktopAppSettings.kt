@@ -32,6 +32,7 @@ data class ClotubeSettings(
     val batterySaver60Fps: Boolean = false,
     val backgroundEcoMode: Boolean = true,
     val launchMaximized: Boolean = true,
+    val groupMoviesByLanguage: Boolean = true,
 
     // 4. Audio & Subtitles
     val rememberVolume: Boolean = true,
@@ -69,7 +70,9 @@ object DesktopAppSettings {
                     parsed.subtitleScalePercent.coerceIn(25, 300)
                 }
 
-                parsed.copy(subtitleScalePercent = migratedScale)
+                parsed.copy(
+                    subtitleScalePercent = migratedScale
+                )
             } else {
                 ClotubeSettings()
             }

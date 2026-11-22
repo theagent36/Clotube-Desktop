@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import com.clotube.desktop.auth.DesktopAuthManager
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopLibraryCache
+import com.clotube.desktop.data.DesktopOnlineMetadataResolver
 import com.clotube.desktop.data.DesktopProfileManager
 import com.clotube.desktop.data.DesktopThumbnailPrefetcher
 import com.clotube.desktop.data.DesktopWatchHistorySync
@@ -20,6 +21,7 @@ import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.network.DesktopNetworkMonitor
 import com.clotube.desktop.ui.components.OfflineConnectionPopup
 import com.clotube.desktop.ui.components.clearThumbnailMemoryCache
+import com.clotube.desktop.ui.components.invalidateFailedUrl
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
 import com.clotube.desktop.ui.screens.DesktopLoginScreen
 import com.clotube.desktop.ui.screens.DesktopSetupWizardScreen
@@ -75,6 +77,80 @@ fun App(
             rescanTrigger++
         }
         wasOffline = !isOnline
+    }
+
+    // Background validation of movie poster URLs & language classifications:
+    // If blank/unreachable posters or outdated classifications (e.g. Deadpool & Wolverine), re-resolve via IMDb/TMDB
+    LaunchedEffect(activeEmail, movies.isNotEmpty()) {
+        val email = activeEmail
+        if (email.isNotBlank() && movies.isNotEmpty() && DesktopNetworkMonitor.isOnline.value) {
+            withContext(Dispatchers.IO) {
+                var cacheModified = false
+                val updatedMovies = movies.map { movie ->
+                    val poster = movie.thumbnailUrl ?: ""
+                    val needsPosterRecheck = poster.isBlank() || (poster.contains("m.media-amazon.com") && !DesktopOnlineMetadataResolver.isPosterUrlReachable(poster))
+                    val titleLower = movie.title.lowercase()
+                    val isPotentiallyMisclassified = movie.language.isBlank() ||
+                            movie.language == "Unknown" ||
+                            (movie.language.equals("Hindi", ignoreCase = true) && (titleLower.contains("deadpool") || titleLower.contains("dune") || titleLower.contains("top gun"))) ||
+                            (movie.language.equals("Bengali", ignoreCase = true) && titleLower.contains("deadpool")) ||
+                            (movie.language.equals("English", ignoreCase = true) && DesktopOnlineMetadataResolver.deduceLanguageFromTitle(movie.title) != "English")
+
+                    if (needsPosterRecheck || isPotentiallyMisclassified) {
+                        if (needsPosterRecheck) {
+                            invalidateFailedUrl(poster)
+                        }
+                        val meta = DesktopOnlineMetadataResolver.resolveMovie(movie.title)
+                        var changed = false
+                        var newTitle = movie.title
+                        var newPoster = movie.thumbnailUrl
+                        var newYear = movie.releaseYear
+                        var newGenre = movie.genre
+                        var newLanguage = movie.language
+
+                        if (meta.posterUrl.isNotBlank() && meta.posterUrl != poster) {
+                            newPoster = meta.posterUrl
+                            changed = true
+                        }
+                        if (meta.officialTitle.isNotBlank() && meta.officialTitle != movie.title) {
+                            newTitle = meta.officialTitle
+                            changed = true
+                        }
+                        if (meta.releaseYear.isNotBlank() && movie.releaseYear.isBlank()) {
+                            newYear = meta.releaseYear
+                            changed = true
+                        }
+                        if (meta.genre.isNotBlank() && movie.genre == "Drama • Cinema") {
+                            newGenre = meta.genre
+                            changed = true
+                        }
+                        if (meta.language.isNotBlank() && meta.language != movie.language) {
+                            newLanguage = meta.language
+                            changed = true
+                        }
+
+                        if (changed) {
+                            cacheModified = true
+                            movie.copy(
+                                title = newTitle,
+                                releaseYear = newYear,
+                                genre = newGenre,
+                                thumbnailUrl = newPoster,
+                                language = newLanguage
+                            )
+                        } else {
+                            movie
+                        }
+                    } else {
+                        movie
+                    }
+                }
+                if (cacheModified) {
+                    movies = updatedMovies
+                    DesktopLibraryCache.save(email, updatedMovies, series)
+                }
+            }
+        }
     }
 
     // Synchronize Android/Drive Watch History in Background

@@ -50,9 +50,11 @@ object DesktopWatchHistoryManager {
     private val historyScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val activeItemsCache = ConcurrentHashMap<String, ConcurrentHashMap<String, HistoryItemEntityV2>>()
+    private val archiveItemsCache = ConcurrentHashMap<String, ConcurrentHashMap<String, HistoryItemEntityV2>>()
     private val seriesResumeCache = ConcurrentHashMap<String, ConcurrentHashMap<String, SeriesResumeEntityV2>>()
     private val watchedIdsCache = ConcurrentHashMap<String, MutableSet<String>>()
-    private val overflowArchiveCache = ConcurrentHashMap<String, MutableList<HistoryItemEntityV2>>()
+    private val archiveDirty = ConcurrentHashMap<String, Boolean>()
+    private val archiveCleared = ConcurrentHashMap<String, Boolean>()
 
     val historyRevision = mutableIntStateOf(0)
 
@@ -61,6 +63,7 @@ object DesktopWatchHistoryManager {
     }
 
     private fun getFile(email: String): File = DesktopProfileManager.getWatchHistoryFile(email)
+    private fun getArchiveFile(email: String): File = DesktopProfileManager.getWatchHistoryArchiveFile(email)
 
     private fun ensureProfileLoaded(email: String) {
         if (email.isBlank()) return
@@ -71,7 +74,9 @@ object DesktopWatchHistoryManager {
             if (activeItemsCache.containsKey(sanitized)) return
 
             val file = getFile(email)
+            val archiveFile = getArchiveFile(email)
             val itemsMap = ConcurrentHashMap<String, HistoryItemEntityV2>()
+            val archiveMap = ConcurrentHashMap<String, HistoryItemEntityV2>()
             val resumeMap = ConcurrentHashMap<String, SeriesResumeEntityV2>()
             val watchedSet = ConcurrentHashMap.newKeySet<String>()
 
@@ -93,7 +98,18 @@ object DesktopWatchHistoryManager {
                 }
             }
 
+            if (archiveFile.exists() && archiveFile.length() > 0) {
+                try {
+                    val archiveJson = archiveFile.readText(Charsets.UTF_8)
+                    val payload = gson.fromJson(archiveJson, WatchHistoryPayloadV2::class.java)
+                    payload?.active.orEmpty().forEach { archiveMap[it.id] = it }
+                } catch (e: Exception) {
+                    System.err.println("[DesktopWatchHistoryManager] Error reading local history archive: ${e.message}")
+                }
+            }
+
             activeItemsCache[sanitized] = itemsMap
+            archiveItemsCache[sanitized] = archiveMap
             seriesResumeCache[sanitized] = resumeMap
             watchedIdsCache[sanitized] = watchedSet
             pruneActiveWindow(sanitized)
@@ -170,17 +186,21 @@ object DesktopWatchHistoryManager {
         itemsMap.keys.filter { !keepIds.contains(it) }.forEach { itemsMap.remove(it) }
 
         if (overflow.isNotEmpty()) {
-            val archiveList = overflowArchiveCache.computeIfAbsent(sanitized) { mutableListOf() }
-            synchronized(archiveList) {
-                val existingById = archiveList.associateBy { it.id }.toMutableMap()
-                for (item in overflow) {
-                    val prev = existingById[item.id]
-                    if (prev == null || item.timestamp > prev.timestamp) {
-                        existingById[item.id] = item
-                    }
+            val archiveMap = archiveItemsCache.computeIfAbsent(sanitized) { ConcurrentHashMap() }
+            val watchedSet = watchedIdsCache[sanitized] ?: emptySet()
+            var archiveChanged = false
+            for (item in overflow) {
+                val effectiveWatched = item.isWatched || watchedSet.contains(item.id)
+                val itemToArchive = if (effectiveWatched != item.isWatched) item.copy(isWatched = true) else item
+                val prev = archiveMap[itemToArchive.id]
+                if (prev == null || itemToArchive.timestamp >= prev.timestamp) {
+                    archiveMap[itemToArchive.id] = itemToArchive
+                    archiveChanged = true
                 }
-                archiveList.clear()
-                archiveList.addAll(existingById.values.sortedByDescending { it.timestamp })
+            }
+            if (archiveChanged) {
+                archiveDirty[sanitized] = true
+                saveArchiveLocalBySanitized(sanitized)
             }
         }
         return activeWindow
@@ -217,6 +237,30 @@ object DesktopWatchHistoryManager {
         }
     }
 
+    fun saveArchiveLocal(email: String) {
+        if (email.isBlank()) return
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        saveArchiveLocalBySanitized(sanitized)
+    }
+
+    private fun saveArchiveLocalBySanitized(sanitized: String) {
+        val archiveMap = archiveItemsCache[sanitized] ?: return
+        val payload = WatchHistoryPayloadV2(
+            version = 2,
+            updatedAt = System.currentTimeMillis(),
+            active = archiveMap.values.sortedByDescending { it.timestamp },
+            resume = emptyMap(),
+            watchedIds = emptyList()
+        )
+        try {
+            val file = File(DesktopProfileManager.profilesRoot, "$sanitized/watch_history_archive.json")
+            file.parentFile?.mkdirs()
+            file.writeText(gson.toJson(payload), Charsets.UTF_8)
+        } catch (e: Exception) {
+            System.err.println("[DesktopWatchHistoryManager] Error saving local history archive: ${e.message}")
+        }
+    }
+
     fun getLocalPayloadJson(email: String): String {
         ensureProfileLoaded(email)
         val sanitized = DesktopProfileManager.sanitizeEmail(email)
@@ -227,21 +271,99 @@ object DesktopWatchHistoryManager {
         return json
     }
 
-    fun consumeOverflowArchiveJson(email: String): String? {
-        if (email.isBlank()) return null
+    fun getArchivePayloadJson(email: String): String {
+        ensureProfileLoaded(email)
         val sanitized = DesktopProfileManager.sanitizeEmail(email)
-        val overflow = overflowArchiveCache.remove(sanitized) ?: return null
-        val snapshot = synchronized(overflow) { overflow.toList() }
-        if (snapshot.isEmpty()) return null
-
-        val archivePayload = WatchHistoryPayloadV2(
+        val archiveMap = archiveItemsCache[sanitized] ?: ConcurrentHashMap()
+        val sortedList = archiveMap.values.sortedByDescending { it.timestamp }
+        val payload = WatchHistoryPayloadV2(
             version = 2,
             updatedAt = System.currentTimeMillis(),
-            active = snapshot,
+            active = sortedList,
             resume = emptyMap(),
             watchedIds = emptyList()
         )
-        return gson.toJson(archivePayload)
+        return gson.toJson(payload)
+    }
+
+    fun hasPendingArchiveUpload(email: String): Boolean {
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        return archiveDirty[sanitized] == true
+    }
+
+    fun isArchiveDirty(email: String): Boolean = hasPendingArchiveUpload(email)
+
+    fun clearArchiveDirty(email: String) {
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        archiveDirty[sanitized] = false
+    }
+
+    fun isArchiveCleared(email: String): Boolean {
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        return archiveCleared[sanitized] == true
+    }
+
+    fun clearArchiveCleared(email: String) {
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        archiveCleared[sanitized] = false
+    }
+
+    fun hasArchiveItems(email: String): Boolean {
+        ensureProfileLoaded(email)
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        return archiveItemsCache[sanitized]?.isNotEmpty() == true
+    }
+
+    fun mergeRemoteArchivePayload(email: String, remoteArchiveJson: String): Boolean {
+        if (email.isBlank() || remoteArchiveJson.isBlank()) return false
+        ensureProfileLoaded(email)
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        val archiveMap = archiveItemsCache.computeIfAbsent(sanitized) { ConcurrentHashMap() }
+        val activeMap = activeItemsCache[sanitized] ?: ConcurrentHashMap()
+        val watchedSet = watchedIdsCache[sanitized] ?: ConcurrentHashMap.newKeySet()
+        var changed = false
+
+        try {
+            val payload = gson.fromJson(remoteArchiveJson, WatchHistoryPayloadV2::class.java) ?: return false
+            for (remoteItem in payload.active.orEmpty()) {
+                if (remoteItem.id.isBlank()) continue
+
+                // Skip IDs that already exist with a newer timestamp in activeItemsCache
+                val activeItem = activeMap[remoteItem.id]
+                if (activeItem != null && activeItem.timestamp >= remoteItem.timestamp) {
+                    continue
+                }
+
+                val local = archiveMap[remoteItem.id]
+                if (local == null || remoteItem.timestamp > local.timestamp) {
+                    val isItemWatched = remoteItem.isWatched || (local?.isWatched == true)
+                    archiveMap[remoteItem.id] = if (isItemWatched != remoteItem.isWatched) remoteItem.copy(isWatched = true) else remoteItem
+                    changed = true
+
+                    // If remoteItem.isWatched is true (and the item is not explicitly marked unwatched in activeItemsCache),
+                    // add remoteItem.id to watchedIdsCache
+                    val explicitlyUnwatchedInActive = activeItem != null && !activeItem.isWatched && activeItem.timestamp >= remoteItem.timestamp
+                    if (isItemWatched && !explicitlyUnwatchedInActive) {
+                        watchedSet.add(remoteItem.id)
+                    }
+                }
+            }
+
+            if (changed) {
+                saveArchiveLocalBySanitized(sanitized)
+                saveLocal(email)
+                notifyMutation()
+            }
+        } catch (e: Exception) {
+            System.err.println("[DesktopWatchHistoryManager] Error merging remote archive: ${e.message}")
+        }
+        return changed
+    }
+
+    fun consumeOverflowArchiveJson(email: String): String? {
+        if (!hasPendingArchiveUpload(email)) return null
+        clearArchiveDirty(email)
+        return getArchivePayloadJson(email)
     }
 
     fun mergeRemotePayload(email: String, remoteJson: String): Boolean {
@@ -352,11 +474,40 @@ object DesktopWatchHistoryManager {
             activeItemsCache[sanitized] = freshItems
             seriesResumeCache[sanitized] = freshResume
             watchedIdsCache[sanitized] = freshWatched
-            overflowArchiveCache.remove(sanitized)
+            archiveItemsCache.remove(sanitized)
+            archiveDirty.remove(sanitized)
+            archiveCleared.remove(sanitized)
             saveLocal(email)
             println("[DesktopWatchHistoryManager] Aligned with Drive truth: ${freshItems.size} active, ${freshWatched.size} watched IDs.")
         } catch (e: Exception) {
             System.err.println("[DesktopWatchHistoryManager] Failed to align local state: ${e.message}")
+        }
+    }
+
+    /**
+     * Clears the watched flag for [fileId] in watch history when the user explicitly removes
+     * a movie from their Watchlist, ensuring legacy watched checkmarks do not persist.
+     */
+    fun clearMediaWatchedFlag(email: String, fileId: String) {
+        if (email.isBlank() || fileId.isBlank()) return
+        ensureProfileLoaded(email)
+        val sanitized = DesktopProfileManager.sanitizeEmail(email)
+        val itemsMap = activeItemsCache[sanitized] ?: return
+        val watchedSet = watchedIdsCache[sanitized] ?: return
+
+        var modified = watchedSet.remove(fileId)
+        val existing = itemsMap[fileId]
+        if (existing != null && (existing.isWatched || existing.progressFraction >= 0.90f)) {
+            itemsMap[fileId] = existing.copy(
+                isWatched = false,
+                positionMs = if (existing.progressFraction >= 0.90f) 0L else existing.positionMs,
+                timestamp = System.currentTimeMillis()
+            )
+            modified = true
+        }
+
+        if (modified) {
+            saveLocal(email)
         }
     }
 
@@ -370,7 +521,8 @@ object DesktopWatchHistoryManager {
         seriesId: String = "",
         seasonNumber: Int = 1,
         episodeNumber: Int = 1,
-        allowZeroOverwrite: Boolean = false
+        allowZeroOverwrite: Boolean = false,
+        accessToken: String = ""
     ) {
         if (email.isBlank() || fileId.isBlank()) return
         ensureProfileLoaded(email)
@@ -431,15 +583,23 @@ object DesktopWatchHistoryManager {
             }
         }
 
+        val isMovieCompleted = !isSeries && (
+            fraction >= 0.90f ||
+            (durationMs > 0L && positionMs >= (durationMs * 0.90f))
+        )
+
         // Auto-mark watched in persistent watchlist on completion (>= 90%)
-        if (!isSeries && fraction >= 0.90f) {
+        if (isMovieCompleted) {
             historyScope.launch {
-                DesktopWatchlistManager.autoMarkWatchedIfEligible(
+                val promoted = DesktopWatchlistManager.autoMarkWatchedIfEligible(
                     email = email,
                     title = title,
                     mediaType = WatchlistMediaType.MOVIE,
                     driveId = fileId
                 )
+                if (promoted && accessToken.isNotBlank()) {
+                    DesktopWatchlistSync.pushLocalWatchlist(email, accessToken)
+                }
             }
         } else if (isSeries && fraction >= 0.90f && seriesId.isNotBlank()) {
             val cachedSeries = DesktopSeriesCache.get(email, seriesId)
@@ -456,12 +616,15 @@ object DesktopWatchHistoryManager {
             if (allWatched) {
                 val resolvedSeriesTitle = cachedSeries?.title?.ifBlank { title } ?: title
                 historyScope.launch {
-                    DesktopWatchlistManager.autoMarkWatchedIfEligible(
+                    val promoted = DesktopWatchlistManager.autoMarkWatchedIfEligible(
                         email = email,
                         title = resolvedSeriesTitle,
                         mediaType = WatchlistMediaType.SERIES,
                         driveId = seriesId
                     )
+                    if (promoted && accessToken.isNotBlank()) {
+                        DesktopWatchlistSync.pushLocalWatchlist(email, accessToken)
+                    }
                 }
             }
         }
@@ -685,9 +848,7 @@ object DesktopWatchHistoryManager {
             ?.positionMs ?: 0L
         if (resumePos >= 1000L) return true
 
-        val archivePos = overflowArchiveCache[sanitized]
-            ?.firstOrNull { it.id == fileId }
-            ?.positionMs ?: 0L
+        val archivePos = archiveItemsCache[sanitized]?.get(fileId)?.positionMs ?: 0L
         if (archivePos >= 1000L) return true
 
         return false
@@ -789,32 +950,144 @@ object DesktopWatchHistoryManager {
         if (email.isBlank()) return emptyList()
         ensureProfileLoaded(email)
         val sanitized = DesktopProfileManager.sanitizeEmail(email)
-        val items = activeItemsCache[sanitized]?.values?.toList() ?: return emptyList()
+        val active = activeItemsCache[sanitized]?.values.orEmpty()
+        val archive = archiveItemsCache[sanitized]?.values.orEmpty()
+        val watchedSet = watchedIdsCache[sanitized] ?: emptySet()
+        val watchlistEntries = DesktopWatchlistManager.loadLocalSync(email)
+
+        val combinedMap = mutableMapOf<String, HistoryItemEntityV2>()
+        for (item in archive) {
+            combinedMap[item.id] = item
+        }
+        for (item in active) {
+            val existing = combinedMap[item.id]
+            if (existing == null || item.timestamp >= existing.timestamp) {
+                combinedMap[item.id] = item
+            }
+        }
+
+        // For any id in watchedIdsCache[sanitized] that has no entity in either active or archive,
+        // resolve its real metadata from movies, series, and DesktopSeriesCache before falling back
+        for (wId in watchedSet) {
+            if (wId !in combinedMap) {
+                val matchedMovie = movies.find { it.id == wId }
+                if (matchedMovie != null) {
+                    combinedMap[wId] = HistoryItemEntityV2(
+                        id = wId,
+                        title = matchedMovie.title,
+                        positionMs = matchedMovie.durationMs,
+                        durationMs = matchedMovie.durationMs,
+                        timestamp = 0L,
+                        isWatched = true,
+                        seriesId = null,
+                        seasonNumber = null,
+                        episodeNumber = null
+                    )
+                } else {
+                    var foundEpisode = false
+                    for (s in series) {
+                        val cachedSeries = DesktopSeriesCache.get(email, s.id)
+                        val targetEp = cachedSeries?.seasons?.flatMap { it.episodes }?.find { it.id == wId }
+                        if (targetEp != null) {
+                            combinedMap[wId] = HistoryItemEntityV2(
+                                id = wId,
+                                title = targetEp.title.ifBlank { s.title },
+                                positionMs = targetEp.durationMs,
+                                durationMs = targetEp.durationMs,
+                                timestamp = 0L,
+                                isWatched = true,
+                                seriesId = s.id,
+                                seasonNumber = targetEp.seasonNumber,
+                                episodeNumber = targetEp.episodeNumber
+                            )
+                            foundEpisode = true
+                            break
+                        }
+                    }
+                    if (!foundEpisode) {
+                        combinedMap[wId] = HistoryItemEntityV2(
+                            id = wId,
+                            title = "",
+                            positionMs = 0L,
+                            durationMs = 0L,
+                            timestamp = 0L,
+                            isWatched = true
+                        )
+                    }
+                }
+            }
+        }
+
         val result = mutableListOf<DesktopContinueWatchingItem>()
+        for (item in combinedMap.values) {
+            val isWatched = item.isWatched || watchedSet.contains(item.id)
+            if (item.timestamp <= 0L && !isWatched) continue
+            val rawProgress = item.progressFraction
+            if (item.positionMs < 2000L && rawProgress < 0.01f && !isWatched) continue
 
-        for (item in items) {
-            if (item.timestamp <= 0L) continue
-            if (item.positionMs < 2000L && item.progressFraction < 0.01f && !item.isWatched) continue
+            val effectiveFraction = if (isWatched) 1.0f else rawProgress
 
-            val isSeries = item.seriesId != null
+            val isSeries = item.seriesId != null || run {
+                series.any { s ->
+                    val cs = DesktopSeriesCache.get(email, s.id)
+                    cs?.seasons?.flatMap { it.episodes }?.any { it.id == item.id } == true
+                }
+            }
+
+            var sortTimestamp = item.timestamp
+            if (isSeries && !item.seriesId.isNullOrBlank()) {
+                val resume = seriesResumeCache[sanitized]?.get(item.seriesId)
+                if (resume?.episodeId == item.id && resume.timestamp > sortTimestamp) {
+                    sortTimestamp = resume.timestamp
+                }
+            }
+            if (sortTimestamp <= 0L) {
+                val normTitle = DesktopWatchlistManager.normalizeTitle(item.title)
+                val matched = watchlistEntries.firstOrNull { entry ->
+                    !entry.isDeleted && ((entry.driveId != null && entry.driveId == item.id) ||
+                        (entry.normalizedTitle.isNotBlank() && entry.normalizedTitle == normTitle))
+                }
+                if (matched != null && matched.updatedAt > 0L) {
+                    sortTimestamp = matched.updatedAt
+                }
+            }
 
             if (isSeries) {
-                val matchedSeries = series.find { it.id == item.seriesId }
-                val seriesTitle = matchedSeries?.title ?: item.title.ifBlank { "Series" }
-                val cachedSeries = item.seriesId?.let { DesktopSeriesCache.get(email, it) }
-                val targetEp = cachedSeries?.seasons?.flatMap { it.episodes }?.find { it.id == item.id }
+                var matchedSeries = item.seriesId?.let { sid -> series.find { it.id == sid } }
+                var targetEp: DesktopEpisode? = null
+                if (matchedSeries != null) {
+                    val cachedSeries = DesktopSeriesCache.get(email, matchedSeries.id)
+                    targetEp = cachedSeries?.seasons?.flatMap { it.episodes }?.find { it.id == item.id }
+                } else {
+                    for (s in series) {
+                        val cs = DesktopSeriesCache.get(email, s.id)
+                        val ep = cs?.seasons?.flatMap { it.episodes }?.find { it.id == item.id }
+                        if (ep != null) {
+                            matchedSeries = s
+                            targetEp = ep
+                            break
+                        }
+                    }
+                }
 
+                val seriesTitle = matchedSeries?.title ?: item.title.ifBlank { "Series" }
                 val sNum = item.seasonNumber ?: targetEp?.seasonNumber
                 val eNum = item.episodeNumber ?: targetEp?.episodeNumber
-                val epTitle = targetEp?.title ?: item.title.ifBlank { "Episode ${eNum ?: 1}" }
+                val epTitle = targetEp?.title ?: item.title.ifBlank { if (eNum != null) "Episode $eNum" else "" }
                 val epThumb = targetEp?.thumbnailUrl ?: matchedSeries?.thumbnailUrl ?: ""
-                val effectiveDur = if (item.durationMs > 0L) item.durationMs else targetEp?.durationMs ?: 0L
+                val effectiveDur = when {
+                    item.durationMs > 0L -> item.durationMs
+                    (targetEp?.durationMs ?: 0L) > 0L -> targetEp!!.durationMs
+                    else -> 45L * 60000L
+                }
+                val effectivePos = if (isWatched && item.positionMs == 0L) effectiveDur else item.positionMs
 
                 val code = if (sNum != null && eNum != null) "S${sNum}E${eNum}" else ""
                 val subtitle = when {
                     code.isNotBlank() && epTitle.isNotBlank() -> "$code • $epTitle"
                     code.isNotBlank() -> code
-                    else -> epTitle
+                    epTitle.isNotBlank() -> epTitle
+                    else -> "Series Episode"
                 }
 
                 result.add(
@@ -824,15 +1097,15 @@ object DesktopWatchHistoryManager {
                         subtitle = subtitle,
                         thumbnailUrl = epThumb,
                         fallbackThumbnailUrl = matchedSeries?.fallbackThumbnailUrl ?: "",
-                        positionMs = item.positionMs,
+                        positionMs = effectivePos,
                         durationMs = effectiveDur,
-                        progressFraction = item.progressFraction,
+                        progressFraction = effectiveFraction,
                         isSeries = true,
-                        seriesId = item.seriesId,
+                        seriesId = matchedSeries?.id ?: item.seriesId,
                         seasonNumber = sNum,
                         episodeNumber = eNum,
                         episodeTitle = epTitle,
-                        timestamp = item.timestamp
+                        timestamp = sortTimestamp
                     )
                 )
             } else {
@@ -840,6 +1113,7 @@ object DesktopWatchHistoryManager {
                 val movieTitle = matchedMovie?.title ?: item.title.ifBlank { "Movie" }
                 val movieThumb = matchedMovie?.thumbnailUrl ?: ""
                 val effectiveDur = if (item.durationMs > 0L) item.durationMs else matchedMovie?.durationMs ?: 0L
+                val effectivePos = if (isWatched && item.positionMs == 0L) effectiveDur else item.positionMs
 
                 result.add(
                     DesktopContinueWatchingItem(
@@ -848,17 +1122,22 @@ object DesktopWatchHistoryManager {
                         subtitle = matchedMovie?.genre?.ifBlank { "Movie" } ?: "Movie",
                         thumbnailUrl = movieThumb,
                         fallbackThumbnailUrl = matchedMovie?.fallbackThumbnailUrl ?: "",
-                        positionMs = item.positionMs,
+                        positionMs = effectivePos,
                         durationMs = effectiveDur,
-                        progressFraction = item.progressFraction,
+                        progressFraction = effectiveFraction,
                         isSeries = false,
-                        timestamp = item.timestamp
+                        timestamp = sortTimestamp
                     )
                 )
             }
         }
 
-        return result.sortedByDescending { it.timestamp }
+        return result.sortedWith(
+            compareByDescending<DesktopContinueWatchingItem> { it.timestamp }
+                .thenByDescending { it.seasonNumber ?: 0 }
+                .thenByDescending { it.episodeNumber ?: 0 }
+                .thenBy { it.title.lowercase() }
+        )
     }
 
     fun getLastWatchedMovie(
@@ -972,6 +1251,7 @@ object DesktopWatchHistoryManager {
         ensureProfileLoaded(email)
         val sanitized = DesktopProfileManager.sanitizeEmail(email)
         activeItemsCache[sanitized]?.remove(fileId)
+        archiveItemsCache[sanitized]?.remove(fileId)
         watchedIdsCache[sanitized]?.remove(fileId)
 
         val resumeMap = seriesResumeCache[sanitized]
@@ -979,7 +1259,10 @@ object DesktopWatchHistoryManager {
             val matchingKeys = resumeMap.filter { it.value.episodeId == fileId }.keys.toList()
             matchingKeys.forEach { resumeMap.remove(it) }
         }
+        archiveDirty[sanitized] = true
         saveLocal(email)
+        saveArchiveLocalBySanitized(sanitized)
+        notifyMutation()
     }
 
     suspend fun clearAllHistory(email: String) = withContext(Dispatchers.IO) {
@@ -991,9 +1274,13 @@ object DesktopWatchHistoryManager {
         ensureProfileLoaded(email)
         val sanitized = DesktopProfileManager.sanitizeEmail(email)
         activeItemsCache[sanitized]?.clear()
+        archiveItemsCache[sanitized]?.clear()
         seriesResumeCache[sanitized]?.clear()
         watchedIdsCache[sanitized]?.clear()
-        overflowArchiveCache.remove(sanitized)
+        archiveDirty[sanitized] = true
+        archiveCleared[sanitized] = true
         saveLocal(email)
+        saveArchiveLocalBySanitized(sanitized)
+        notifyMutation()
     }
 }

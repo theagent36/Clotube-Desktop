@@ -601,6 +601,9 @@ private fun LazyListScope.watchlistCategorySection(
                         coroutineScope.launch {
                             DesktopWatchlistManager.deleteEntryById(userEmail, entry.id)
                             DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                            if (entry.mediaType == WatchlistMediaType.MOVIE) {
+                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                            }
                         }
                     }
                 )

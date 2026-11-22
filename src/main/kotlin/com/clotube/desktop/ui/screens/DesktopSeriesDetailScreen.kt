@@ -29,6 +29,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.*
+import androidx.compose.material.icons.rounded.BookmarkAdd
+import androidx.compose.material.icons.rounded.BookmarkRemove
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -813,10 +816,14 @@ fun DesktopSeriesDetailScreen(
                                 }
                             }
 
+                            val canRemoveFromWatchlist = currentSeriesStatus != null && currentSeriesStatus != WatchlistStatus.UNWATCHED
+
                             DropdownMenu(
                                 expanded = statusDropdownExpanded,
                                 onDismissRequest = { statusDropdownExpanded = false },
-                                modifier = Modifier.background(Color(0xFF0F141F)).border(1.dp, Color(0xFF263248), RoundedCornerShape(8.dp))
+                                modifier = Modifier
+                                    .background(Color(0xFF0F141F))
+                                    .border(1.dp, Color(0xFF263248), RoundedCornerShape(8.dp))
                             ) {
                                 WatchlistStatus.selectableStatuses.forEach { status ->
                                     val isSelected = currentSeriesStatus == status
@@ -826,14 +833,31 @@ fun DesktopSeriesDetailScreen(
                                         WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
                                         WatchlistStatus.UNWATCHED -> Color(0xFF94A3B8)
                                     }
+                                    val statusIcon = when (status) {
+                                        WatchlistStatus.WATCHED -> Icons.Rounded.CheckCircle
+                                        WatchlistStatus.WATCH_LATER -> Icons.Rounded.BookmarkAdd
+                                        WatchlistStatus.REWATCH -> Icons.Rounded.Replay
+                                        WatchlistStatus.UNWATCHED -> Icons.Rounded.BookmarkBorder
+                                    }
                                     DropdownMenuItem(
                                         text = {
-                                            Text(
-                                                text = status.label,
-                                                color = if (isSelected) activeColor else Color.White,
-                                                fontSize = 12.sp,
-                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = statusIcon,
+                                                    contentDescription = status.label,
+                                                    tint = activeColor,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                                Text(
+                                                    text = status.label,
+                                                    color = if (isSelected) activeColor else Color.White,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            }
                                         },
                                         onClick = {
                                             statusDropdownExpanded = false
@@ -843,13 +867,64 @@ fun DesktopSeriesDetailScreen(
                                                     title = seriesItem.title,
                                                     mediaType = WatchlistMediaType.SERIES,
                                                     status = status,
-                                                    driveId = seriesItem.id
+                                                    driveId = seriesItem.id,
+                                                    posterUrl = series.posterUrl.ifBlank { seriesItem.thumbnailUrl }
                                                 )
                                                 DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
                                             }
-                                        }
+                                        },
+                                        modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
                                     )
                                 }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp, horizontal = 10.dp)
+                                        .height(1.dp)
+                                        .background(Color(0xFF1E2638))
+                                )
+
+                                DropdownMenuItem(
+                                    enabled = canRemoveFromWatchlist,
+                                    text = {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.BookmarkRemove,
+                                                contentDescription = "Remove from Watchlist",
+                                                tint = if (canRemoveFromWatchlist) Color(0xFFFCA5A5) else Color(0xFF475569),
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                            Text(
+                                                text = "Remove from Watchlist",
+                                                color = if (canRemoveFromWatchlist) Color(0xFFFCA5A5) else Color(0xFF475569),
+                                                fontSize = 12.sp,
+                                                fontWeight = if (canRemoveFromWatchlist) FontWeight.Medium else FontWeight.Normal
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        statusDropdownExpanded = false
+                                        coroutineScope.launch {
+                                            val removed = DesktopWatchlistManager.removeMediaFromWatchlist(
+                                                email = userEmail,
+                                                title = seriesItem.title,
+                                                driveId = seriesItem.id
+                                            )
+                                            if (removed) {
+                                                DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                            }
+                                        }
+                                    },
+                                    modifier = if (canRemoveFromWatchlist) {
+                                        Modifier.pointerHoverIcon(PointerIcon.Hand)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
                             }
                         }
                     }

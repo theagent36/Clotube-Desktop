@@ -51,13 +51,11 @@ private val diskCacheDir: File by lazy {
 private val failedUrlsFile: File by lazy {
     File(cacheRootDir, "failed_urls.txt")
 }
+// Transient in-memory failure cache per session only; never persists failed URLs across boots
 private val failedUrlCache = ConcurrentHashMap.newKeySet<String>().apply {
     try {
         if (failedUrlsFile.exists()) {
-            failedUrlsFile.readLines().forEach { line ->
-                val trimmed = line.trim()
-                if (trimmed.isNotBlank()) add(trimmed)
-            }
+            failedUrlsFile.delete()
         }
     } catch (_: Exception) {}
 }
@@ -75,6 +73,20 @@ fun clearThumbnailMemoryCache() {
     thumbnailMemoryCache.clear()
     failedUrlCache.clear()
     println("[DesktopThumbnailLoader] In-memory thumbnail cache purged.")
+}
+
+/**
+ * Invalidates any failed status or cached bitmap for a URL across all thumbnail sizes.
+ */
+fun invalidateFailedUrl(url: String?) {
+    if (url.isNullOrBlank()) return
+    failedUrlCache.remove(url)
+    thumbnailMemoryCache.remove(url)
+    ThumbnailSize.entries.forEach { size ->
+        val sizedKey = "${url}_${size.name}"
+        failedUrlCache.remove(sizedKey)
+        thumbnailMemoryCache.remove(sizedKey)
+    }
 }
 
 /**
@@ -249,16 +261,7 @@ fun rememberThumbnailBitmap(
 }
 
 private fun markUrlFailed(key: String) {
-    if (failedUrlCache.add(key)) {
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                if (!failedUrlsFile.parentFile.exists()) {
-                    failedUrlsFile.parentFile.mkdirs()
-                }
-                failedUrlsFile.appendText("$key\n")
-            } catch (_: Exception) {}
-        }
-    }
+    failedUrlCache.add(key)
 }
 
 private fun getDiskCacheFile(url: String, size: ThumbnailSize): File {

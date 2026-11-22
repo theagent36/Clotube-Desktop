@@ -126,6 +126,7 @@ fun DesktopGlobalSearchOverlay(
 
     val recentSearchesRevision = DesktopSearchHistoryManager.recentSearchesRevision.intValue
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+    val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
 
     // 1. Filter & Sort State
     var availabilityFilter by remember { mutableStateOf(SearchAvailabilityFilter.ALL) }
@@ -195,6 +196,7 @@ fun DesktopGlobalSearchOverlay(
         watchlistFilter,
         sortOption,
         watchlistRevision,
+        historyRevision,
         userEmail
     ) {
         val filtered = mergedResults.filter { item ->
@@ -251,32 +253,16 @@ fun DesktopGlobalSearchOverlay(
         mediaTypeFilter != SearchMediaTypeFilter.ALL_TYPES ||
         watchlistFilter != SearchWatchlistFilter.ANY_STATUS
 
-    // Full-area container below top bar so clicking outside cleanly dismisses the overlay
+    // Full-Page Workspace Canvas anchored below top bar (64.dp)
     Box(
         modifier = modifier
             .fillMaxSize()
             .padding(top = 64.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onDismiss
-            )
+            .background(ObsidianCanvas)
     ) {
         Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = ObsidianSurface,
-            border = BorderStroke(1.dp, ObsidianBorder),
-            shadowElevation = 24.dp,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 28.dp, end = 28.dp, bottom = 24.dp)
-                .widthIn(min = 560.dp, max = 780.dp)
-                .heightIn(max = 590.dp)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { /* Consume clicks inside overlay card */ }
-                )
+            color = ObsidianCanvas,
+            modifier = Modifier.fillMaxSize()
         ) {
             if (cleanQuery.isBlank()) {
                 RecentSearchesPanel(
@@ -289,24 +275,37 @@ fun DesktopGlobalSearchOverlay(
                     },
                     onClearAll = {
                         DesktopSearchHistoryManager.clearRecentSearches(userEmail)
-                    }
+                    },
+                    onDismiss = onDismiss
                 )
             } else if (!isQuerySearchable) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 28.dp),
+                        .fillMaxSize()
+                        .padding(horizontal = 28.dp, vertical = 64.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "Type at least 2 characters to search your Drive and online catalogs...",
-                        color = SlateMuted,
-                        fontSize = 13.sp
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ManageSearch,
+                            contentDescription = null,
+                            tint = SlateMuted,
+                            modifier = Modifier.size(36.dp)
+                        )
+                        Text(
+                            text = "Type at least 2 characters to search your Drive and online catalogs...",
+                            color = SlateSecondary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             } else {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    // Compact Filter & Sort Chip Strips
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Full-width Filter & Sort Chip Strips
                     SearchFilterAndSortHeader(
                         availabilityFilter = availabilityFilter,
                         onSelectAvailability = { availabilityFilter = it },
@@ -317,7 +316,8 @@ fun DesktopGlobalSearchOverlay(
                         sortOption = sortOption,
                         onSelectSort = { sortOption = it },
                         resultCount = filteredAndSortedResults.size,
-                        isFetchingOnline = isFetchingOnline
+                        isFetchingOnline = isFetchingOnline,
+                        onDismiss = onDismiss
                     )
 
                     HorizontalDivider(color = Color(0xFF1B2130), thickness = 1.dp)
@@ -328,7 +328,7 @@ fun DesktopGlobalSearchOverlay(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(Color(0xFF0C1018))
-                                .padding(horizontal = 16.dp, vertical = 7.dp),
+                                .padding(horizontal = 28.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
@@ -347,108 +347,365 @@ fun DesktopGlobalSearchOverlay(
                         HorizontalDivider(color = Color(0xFF171C28), thickness = 1.dp)
                     }
 
-                    // Results List or Empty State
-                    if (filteredAndSortedResults.isEmpty()) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 28.dp, vertical = 34.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isFetchingOnline) Icons.Rounded.TravelExplore else Icons.Rounded.SearchOff,
-                                contentDescription = null,
-                                tint = SlateMuted,
-                                modifier = Modifier.size(28.dp)
-                            )
-                            Text(
-                                text = when {
-                                    isFetchingOnline -> "Checking external catalogs for \"$cleanQuery\"..."
-                                    hasActiveFilters && mergedResults.isNotEmpty() ->
-                                        "No results match the active filters for \"$cleanQuery\""
-                                    else -> "No results found for \"$cleanQuery\""
-                                },
-                                color = SlateSecondary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            if (hasActiveFilters && mergedResults.isNotEmpty()) {
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = AccentBlue.copy(alpha = 0.16f),
-                                    border = BorderStroke(1.dp, AccentBlue.copy(alpha = 0.45f)),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable {
-                                            availabilityFilter = SearchAvailabilityFilter.ALL
-                                            mediaTypeFilter = SearchMediaTypeFilter.ALL_TYPES
-                                            watchlistFilter = SearchWatchlistFilter.ANY_STATUS
-                                        }
-                                        .pointerHoverIcon(PointerIcon.Hand)
-                                ) {
-                                    Text(
-                                        text = "Reset Filters",
-                                        color = AccentBlueSoft,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                    )
-                                }
-                            }
+                    // Responsive Multi-Column Results Canvas
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        val columnCount = when {
+                            maxWidth >= 1260.dp -> 3
+                            maxWidth >= 740.dp -> 2
+                            else -> 1
                         }
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxWidth(),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            items(
-                                items = filteredAndSortedResults,
-                                key = { "${it.mediaType.name}_${it.isInDrive}_${it.id}_${it.externalSource}" }
-                            ) { result ->
-                                val status = remember(result.id, result.externalId, result.title, watchlistRevision, userEmail) {
-                                    resolveSearchCardWatchlistStatus(result, userEmail)
+
+                        val inDriveResults = remember(filteredAndSortedResults) {
+                            filteredAndSortedResults.filter { it.isInDrive }
+                        }
+                        val cloudResults = remember(filteredAndSortedResults) {
+                            filteredAndSortedResults.filter { !it.isInDrive }
+                        }
+
+                        if (filteredAndSortedResults.isEmpty()) {
+                            SearchEmptyState(
+                                cleanQuery = cleanQuery,
+                                isFetchingOnline = isFetchingOnline,
+                                hasActiveFilters = hasActiveFilters,
+                                mergedResultsNotEmpty = mergedResults.isNotEmpty(),
+                                onResetFilters = {
+                                    availabilityFilter = SearchAvailabilityFilter.ALL
+                                    mediaTypeFilter = SearchMediaTypeFilter.ALL_TYPES
+                                    watchlistFilter = SearchWatchlistFilter.ANY_STATUS
                                 }
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(horizontal = 28.dp, vertical = 20.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                // -------------------------------------------------------------
+                                // SECTION 1: IN DRIVE MEDIA (Available for instant Drive streaming)
+                                // -------------------------------------------------------------
+                                val showDriveSection = availabilityFilter == SearchAvailabilityFilter.ALL ||
+                                    availabilityFilter == SearchAvailabilityFilter.IN_DRIVE
 
-                                GlobalSearchResultCard(
-                                    result = result,
-                                    watchlistStatus = status,
-                                    accessToken = accessToken,
-                                    userEmail = userEmail,
-                                    onClick = {
-                                        // Explicit history recording rule: record only on result click
-                                        DesktopSearchHistoryManager.recordSearchQuery(userEmail, searchQuery)
+                                if (showDriveSection) {
+                                    item(key = "header_in_drive") {
+                                        SearchSectionHeader(
+                                            icon = Icons.Rounded.Folder,
+                                            iconTint = Color(0xFF34D399),
+                                            title = "In Drive Media",
+                                            countText = "${inDriveResults.size} in Drive",
+                                            countPillBg = Color(0x2110B981),
+                                            countPillBorder = Color(0x5210B981),
+                                            countPillText = Color(0xFF34D399),
+                                            subtitle = "Available for instant streaming from your Google Drive"
+                                        )
+                                    }
 
-                                        if (result.isInDrive) {
-                                            when (result.mediaType) {
-                                                SearchMediaType.MOVIE -> {
-                                                    val driveItem = result.driveMediaItem
-                                                    if (driveItem != null) {
-                                                        onOpenDriveMovie(driveItem)
-                                                    }
-                                                }
-                                                SearchMediaType.TV_SERIES -> {
-                                                    val driveSeries = result.driveMediaItem
-                                                    if (driveSeries != null) {
-                                                        onOpenDriveSeries(driveSeries, null)
-                                                    }
-                                                }
-                                                SearchMediaType.EPISODE -> {
-                                                    val parentSeries = result.parentSeriesItem ?: result.driveMediaItem
-                                                    if (parentSeries != null) {
-                                                        onOpenDriveSeries(parentSeries, result.episodeId)
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            onOpenExternalPreview(result)
+                                    if (inDriveResults.isNotEmpty()) {
+                                        val driveRows = inDriveResults.chunked(columnCount)
+                                        items(
+                                            items = driveRows,
+                                            key = { row -> "drive_row_" + row.joinToString("-") { it.id } }
+                                        ) { rowItems ->
+                                            SearchResultGridRow(
+                                                rowItems = rowItems,
+                                                columnCount = columnCount,
+                                                watchlistRevision = watchlistRevision,
+                                                historyRevision = historyRevision,
+                                                userEmail = userEmail,
+                                                accessToken = accessToken,
+                                                searchQuery = searchQuery,
+                                                onOpenDriveMovie = onOpenDriveMovie,
+                                                onOpenDriveSeries = onOpenDriveSeries,
+                                                onOpenExternalPreview = onOpenExternalPreview
+                                            )
+                                        }
+                                    } else if (availabilityFilter == SearchAvailabilityFilter.ALL && cloudResults.isNotEmpty()) {
+                                        item(key = "empty_drive_note") {
+                                            DriveEmptyInlineNote(cleanQuery = cleanQuery)
                                         }
                                     }
-                                )
+                                }
+
+                                // -------------------------------------------------------------
+                                // SECTION 2: SEARCHED FROM THE CLOUD (External TMDB / IMDb catalog)
+                                // -------------------------------------------------------------
+                                val showCloudSection = availabilityFilter == SearchAvailabilityFilter.ALL ||
+                                    availabilityFilter == SearchAvailabilityFilter.NOT_IN_DRIVE
+
+                                if (showCloudSection && (cloudResults.isNotEmpty() || availabilityFilter == SearchAvailabilityFilter.NOT_IN_DRIVE)) {
+                                    if (showDriveSection) {
+                                        item(key = "divider_between_sections") {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(top = 20.dp, bottom = 4.dp)
+                                            ) {
+                                                HorizontalDivider(color = Color(0xFF1E2638), thickness = 1.dp)
+                                            }
+                                        }
+                                    }
+
+                                    item(key = "header_cloud") {
+                                        SearchSectionHeader(
+                                            icon = Icons.Rounded.TravelExplore,
+                                            iconTint = AccentBlueSoft,
+                                            title = "Searched from the Cloud",
+                                            countText = "${cloudResults.size} from Cloud",
+                                            countPillBg = AccentBlue.copy(alpha = 0.16f),
+                                            countPillBorder = AccentBlue.copy(alpha = 0.40f),
+                                            countPillText = AccentBlueSoft,
+                                            subtitle = "External catalog matches (TMDB / IMDb)"
+                                        )
+                                    }
+
+                                    if (cloudResults.isNotEmpty()) {
+                                        val cloudRows = cloudResults.chunked(columnCount)
+                                        items(
+                                            items = cloudRows,
+                                            key = { row -> "cloud_row_" + row.joinToString("-") { "${it.id}_${it.externalSource}" } }
+                                        ) { rowItems ->
+                                            SearchResultGridRow(
+                                                rowItems = rowItems,
+                                                columnCount = columnCount,
+                                                watchlistRevision = watchlistRevision,
+                                                historyRevision = historyRevision,
+                                                userEmail = userEmail,
+                                                accessToken = accessToken,
+                                                searchQuery = searchQuery,
+                                                onOpenDriveMovie = onOpenDriveMovie,
+                                                onOpenDriveSeries = onOpenDriveSeries,
+                                                onOpenExternalPreview = onOpenExternalPreview
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// SECTION HEADERS & GRID ROW HELPERS
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun SearchSectionHeader(
+    icon: ImageVector,
+    iconTint: Color,
+    title: String,
+    countText: String,
+    countPillBg: Color,
+    countPillBorder: Color,
+    countPillText: Color,
+    subtitle: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(iconTint.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+
+            Text(
+                text = title,
+                color = TextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = countPillBg,
+                border = BorderStroke(1.dp, countPillBorder)
+            ) {
+                Text(
+                    text = countText,
+                    color = countPillText,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
+        }
+
+        Text(
+            text = subtitle,
+            color = SlateSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(start = 38.dp)
+        )
+    }
+}
+
+@Composable
+private fun DriveEmptyInlineNote(cleanQuery: String) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0xFF0F131C),
+        border = BorderStroke(1.dp, Color(0xFF1E2536)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.FolderOff,
+                contentDescription = null,
+                tint = SlateMuted,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                text = "No matching files in your Google Drive for \"$cleanQuery\"",
+                color = SlateSecondary,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchResultGridRow(
+    rowItems: List<GlobalSearchResult>,
+    columnCount: Int,
+    watchlistRevision: Int,
+    historyRevision: Int,
+    userEmail: String,
+    accessToken: String,
+    searchQuery: String,
+    onOpenDriveMovie: (DesktopMediaItem) -> Unit,
+    onOpenDriveSeries: (DesktopMediaItem, String?) -> Unit,
+    onOpenExternalPreview: (GlobalSearchResult) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        for (item in rowItems) {
+            val status = remember(item.id, item.externalId, item.title, watchlistRevision, historyRevision, userEmail) {
+                resolveSearchCardWatchlistStatus(item, userEmail)
+            }
+
+            Box(modifier = Modifier.weight(1f)) {
+                GlobalSearchResultCard(
+                    result = item,
+                    watchlistStatus = status,
+                    accessToken = accessToken,
+                    userEmail = userEmail,
+                    onClick = {
+                        DesktopSearchHistoryManager.recordSearchQuery(userEmail, searchQuery)
+                        if (item.isInDrive) {
+                            when (item.mediaType) {
+                                SearchMediaType.MOVIE -> item.driveMediaItem?.let(onOpenDriveMovie)
+                                SearchMediaType.TV_SERIES -> item.driveMediaItem?.let { onOpenDriveSeries(it, null) }
+                                SearchMediaType.EPISODE -> {
+                                    val parent = item.parentSeriesItem ?: item.driveMediaItem
+                                    if (parent != null) onOpenDriveSeries(parent, item.episodeId)
+                                }
+                            }
+                        } else {
+                            onOpenExternalPreview(item)
+                        }
+                    }
+                )
+            }
+        }
+
+        val remainder = columnCount - rowItems.size
+        if (remainder > 0) {
+            Spacer(modifier = Modifier.weight(remainder.toFloat()))
+        }
+    }
+}
+
+@Composable
+private fun SearchEmptyState(
+    cleanQuery: String,
+    isFetchingOnline: Boolean,
+    hasActiveFilters: Boolean,
+    mergedResultsNotEmpty: Boolean,
+    onResetFilters: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 28.dp, vertical = 60.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(ObsidianElevated)
+                    .border(1.dp, ObsidianBorder, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isFetchingOnline) Icons.Rounded.TravelExplore else Icons.Rounded.SearchOff,
+                    contentDescription = null,
+                    tint = if (isFetchingOnline) AccentBlueSoft else SlateMuted,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            Text(
+                text = when {
+                    isFetchingOnline -> "Checking external catalogs for \"$cleanQuery\"..."
+                    hasActiveFilters && mergedResultsNotEmpty ->
+                        "No results match the active filters for \"$cleanQuery\""
+                    else -> "No results found for \"$cleanQuery\""
+                },
+                color = SlateSecondary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (hasActiveFilters && mergedResultsNotEmpty) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = AccentBlue.copy(alpha = 0.16f),
+                    border = BorderStroke(1.dp, AccentBlue.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onResetFilters() }
+                        .pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    Text(
+                        text = "Reset Filters",
+                        color = AccentBlueSoft,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                    )
                 }
             }
         }
@@ -464,108 +721,138 @@ private fun RecentSearchesPanel(
     entries: List<RecentSearchEntry>,
     onClickEntry: (RecentSearchEntry) -> Unit,
     onRemoveEntry: (RecentSearchEntry) -> Unit,
-    onClearAll: () -> Unit
+    onClearAll: () -> Unit,
+    onDismiss: () -> Unit = {}
 ) {
-    Column(
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp)
+            .fillMaxSize()
+            .padding(horizontal = 28.dp, vertical = 20.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .widthIn(max = 840.dp)
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.History,
-                    contentDescription = null,
-                    tint = AccentBlueSoft,
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = "RECENT SEARCHES",
-                    color = SlateSecondary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.1.sp
-                )
-            }
-
-            if (entries.isNotEmpty()) {
-                val clearInteraction = remember { MutableInteractionSource() }
-                val clearHovered by clearInteraction.collectIsHoveredAsState()
-                Text(
-                    text = "Clear All",
-                    color = if (clearHovered) TextPrimary else SlateSecondary,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (clearHovered) ObsidianElevated else Color.Transparent)
-                        .clickable(
-                            interactionSource = clearInteraction,
-                            indication = null,
-                            onClick = onClearAll
-                        )
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
-            }
-        }
-
-        HorizontalDivider(
-            color = Color(0xFF1B2130),
-            thickness = 1.dp,
-            modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)
-        )
-
-        if (entries.isEmpty()) {
-            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ManageSearch,
-                    contentDescription = null,
-                    tint = SlateMuted,
-                    modifier = Modifier.size(26.dp)
-                )
-                Text(
-                    text = "No recent searches yet",
-                    color = SlateSecondary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "Search your Google Drive library or external TMDB/IMDb catalogs",
-                    color = SlateMuted,
-                    fontSize = 11.5.sp
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                items(
-                    items = entries,
-                    key = { "recent_${it.query.lowercase()}_${it.timestamp}" }
-                ) { entry ->
-                    RecentSearchRow(
-                        entry = entry,
-                        onClick = { onClickEntry(entry) },
-                        onRemove = { onRemoveEntry(entry) }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.History,
+                        contentDescription = null,
+                        tint = AccentBlueSoft,
+                        modifier = Modifier.size(16.dp)
                     )
+                    Text(
+                        text = "RECENT SEARCHES",
+                        color = SlateSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.1.sp
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (entries.isNotEmpty()) {
+                        val clearInteraction = remember { MutableInteractionSource() }
+                        val clearHovered by clearInteraction.collectIsHoveredAsState()
+                        Text(
+                            text = "Clear All",
+                            color = if (clearHovered) TextPrimary else SlateSecondary,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (clearHovered) ObsidianElevated else Color.Transparent)
+                                .clickable(
+                                    interactionSource = clearInteraction,
+                                    indication = null,
+                                    onClick = onClearAll
+                                )
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(ObsidianElevated)
+                            .border(1.dp, ObsidianBorder, CircleShape)
+                            .clickable { onDismiss() }
+                            .pointerHoverIcon(PointerIcon.Hand),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Close search",
+                            tint = SlateMuted,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(
+                color = Color(0xFF1B2130),
+                thickness = 1.dp,
+                modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)
+            )
+
+            if (entries.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 44.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ManageSearch,
+                        contentDescription = null,
+                        tint = SlateMuted,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Text(
+                        text = "No recent searches yet",
+                        color = SlateSecondary,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Search your Google Drive library or external TMDB/IMDb catalogs",
+                        color = SlateMuted,
+                        fontSize = 12.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(
+                        items = entries,
+                        key = { "recent_${it.query.lowercase()}_${it.timestamp}" }
+                    ) { entry ->
+                        RecentSearchRow(
+                            entry = entry,
+                            onClick = { onClickEntry(entry) },
+                            onRemove = { onRemoveEntry(entry) }
+                        )
+                    }
                 }
             }
         }
@@ -658,16 +945,17 @@ private fun SearchFilterAndSortHeader(
     sortOption: SearchSortOption,
     onSelectSort: (SearchSortOption) -> Unit,
     resultCount: Int,
-    isFetchingOnline: Boolean
+    isFetchingOnline: Boolean,
+    onDismiss: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF0C1018))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 28.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Row 1: Availability + Media Type + Result Count
+        // Row 1: Availability + Media Type + Result Count + Close
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -699,14 +987,37 @@ private fun SearchFilterAndSortHeader(
                 }
             }
 
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
-            Text(
-                text = if (isFetchingOnline && resultCount == 0) "..." else "$resultCount found",
-                color = SlateMuted,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = if (isFetchingOnline && resultCount == 0) "..." else "$resultCount found",
+                    color = SlateMuted,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(ObsidianSurface)
+                        .border(1.dp, ObsidianBorder, CircleShape)
+                        .clickable { onDismiss() }
+                        .pointerHoverIcon(PointerIcon.Hand),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Close search",
+                        tint = SlateMuted,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            }
         }
 
         // Row 2: Watchlist Status + Sort
@@ -1779,6 +2090,7 @@ private fun resolveSearchCardWatchlistStatus(
     if (result.isInDrive && userEmail.isNotBlank() &&
         (result.mediaType == SearchMediaType.MOVIE || result.mediaType == SearchMediaType.EPISODE)
     ) {
+        if (DesktopWatchlistManager.isExplicitlyRemovedFromWatchlist(userEmail, result.title, result.id)) return null
         if (DesktopWatchHistoryManager.isEpisodeWatched(userEmail, result.id)) {
             return WatchlistStatus.WATCHED
         }

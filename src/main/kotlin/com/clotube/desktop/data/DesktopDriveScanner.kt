@@ -377,6 +377,11 @@ class DesktopDriveScanner(
             Regex("(?i)\\b(bengali|bangla|kolkata|tollywood)\\b").containsMatchIn(lower) -> "Bengali"
             Regex("(?i)\\b(hindi|bollywood)\\b").containsMatchIn(lower) -> "Hindi"
             Regex("(?i)\\b(english|hollywood|foreign)\\b").containsMatchIn(lower) -> "English"
+            Regex("(?i)\\b(tamil|kollywood)\\b").containsMatchIn(lower) -> "Tamil"
+            Regex("(?i)\\b(telugu)\\b").containsMatchIn(lower) -> "Telugu"
+            Regex("(?i)\\b(malayalam|mollywood)\\b").containsMatchIn(lower) -> "Malayalam"
+            Regex("(?i)\\b(kannada|sandalwood)\\b").containsMatchIn(lower) -> "Kannada"
+            Regex("(?i)\\b(marathi)\\b").containsMatchIn(lower) -> "Marathi"
             else -> null
         }
     }

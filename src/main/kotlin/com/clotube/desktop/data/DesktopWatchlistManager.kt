@@ -9,7 +9,10 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -196,6 +199,76 @@ object DesktopWatchlistManager {
         return getStatusForMedia(email, title, driveId) == WatchlistStatus.WATCHED
     }
 
+    fun hasActiveEntryForMedia(email: String, title: String, driveId: String? = null): Boolean {
+        return getStatusForMedia(email, title, driveId) != null
+    }
+
+    /**
+     * Returns true if the user has explicitly deleted/removed this title from their Watchlist
+     * (an active `isDeleted == true` tombstone exists with no newer active entry).
+     */
+    fun isExplicitlyRemovedFromWatchlist(email: String, title: String, driveId: String? = null): Boolean {
+        if (email.isBlank()) return false
+        val list = loadLocalSync(email)
+        val norm = normalizeTitle(title)
+        val catalogNorm = DesktopDriveCatalogMatcher.normalizeTitle(title)
+
+        val latestMatch = synchronized(list) {
+            list.filter { entry ->
+                (!driveId.isNullOrBlank() &&
+                    (entry.driveId == driveId || entry.externalId == driveId || entry.id == driveId)) ||
+                (norm.isNotBlank() && entry.normalizedTitle == norm) ||
+                (catalogNorm.isNotBlank() && DesktopDriveCatalogMatcher.normalizeTitle(entry.title) == catalogNorm)
+            }.maxByOrNull { it.updatedAt }
+        }
+        return latestMatch?.isDeleted == true
+    }
+
+    /**
+     * Marks the active Watchlist entry matching [driveId] or normalized [title] as a deleted
+     * tombstone (`isDeleted = true` with fresh `updatedAt`) so it stays removed across Google Drive syncs.
+     */
+    suspend fun removeMediaFromWatchlist(
+        email: String,
+        title: String,
+        driveId: String? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (email.isBlank() || (title.isBlank() && driveId.isNullOrBlank())) return@withContext false
+        val list = loadLocalSync(email)
+        val norm = normalizeTitle(title)
+        val catalogNorm = DesktopDriveCatalogMatcher.normalizeTitle(title)
+        val now = System.currentTimeMillis()
+        var modified = false
+        var removedEntry: WatchlistEntry? = null
+
+        synchronized(list) {
+            val idx = list.indexOfFirst { entry ->
+                !entry.isDeleted && (
+                    (!driveId.isNullOrBlank() &&
+                        (entry.driveId == driveId || entry.externalId == driveId || entry.id == driveId)) ||
+                    (norm.isNotBlank() && entry.normalizedTitle == norm) ||
+                    (catalogNorm.isNotBlank() && DesktopDriveCatalogMatcher.normalizeTitle(entry.title) == catalogNorm)
+                )
+            }
+            if (idx >= 0) {
+                removedEntry = list[idx]
+                list[idx] = list[idx].copy(
+                    isDeleted = true,
+                    updatedAt = now
+                )
+                modified = true
+            }
+        }
+
+        if (modified) {
+            saveLocal(email, list)
+            if (removedEntry?.mediaType == WatchlistMediaType.MOVIE) {
+                DesktopWatchHistoryManager.clearMediaWatchedFlag(email, driveId ?: removedEntry?.driveId ?: removedEntry?.id ?: "")
+            }
+        }
+        modified
+    }
+
     // -------------------------------------------------------------------------
     // CROSS-DEVICE GLOBAL SEARCH WATCHLIST HELPERS
     // -------------------------------------------------------------------------
@@ -324,6 +397,15 @@ object DesktopWatchlistManager {
         if (modified) {
             saveLocal(email, list)
             DesktopWatchlistSync.pushLocalWatchlistNonCancellable(email, accessToken)
+            if (result.mediaType == SearchMediaType.MOVIE) {
+                val targetId = result.driveMediaItem?.id?.takeIf { it.isNotBlank() } ?: result.id
+                DesktopWatchHistoryManager.clearMediaWatchedFlag(email, targetId)
+                if (accessToken.isNotBlank()) {
+                    CoroutineScope(Dispatchers.IO + NonCancellable).launch {
+                        DesktopWatchHistorySync.pushLocalHistory(email, accessToken, force = true)
+                    }
+                }
+            }
         }
     }
 
@@ -559,10 +641,12 @@ object DesktopWatchlistManager {
         val list = loadLocalSync(email)
         val now = System.currentTimeMillis()
         var modified = false
+        var removedEntry: WatchlistEntry? = null
 
         synchronized(list) {
             val idx = list.indexOfFirst { it.id == entryId }
             if (idx >= 0) {
+                removedEntry = list[idx]
                 list[idx] = list[idx].copy(
                     isDeleted = true,
                     updatedAt = now
@@ -570,34 +654,55 @@ object DesktopWatchlistManager {
                 modified = true
             }
         }
-        if (modified) saveLocal(email, list)
+        if (modified) {
+            saveLocal(email, list)
+            if (removedEntry?.mediaType == WatchlistMediaType.MOVIE) {
+                DesktopWatchHistoryManager.clearMediaWatchedFlag(email, removedEntry?.driveId ?: removedEntry?.id ?: "")
+            }
+        }
     }
 
     /**
      * Called automatically when playback reaches >= 90% completion.
-     * Respects explicit UNWATCHED overrides if the user manually marked it unwatched afterward.
+     * Promotes Watch Later / Rewatch / unmarked titles to WATCHED and links [driveId].
+     * Returns true if the Watchlist was mutated and should be pushed to Google Drive.
      */
     suspend fun autoMarkWatchedIfEligible(
         email: String,
         title: String,
         mediaType: WatchlistMediaType,
         driveId: String?
-    ) = withContext(Dispatchers.IO) {
-        if (email.isBlank() || title.isBlank()) return@withContext
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (email.isBlank() || title.isBlank()) return@withContext false
         val list = loadLocalSync(email)
         val norm = normalizeTitle(title)
+        val catalogNorm = DesktopDriveCatalogMatcher.normalizeTitle(title)
+
         val existing = synchronized(list) {
-            list.firstOrNull {
-                !it.isDeleted && (
-                    (!driveId.isNullOrBlank() && (it.driveId == driveId || it.id == driveId)) ||
-                        (norm.isNotBlank() && it.normalizedTitle == norm)
-                    )
+            list.firstOrNull { entry ->
+                !entry.isDeleted && (
+                    (!driveId.isNullOrBlank() &&
+                        (entry.driveId == driveId || entry.externalId == driveId || entry.id == driveId)) ||
+                    (norm.isNotBlank() && entry.normalizedTitle == norm) ||
+                    (catalogNorm.isNotBlank() && DesktopDriveCatalogMatcher.normalizeTitle(entry.title) == catalogNorm)
+                )
             }
         }
-        if (existing?.status == WatchlistStatus.WATCHED || existing?.status == WatchlistStatus.UNWATCHED) {
-            return@withContext
+
+        if (existing?.status == WatchlistStatus.WATCHED) {
+            return@withContext false
         }
-        upsertEntry(email, title, mediaType, WatchlistStatus.WATCHED, driveId)
+
+        val canonicalTitle = existing?.title?.takeIf { it.isNotBlank() } ?: title
+        upsertEntry(
+            email = email,
+            title = canonicalTitle,
+            mediaType = mediaType,
+            status = WatchlistStatus.WATCHED,
+            driveId = driveId ?: existing?.driveId,
+            posterUrl = existing?.posterUrl
+        )
+        true
     }
 
     /**

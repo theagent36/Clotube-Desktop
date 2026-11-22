@@ -17,6 +17,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -68,22 +69,30 @@ import com.clotube.desktop.ui.components.onCtrlScrollSubtitleScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil3.compose.AsyncImage
 import com.clotube.desktop.data.DesktopAppSettings
+import com.clotube.desktop.data.DesktopOnlineMetadataResolver
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.data.DesktopWatchlistManager
 import com.clotube.desktop.data.DesktopWatchlistSync
+import com.clotube.desktop.data.MovieRichDetails
 import com.clotube.desktop.data.WatchlistMediaType
 import com.clotube.desktop.data.WatchlistStatus
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
+import com.clotube.desktop.ui.components.ThumbnailSize
+import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import uk.co.caprica.vlcj.player.base.MediaPlayer
+import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -158,6 +167,25 @@ fun DesktopMoviePlayerScreen(
     onBack: () -> Unit
 ) {
     var currentPlayingMovie by remember(initialMovie.id) { mutableStateOf(initialMovie) }
+    var maxObservedPositionMs by remember(currentPlayingMovie.id) { mutableLongStateOf(0L) }
+    var lastKnownDurationMs by remember(currentPlayingMovie.id) { mutableLongStateOf(0L) }
+    var richDetails by remember(currentPlayingMovie.id, currentPlayingMovie.title) {
+        mutableStateOf<MovieRichDetails?>(null)
+    }
+    var isFetchingRichDetails by remember(currentPlayingMovie.id, currentPlayingMovie.title) {
+        mutableStateOf(true)
+    }
+
+    LaunchedEffect(currentPlayingMovie.id, currentPlayingMovie.title) {
+        isFetchingRichDetails = true
+        try {
+            richDetails = DesktopOnlineMetadataResolver.resolveMovieRichDetails(currentPlayingMovie.title)
+        } catch (_: Exception) {
+        } finally {
+            isFetchingRichDetails = false
+        }
+    }
+
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
     val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
 
@@ -296,8 +324,8 @@ fun DesktopMoviePlayerScreen(
     val saveMovieProgress = {
         val p = activePlayer
         if (canRecordPlaybackProgress && p != null) {
-            val curMs = p.currentTimeMs
-            val durMs = p.totalDurationMs
+            val curMs = if (p.currentTimeMs > 0L) p.currentTimeMs else maxObservedPositionMs
+            val durMs = if (p.totalDurationMs > 0L) p.totalDurationMs else lastKnownDurationMs
             if (curMs > 1000L && userEmail.isNotBlank()) {
                 progressSaveScope.launch {
                     try {
@@ -307,7 +335,8 @@ fun DesktopMoviePlayerScreen(
                             title = currentPlayingMovie.title,
                             positionMs = curMs,
                             durationMs = durMs,
-                            isSeries = false
+                            isSeries = false,
+                            accessToken = accessToken
                         )
                         if (accessToken.isNotBlank()) {
                             DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
@@ -325,20 +354,64 @@ fun DesktopMoviePlayerScreen(
         if (!canRecordPlaybackProgress) return@LaunchedEffect
         if (p.isPlaying && userEmail.isNotBlank()) {
             while (isActive) {
+                if (p.currentTimeMs > 0L) {
+                    maxObservedPositionMs = maxOf(maxObservedPositionMs, p.currentTimeMs)
+                }
+                if (p.totalDurationMs > 0L) {
+                    lastKnownDurationMs = p.totalDurationMs
+                }
                 delay(5000L)
                 saveMovieProgress()
             }
         } else if (!p.isPlaying && userEmail.isNotBlank()) {
+            if (p.currentTimeMs > 0L) {
+                maxObservedPositionMs = maxOf(maxObservedPositionMs, p.currentTimeMs)
+            }
+            if (p.totalDurationMs > 0L) {
+                lastKnownDurationMs = p.totalDurationMs
+            }
             saveMovieProgress()
         }
     }
 
     DisposableEffect(activePlayer) {
+        val p = activePlayer
+        val endListener = if (p != null) {
+            object : MediaPlayerEventAdapter() {
+                override fun finished(mp: MediaPlayer) {
+                    progressSaveScope.launch(Dispatchers.IO) {
+                        val completedDur = lastKnownDurationMs.takeIf { it > 0L }
+                            ?: p.totalDurationMs.takeIf { it > 0L }
+                            ?: 7200_000L
+                        DesktopWatchHistoryManager.recordPlaybackProgress(
+                            email = userEmail,
+                            fileId = currentPlayingMovie.id,
+                            title = currentPlayingMovie.title,
+                            positionMs = completedDur,
+                            durationMs = completedDur,
+                            isSeries = false,
+                            accessToken = accessToken
+                        )
+                        if (accessToken.isNotBlank()) {
+                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                        }
+                    }
+                }
+            }
+        } else null
+
+        val attached = if (p != null && endListener != null) {
+            p.addSafeEventListener(endListener)
+        } else false
+
         onDispose {
+            if (attached && p != null && endListener != null) {
+                p.removeSafeEventListener(endListener)
+            }
             if (canRecordPlaybackProgress) {
                 saveMovieProgress()
             }
-            activePlayer?.release()
+            p?.release()
         }
     }
 
@@ -866,11 +939,14 @@ fun DesktopMoviePlayerScreen(
                     modifier = Modifier.fillMaxSize(),
                     horizontalArrangement = Arrangement.spacedBy(28.dp)
                 ) {
-                    // LEFT COLUMN: Viewport + Controls + Metadata
+                    // LEFT COLUMN: Viewport + Controls + Metadata (Vertically scrollable in normal mode)
+                    val leftScrollState = rememberScrollState()
                     Column(
                         modifier = Modifier
                             .weight(0.68f)
                             .fillMaxHeight()
+                            .verticalScroll(leftScrollState)
+                            .padding(end = 6.dp)
                     ) {
                         Card(
                             shape = RoundedCornerShape(12.dp),
@@ -1067,32 +1143,141 @@ fun DesktopMoviePlayerScreen(
                         Spacer(modifier = Modifier.height(18.dp))
 
                         // ========================================================
-                        // CLEAN MOVIE DETAILS SECTION (BUTTONS REMOVED)
+                        // RICH IMDB DETAILS, RATING & CAST SECTION
                         // ========================================================
+                        val displayTitle = richDetails?.officialTitle?.ifBlank { currentPlayingMovie.title } ?: currentPlayingMovie.title
+                        val displayYear = richDetails?.releaseYear?.takeIf { it.isNotBlank() } ?: ""
+                        val displayGenres = richDetails?.genres?.takeIf { it.isNotBlank() } ?: currentPlayingMovie.genres
+                        val displayDirector = richDetails?.director?.takeIf { it.isNotBlank() } ?: ""
+                        val ratingVal = richDetails?.ratingValue ?: ""
+                        val ratingCnt = richDetails?.ratingCount ?: ""
+
                         Column(
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            Text(
-                                text = "NOW PLAYING",
-                                color = Color(0xFF42A5F5),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = currentPlayingMovie.title,
-                                color = Color.White,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "${currentPlayingMovie.durationFormatted}  •  ${currentPlayingMovie.genres}",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                            // 1. Header & Rating Row
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = "NOW PLAYING",
+                                    color = Color(0xFF38BDF8),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.2.sp
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = displayTitle,
+                                        color = Color.White,
+                                        fontSize = 22.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+
+                                    if (ratingVal.isNotBlank()) {
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(3.dp),
+                                                color = Color(0xFFF5C518)
+                                            ) {
+                                                Text(
+                                                    text = "IMDb",
+                                                    color = Color.Black,
+                                                    fontWeight = FontWeight.Black,
+                                                    fontSize = 10.sp,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                            Icon(
+                                                imageVector = Icons.Rounded.Star,
+                                                contentDescription = null,
+                                                tint = Color(0xFFF5C518),
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Text(
+                                                text = "$ratingVal / 10",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                            if (ratingCnt.isNotBlank()) {
+                                                Text(
+                                                    text = "($ratingCnt)",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+                                val metaParts = mutableListOf<String>()
+                                metaParts.add(currentPlayingMovie.durationFormatted)
+                                if (displayYear.isNotBlank()) metaParts.add(displayYear)
+                                if (displayGenres.isNotBlank()) metaParts.add(displayGenres)
+                                Text(
+                                    text = metaParts.joinToString("  •  "),
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+
+                                if (displayDirector.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Directed by $displayDirector",
+                                        color = Color(0xFF64748B),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Normal
+                                    )
+                                }
+                            }
+
+                            // 2. About Movie Details (Directly on canvas, no border box)
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = "About the Movie",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                val summary = richDetails?.plotSummary
+                                if (!summary.isNullOrBlank()) {
+                                    Text(
+                                        text = summary,
+                                        color = Color(0xFFCBD5E1),
+                                        fontSize = 13.sp,
+                                        lineHeight = 20.sp,
+                                        fontWeight = FontWeight.Normal
+                                    )
+                                } else if (isFetchingRichDetails) {
+                                    Text(
+                                        text = "Fetching official details & synopsis from IMDb...",
+                                        color = Color(0xFF64748B),
+                                        fontSize = 12.sp
+                                    )
+                                } else {
+                                    Text(
+                                        text = "No plot summary available for this title.",
+                                        color = Color(0xFF64748B),
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(24.dp))
                         }
                     }
 
@@ -1158,8 +1343,11 @@ fun DesktopMoviePlayerScreen(
                                 val isHistoryWatched = remember(movie.id, userEmail, historyRevision) {
                                     DesktopWatchHistoryManager.isEpisodeWatched(userEmail, movie.id)
                                 }
+                                val isExplicitlyRemoved = remember(movie.id, movie.title, userEmail, watchlistRevision) {
+                                    DesktopWatchlistManager.isExplicitlyRemovedFromWatchlist(userEmail, movie.title, movie.id)
+                                }
                                 val isMovieWatched = watchlistStatus == WatchlistStatus.WATCHED ||
-                                    (watchlistStatus == null && isHistoryWatched)
+                                    (watchlistStatus == null && !isExplicitlyRemoved && isHistoryWatched)
 
                                 val mediaItem = remember(movie.id, movie.title, movie.thumbnailUrl) {
                                     DesktopMediaItem(
@@ -1217,9 +1405,13 @@ fun DesktopMoviePlayerScreen(
                                                     .clip(RoundedCornerShape(6.dp))
                                                     .background(Color(0xFF0A0D14))
                                             ) {
-                                                if (!movie.thumbnailUrl.isNullOrBlank()) {
-                                                    AsyncImage(
-                                                        model = movie.thumbnailUrl,
+                                                val railThumbBitmap = rememberThumbnailBitmap(
+                                                    primaryUrl = movie.thumbnailUrl,
+                                                    size = ThumbnailSize.CARD
+                                                )
+                                                if (railThumbBitmap != null) {
+                                                    Image(
+                                                        bitmap = railThumbBitmap,
                                                         contentDescription = movie.title,
                                                         contentScale = ContentScale.Crop,
                                                         modifier = Modifier.fillMaxSize()

@@ -90,6 +90,9 @@ fun DesktopFigmaMediaCard(
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
     val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
 
+    val isExplicitlyRemoved = remember(item.id, item.title, userEmail, watchlistRevision) {
+        DesktopWatchlistManager.isExplicitlyRemovedFromWatchlist(userEmail, item.title, item.id)
+    }
     val cardWatchlistStatus = remember(item.id, item.title, userEmail, watchlistRevision) {
         if (userEmail.isBlank()) null
         else DesktopWatchlistManager.getStatusForMedia(userEmail, item.title, item.id)
@@ -98,7 +101,7 @@ fun DesktopFigmaMediaCard(
         !item.isSeries && userEmail.isNotBlank() && DesktopWatchHistoryManager.isEpisodeWatched(userEmail, item.id)
     }
     val showWatchedBadge = cardWatchlistStatus == WatchlistStatus.WATCHED ||
-        (cardWatchlistStatus == null && isCardHistoryWatched)
+        (cardWatchlistStatus == null && !isExplicitlyRemoved && isCardHistoryWatched)
 
     Box(
         modifier = modifier

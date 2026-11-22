@@ -56,7 +56,7 @@ class ParsingTest {
         assertEquals("2021", meta.releaseYear)
         assertEquals("Sci-Fi • Adventure • Action", meta.genre)
         assertEquals("English", meta.language)
-        assertEquals("https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg", meta.posterUrl)
+        assertEquals("", meta.posterUrl)
 
         val meta1b = DesktopOnlineMetadataResolver.resolveMovieSync("Cebray - Dune Part One (2021) [1080p].mkv")
         assertEquals("Dune: Part One", meta1b.officialTitle)
@@ -67,7 +67,7 @@ class ParsingTest {
         assertEquals("2024", meta2.releaseYear)
         assertEquals("Sci-Fi • Adventure • Action", meta2.genre)
         assertEquals("English", meta2.language)
-        assertEquals("https://m.media-amazon.com/images/M/MV5BNTc0YmQxMjEtODI5MC00NjFiLTlkMWUtOGQ5NjFmYWUyZGJhXkEyXkFqcGc@._V1_.jpg", meta2.posterUrl)
+        assertEquals("", meta2.posterUrl)
 
         val meta2b = DesktopOnlineMetadataResolver.resolveMovieSync("Dune.Part.2.2024.UHD.mkv")
         assertEquals("Dune: Part Two", meta2b.officialTitle)

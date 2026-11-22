@@ -38,7 +38,28 @@ data class MovieMetadata(
     val posterUrl: String = "",
     val releaseYear: String = "",
     val genre: String = "Drama",
-    val language: String = "English"
+    val language: String = "English",
+    val imdbId: String = ""
+)
+
+data class MovieCastMember(
+    val id: String = "",
+    val name: String = "",
+    val character: String = "",
+    val photoUrl: String = ""
+)
+
+data class MovieRichDetails(
+    val imdbId: String = "",
+    val officialTitle: String = "",
+    val releaseYear: String = "",
+    val ratingValue: String = "",
+    val ratingCount: String = "",
+    val genres: String = "",
+    val director: String = "",
+    val plotSummary: String = "",
+    val posterUrl: String = "",
+    val cast: List<MovieCastMember> = emptyList()
 )
 
 data class SeriesOnlineMeta(
@@ -280,42 +301,42 @@ object DesktopOnlineMetadataResolver {
     private val CURATED_TITLES = mapOf(
         "dune" to MovieMetadata(
             officialTitle = "Dune: Part One",
-            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            posterUrl = "",
             releaseYear = "2021",
             genre = "Sci-Fi • Adventure • Action",
             language = "English"
         ),
         "dune part one" to MovieMetadata(
             officialTitle = "Dune: Part One",
-            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            posterUrl = "",
             releaseYear = "2021",
             genre = "Sci-Fi • Adventure • Action",
             language = "English"
         ),
         "dune part 1" to MovieMetadata(
             officialTitle = "Dune: Part One",
-            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            posterUrl = "",
             releaseYear = "2021",
             genre = "Sci-Fi • Adventure • Action",
             language = "English"
         ),
         "dune 2021" to MovieMetadata(
             officialTitle = "Dune: Part One",
-            posterUrl = "https://m.media-amazon.com/images/M/MV5BN2FjNmEyNWMtYzM0ZS00NjIyLTg5YzYtYThlMGVjNzE1OGViXkEyXkFqcGc@._V1_.jpg",
+            posterUrl = "",
             releaseYear = "2021",
             genre = "Sci-Fi • Adventure • Action",
             language = "English"
         ),
         "dune part two" to MovieMetadata(
             officialTitle = "Dune: Part Two",
-            posterUrl = "https://m.media-amazon.com/images/M/MV5BNTc0YmQxMjEtODI5MC00NjFiLTlkMWUtOGQ5NjFmYWUyZGJhXkEyXkFqcGc@._V1_.jpg",
+            posterUrl = "",
             releaseYear = "2024",
             genre = "Sci-Fi • Adventure • Action",
             language = "English"
         ),
         "dune part 2" to MovieMetadata(
             officialTitle = "Dune: Part Two",
-            posterUrl = "https://m.media-amazon.com/images/M/MV5BNTc0YmQxMjEtODI5MC00NjFiLTlkMWUtOGQ5NjFmYWUyZGJhXkEyXkFqcGc@._V1_.jpg",
+            posterUrl = "",
             releaseYear = "2024",
             genre = "Sci-Fi • Adventure • Action",
             language = "English"
@@ -399,12 +420,41 @@ object DesktopOnlineMetadataResolver {
         )
     }
 
+    /**
+     * Actively tests whether a remote poster image URL is reachable and serves an image payload (HTTP 200..299).
+     * Uses a lightweight HTTP byte-range request with a 3-second timeout.
+     */
+    fun isPosterUrlReachable(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        var connection: HttpURLConnection? = null
+        return try {
+            val targetUrl = URI(url).toURL()
+            connection = (targetUrl.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 3000
+                readTimeout = 3000
+                instanceFollowRedirects = true
+                setRequestProperty("Range", "bytes=0-0")
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                setRequestProperty("Accept", "image/*,*/*;q=0.8")
+            }
+            val code = connection.responseCode
+            val contentType = connection.contentType ?: ""
+            (code in 200..299) && (contentType.startsWith("image/", ignoreCase = true) || contentType.isBlank() || code == 206)
+        } catch (_: Exception) {
+            false
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
     suspend fun resolveMovie(rawFileName: String): MovieMetadata = withContext(Dispatchers.IO) {
         val trimmed = rawFileName.trim()
         movieCache[trimmed]?.let { return@withContext it }
 
         val syncMeta = resolveMovieSync(trimmed)
-        if (CURATED_TITLES.values.any { it.officialTitle == syncMeta.officialTitle } && syncMeta.posterUrl.isNotBlank()) {
+        val isCurated = CURATED_TITLES.values.any { it.officialTitle == syncMeta.officialTitle }
+        if (isCurated && syncMeta.posterUrl.isNotBlank() && isPosterUrlReachable(syncMeta.posterUrl)) {
             movieCache[trimmed] = syncMeta
             return@withContext syncMeta
         }
@@ -413,62 +463,92 @@ object DesktopOnlineMetadataResolver {
         val searchCandidates = generateCandidateQueries(syncMeta.officialTitle.ifBlank { cleanQuery })
 
         var matchedTitle: String? = syncMeta.officialTitle.ifBlank { null }
-        var matchedPoster = syncMeta.posterUrl
+        var matchedPoster = if (isPosterUrlReachable(syncMeta.posterUrl)) syncMeta.posterUrl else ""
         var matchedYear = syncMeta.releaseYear.ifBlank { releaseYear ?: "" }
         var matchedGenre: String? = if (syncMeta.genre != "Drama • Cinema") syncMeta.genre else null
-        var matchedLanguage: String? = if (syncMeta.language != "Unknown") syncMeta.language else null
+        var matchedLanguage: String? = if (syncMeta.language.isNotBlank() && syncMeta.language != "Unknown") syncMeta.language else null
+        var matchedImdbId: String = ""
 
-        // 1. Query IMDb Suggestion API for official title and live theatrical poster
+        // 1. Step A: Query IMDb Suggestion API for official title, canonical IMDb ID ("tt..."), and theatrical poster
         for (candidate in searchCandidates) {
             val imdb = fetchFromImdb(candidate, matchedYear)
             if (imdb != null) {
                 if (matchedTitle == null) matchedTitle = imdb.officialTitle
-                if (imdb.posterUrl.isNotBlank()) matchedPoster = imdb.posterUrl
+                if (imdb.imdbId.isNotBlank() && matchedImdbId.isBlank()) matchedImdbId = imdb.imdbId
+                if (imdb.posterUrl.isNotBlank() && matchedPoster.isBlank() && isPosterUrlReachable(imdb.posterUrl)) {
+                    matchedPoster = imdb.posterUrl
+                }
                 if (imdb.releaseYear.isNotBlank() && matchedYear.isBlank()) matchedYear = imdb.releaseYear
-                break
+                if (matchedImdbId.isNotBlank() && matchedPoster.isNotBlank()) break
             }
         }
 
-        // 2. Query TMDB Movie API (High-Resolution Theatrical Posters & Genres)
-        if (matchedPoster.isBlank()) {
+        // 2. Step B: TMDB exact /find/{imdb_id} (if IMDb ID found) OR /search/movie
+        if (matchedImdbId.startsWith("tt")) {
+            val tmdbByImdb = fetchFromTmdbByImdbId(matchedImdbId)
+            if (tmdbByImdb != null) {
+                if (matchedTitle == null) matchedTitle = tmdbByImdb.officialTitle
+                if (tmdbByImdb.language.isNotBlank() && (matchedLanguage == null || matchedLanguage == "Unknown")) {
+                    matchedLanguage = tmdbByImdb.language
+                }
+                if (matchedPoster.isBlank() && tmdbByImdb.posterUrl.isNotBlank() && isPosterUrlReachable(tmdbByImdb.posterUrl)) {
+                    matchedPoster = tmdbByImdb.posterUrl
+                }
+                if (matchedYear.isBlank() && tmdbByImdb.releaseYear.isNotBlank()) matchedYear = tmdbByImdb.releaseYear
+                if (matchedGenre.isNullOrBlank() && tmdbByImdb.genre.isNotBlank() && tmdbByImdb.genre != "Drama") {
+                    matchedGenre = tmdbByImdb.genre
+                }
+            }
+        }
+
+        if (matchedLanguage.isNullOrBlank() || matchedLanguage == "Unknown" || matchedPoster.isBlank()) {
             for (candidate in searchCandidates) {
                 val tmdb = fetchFromTmdbMovie(candidate, releaseYear ?: matchedYear)
                 if (tmdb != null) {
                     if (matchedTitle == null) matchedTitle = tmdb.officialTitle
-                    if (matchedPoster.isBlank() && tmdb.posterUrl.isNotBlank()) matchedPoster = tmdb.posterUrl
+                    if (tmdb.language.isNotBlank() && (matchedLanguage == null || matchedLanguage == "Unknown")) {
+                        matchedLanguage = tmdb.language
+                    }
+                    if (matchedPoster.isBlank() && tmdb.posterUrl.isNotBlank() && isPosterUrlReachable(tmdb.posterUrl)) {
+                        matchedPoster = tmdb.posterUrl
+                    }
                     if (matchedYear.isBlank() && tmdb.releaseYear.isNotBlank()) matchedYear = tmdb.releaseYear
                     if (matchedGenre.isNullOrBlank() && tmdb.genre.isNotBlank() && tmdb.genre != "Drama") {
                         matchedGenre = tmdb.genre
                     }
-                    break
+                    if (matchedLanguage != null && matchedPoster.isNotBlank()) break
                 }
             }
         }
 
         val queryForWiki = matchedTitle ?: searchCandidates.firstOrNull() ?: cleanQuery
 
-        // 3. Query Wikipedia API if poster or genre is missing
-        if (matchedPoster.isBlank() || matchedGenre.isNullOrBlank()) {
+        // 3. Step C: Wikipedia REST API Backup if original language, poster or genre is missing
+        if (matchedLanguage.isNullOrBlank() || matchedLanguage == "Unknown" || matchedPoster.isBlank() || matchedGenre.isNullOrBlank()) {
             val wiki = fetchFromWikipedia(queryForWiki)
             if (wiki != null) {
                 if (matchedTitle == null) matchedTitle = wiki.officialTitle
-                if (matchedPoster.isBlank() && wiki.posterUrl.isNotBlank()) matchedPoster = wiki.posterUrl
+                if (wiki.language.isNotBlank() && wiki.language != "Unknown" && (matchedLanguage == null || matchedLanguage == "Unknown")) {
+                    matchedLanguage = wiki.language
+                }
+                if (matchedPoster.isBlank() && wiki.posterUrl.isNotBlank() && isPosterUrlReachable(wiki.posterUrl)) {
+                    matchedPoster = wiki.posterUrl
+                }
                 if (matchedYear.isBlank() && wiki.releaseYear.isNotBlank()) matchedYear = wiki.releaseYear
                 if (matchedGenre.isNullOrBlank() && wiki.genre.isNotBlank() && wiki.genre != "Drama") {
                     matchedGenre = wiki.genre
                 }
-                if (matchedLanguage == null && wiki.language.isNotBlank() && wiki.language != "Unknown") {
-                    matchedLanguage = wiki.language
-                }
             }
         }
 
-        // 4. Query iTunes API as fallback
+        // 4. iTunes API as fallback for poster/genre
         if (matchedPoster.isBlank() || matchedGenre.isNullOrBlank()) {
             val itunes = fetchFromItunes(queryForWiki, matchedYear)
             if (itunes != null) {
                 if (matchedTitle == null) matchedTitle = itunes.officialTitle
-                if (matchedPoster.isBlank() && itunes.posterUrl.isNotBlank()) matchedPoster = itunes.posterUrl
+                if (matchedPoster.isBlank() && itunes.posterUrl.isNotBlank() && isPosterUrlReachable(itunes.posterUrl)) {
+                    matchedPoster = itunes.posterUrl
+                }
                 if (matchedYear.isBlank() && itunes.releaseYear.isNotBlank()) matchedYear = itunes.releaseYear
                 if (matchedGenre.isNullOrBlank() && itunes.genre.isNotBlank() && itunes.genre != "Drama") {
                     matchedGenre = itunes.genre
@@ -478,14 +558,15 @@ object DesktopOnlineMetadataResolver {
 
         val finalTitle = matchedTitle ?: cleanQuery
         val finalGenre = matchedGenre?.ifBlank { null } ?: syncMeta.genre
-        val finalLanguage = matchedLanguage ?: deduceLanguageFromTitle(finalTitle)
+        val finalLanguage = matchedLanguage?.takeIf { it != "Unknown" } ?: deduceLanguageFromTitle(finalTitle)
 
         val result = MovieMetadata(
             officialTitle = finalTitle,
             posterUrl = matchedPoster,
             releaseYear = matchedYear,
             genre = finalGenre,
-            language = finalLanguage
+            language = finalLanguage,
+            imdbId = matchedImdbId
         )
         movieCache[trimmed] = result
         result
@@ -501,8 +582,8 @@ object DesktopOnlineMetadataResolver {
             val endpoint = "https://v3.sg.media-imdb.com/suggestion/$firstChar/$slug.json"
             connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 5000
-                readTimeout = 5000
+                connectTimeout = 4000
+                readTimeout = 4000
                 setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             }
 
@@ -511,6 +592,7 @@ object DesktopOnlineMetadataResolver {
                 val root = JsonParser.parseString(jsonText).asJsonObject
                 val results = root.getAsJsonArray("d") ?: return null
 
+                val movieQids = setOf("movie", "tvMovie", "short")
                 var bestObj: com.google.gson.JsonObject? = null
 
                 for (i in 0 until results.size()) {
@@ -520,11 +602,13 @@ object DesktopOnlineMetadataResolver {
                     val qid = item.get("qid")?.asString ?: ""
 
                     if (isTitleSimilar(query, title)) {
-                        if (!targetYear.isNullOrBlank() && year == targetYear) {
+                        if (!targetYear.isNullOrBlank() && year == targetYear && qid in movieQids) {
                             bestObj = item
                             break
                         }
-                        if (bestObj == null || (qid == "movie" && bestObj.get("qid")?.asString != "movie")) {
+                        if (bestObj == null) {
+                            bestObj = item
+                        } else if (qid in movieQids && (bestObj.get("qid")?.asString ?: "") !in movieQids) {
                             bestObj = item
                         }
                     }
@@ -537,18 +621,854 @@ object DesktopOnlineMetadataResolver {
                     var posterUrl = imageObj?.get("imageUrl")?.asString ?: ""
 
                     if (posterUrl.contains("._V1_")) {
-                        posterUrl = posterUrl.replace(Regex("\\._V1_.*(\\.[a-zA-Z]+)$"), "._V1_$1")
+                        posterUrl = posterUrl.replace(Regex("(?i)\\._V1_.*(\\.[a-zA-Z0-9]+)$"), "._V1_UX780_$1")
                     }
+
+                    val validatedPoster = if (isPosterUrlReachable(posterUrl)) posterUrl else ""
+                    val canonicalImdbId = bestObj.get("id")?.asString?.takeIf { it.startsWith("tt") } ?: ""
+
+                    return MovieMetadata(
+                        officialTitle = officialTitle,
+                        posterUrl = validatedPoster,
+                        releaseYear = year,
+                        genre = "",
+                        imdbId = canonicalImdbId
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            System.err.println("[IMDb] Movie lookup failed for $query: ${e.message}")
+        } finally {
+            connection?.disconnect()
+        }
+        return null
+    }
+
+    private data class CachedRichDetails(
+        val details: MovieRichDetails,
+        val cachedAtMs: Long = System.currentTimeMillis()
+    ) {
+        fun isExpired(): Boolean {
+            val isComplete = details.plotSummary.isNotBlank() && details.officialTitle.isNotBlank()
+            return if (isComplete) {
+                false
+            } else {
+                System.currentTimeMillis() - cachedAtMs > 60_000L
+            }
+        }
+    }
+
+    private val richDetailsCache = ConcurrentHashMap<String, CachedRichDetails>()
+
+    private data class CinemetaMovieMeta(
+        val plotSummary: String = "",
+        val imdbRating: String = "",
+        val releaseYear: String = "",
+        val posterUrl: String = "",
+        val director: String = "",
+        val genres: String = "",
+        val tmdbId: Long = -1L,
+        val cast: List<MovieCastMember> = emptyList()
+    )
+
+    private fun normalizePersonName(name: String): String {
+        return name.lowercase().replace(Regex("[^a-z0-9]"), "")
+    }
+
+    private fun mergeCastLists(
+        primary: List<MovieCastMember>,
+        additional: List<MovieCastMember>,
+        maxCast: Int = 20
+    ): List<MovieCastMember> {
+        val merged = primary.toMutableList()
+        for (candidate in additional) {
+            if (candidate.name.isBlank()) continue
+            val norm = normalizePersonName(candidate.name)
+            if (norm.isBlank()) continue
+
+            val existingIdx = merged.indexOfFirst { normalizePersonName(it.name) == norm }
+            if (existingIdx >= 0) {
+                val existing = merged[existingIdx]
+                val updatedPhoto = if (existing.photoUrl.isBlank() && candidate.photoUrl.isNotBlank()) candidate.photoUrl else existing.photoUrl
+                val updatedChar = if (existing.character.isBlank() && candidate.character.isNotBlank()) candidate.character else existing.character
+                val updatedId = if (existing.id.isBlank() && candidate.id.isNotBlank()) candidate.id else existing.id
+                merged[existingIdx] = existing.copy(
+                    id = updatedId,
+                    character = updatedChar,
+                    photoUrl = updatedPhoto
+                )
+            } else if (merged.size < maxCast) {
+                merged.add(candidate)
+            }
+        }
+        return merged.take(maxCast)
+    }
+
+    private fun fetchFromCinemeta(imdbId: String): CinemetaMovieMeta? {
+        if (!imdbId.startsWith("tt")) return null
+        var conn: HttpURLConnection? = null
+        try {
+            val endpoint = "https://v3-cinemeta.strem.io/meta/movie/$imdbId.json"
+            conn = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4000
+                readTimeout = 4000
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                setRequestProperty("Accept", "application/json")
+            }
+            if (conn.responseCode == 200) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JsonParser.parseString(json).asJsonObject
+                val meta = root.getAsJsonObject("meta") ?: return null
+                val desc = meta.get("description")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                val rating = meta.get("imdbRating")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                val year = meta.get("year")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                val poster = meta.get("poster")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                val tmdbId = meta.get("moviedb_id")?.takeIf { !it.isJsonNull }?.asLong ?: -1L
+
+                val directorStr = when {
+                    meta.has("director") && meta.get("director").isJsonArray -> {
+                        meta.getAsJsonArray("director").mapNotNull { if (!it.isJsonNull) it.asString.trim() else null }.filter { it.isNotBlank() }.joinToString(", ")
+                    }
+                    meta.has("director") && meta.get("director").isJsonPrimitive -> {
+                        meta.get("director").asString.trim()
+                    }
+                    else -> ""
+                }
+
+                val genresStr = when {
+                    meta.has("genres") && meta.get("genres").isJsonArray -> {
+                        meta.getAsJsonArray("genres").mapNotNull { if (!it.isJsonNull) it.asString.trim() else null }.filter { it.isNotBlank() }.joinToString(" • ")
+                    }
+                    meta.has("genres") && meta.get("genres").isJsonPrimitive -> {
+                        meta.get("genres").asString.trim()
+                    }
+                    else -> ""
+                }
+
+                val cinemetaCast = mutableListOf<MovieCastMember>()
+                if (meta.has("credits_cast") && meta.get("credits_cast").isJsonArray) {
+                    val array = meta.getAsJsonArray("credits_cast")
+                    for (i in 0 until array.size()) {
+                        val obj = array.get(i)
+                        if (obj.isJsonObject) {
+                            val cObj = obj.asJsonObject
+                            val name = cObj.get("name")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                            val character = cObj.get("character")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                            val photo = cObj.get("profile_path")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                            val formattedPhoto = if (photo.isNotBlank()) "https://image.tmdb.org/t/p/w185$photo" else ""
+                            if (name.isNotBlank()) {
+                                cinemetaCast.add(MovieCastMember(name = name, character = character, photoUrl = formattedPhoto))
+                            }
+                        }
+                    }
+                }
+
+                if (cinemetaCast.isEmpty() && meta.has("cast") && meta.get("cast").isJsonArray) {
+                    val array = meta.getAsJsonArray("cast")
+                    for (i in 0 until array.size()) {
+                        val elem = array.get(i)
+                        if (elem.isJsonPrimitive) {
+                            val name = elem.asString.trim()
+                            if (name.isNotBlank()) {
+                                cinemetaCast.add(MovieCastMember(name = name))
+                            }
+                        } else if (elem.isJsonObject) {
+                            val cObj = elem.asJsonObject
+                            val name = cObj.get("name")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                            val character = cObj.get("character")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                            if (name.isNotBlank()) {
+                                cinemetaCast.add(MovieCastMember(name = name, character = character))
+                            }
+                        }
+                    }
+                }
+
+                if (cinemetaCast.isEmpty() && meta.has("links") && meta.get("links").isJsonArray) {
+                    val links = meta.getAsJsonArray("links")
+                    for (i in 0 until links.size()) {
+                        val lObj = links.get(i)
+                        if (lObj.isJsonObject) {
+                            val cat = lObj.asJsonObject.get("category")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                            if (cat.equals("Cast", ignoreCase = true)) {
+                                val name = lObj.asJsonObject.get("name")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                                if (name.isNotBlank()) {
+                                    cinemetaCast.add(MovieCastMember(name = name))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return CinemetaMovieMeta(
+                    plotSummary = desc,
+                    imdbRating = rating,
+                    releaseYear = year,
+                    posterUrl = poster,
+                    director = directorStr,
+                    genres = genresStr,
+                    tmdbId = tmdbId,
+                    cast = cinemetaCast
+                )
+            }
+        } catch (e: Exception) {
+            System.err.println("[Cinemeta] Meta fetch failed for $imdbId: ${e.message}")
+        } finally {
+            conn?.disconnect()
+        }
+        return null
+    }
+
+    private fun fetchWikipediaPlotSummary(officialTitle: String, releaseYear: String = ""): String {
+        val candidates = mutableListOf<String>()
+        val cleanTitle = cleanHtml(officialTitle).trim()
+        if (cleanTitle.isBlank()) return ""
+
+        try {
+            val encodedQuery = URLEncoder.encode(cleanTitle, "UTF-8")
+            val searchUrl = "https://en.wikipedia.org/w/api.php?action=opensearch&search=$encodedQuery&limit=5&namespace=0&format=json"
+            val conn = (URI(searchUrl).toURL().openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4000
+                readTimeout = 4000
+                setRequestProperty("User-Agent", "Clotube-Windows/1.0 (contact@clotube.app)")
+            }
+            if (conn.responseCode == 200) {
+                val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+                val rootArray = JsonParser.parseString(jsonText).asJsonArray
+                if (rootArray.size() >= 2) {
+                    val titlesArray = rootArray.get(1).asJsonArray
+                    for (i in 0 until titlesArray.size()) {
+                        val articleTitle = titlesArray.get(i).asString
+                        if (articleTitle.contains("film", ignoreCase = true) ||
+                            articleTitle.contains("movie", ignoreCase = true) ||
+                            isTitleSimilar(cleanTitle, articleTitle)
+                        ) {
+                            candidates.add(articleTitle)
+                        }
+                    }
+                }
+            }
+            conn.disconnect()
+        } catch (_: Exception) {}
+
+        if (releaseYear.isNotBlank()) {
+            candidates.add("$cleanTitle ($releaseYear film)")
+        }
+        candidates.add("$cleanTitle (film)")
+        candidates.add(cleanTitle)
+
+        for (candidate in candidates.distinct()) {
+            try {
+                val encodedArticle = URLEncoder.encode(candidate.replace(" ", "_"), "UTF-8")
+                val summaryUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/$encodedArticle"
+                val conn = (URI(summaryUrl).toURL().openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("User-Agent", "Clotube-Windows/1.0 (contact@clotube.app)")
+                    setRequestProperty("Accept", "application/json")
+                }
+                if (conn.responseCode == 200) {
+                    val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+                    val summaryJson = JsonParser.parseString(jsonText).asJsonObject
+                    val type = summaryJson.get("type")?.asString ?: ""
+                    if (type.equals("disambiguation", ignoreCase = true)) {
+                        conn.disconnect()
+                        continue
+                    }
+                    val extract = summaryJson.get("extract")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                    if (extract.isNotBlank() && !extract.contains("may refer to:", ignoreCase = true)) {
+                        conn.disconnect()
+                        return extract
+                    }
+                }
+                conn.disconnect()
+            } catch (_: Exception) {}
+        }
+        return ""
+    }
+
+    /**
+     * Resolves rich details for a movie across a 4-provider progressive enrichment chain:
+     * 1. IMDb Suggestion API + IMDb Title Page scraping
+     * 2. TMDB v3 Full Details & Credits (/find, /search/movie, /movie/{id}?append_to_response=credits,external_ids)
+     * 3. Stremio Cinemeta Meta API (https://v3-cinemeta.strem.io/meta/movie/{imdbId}.json)
+     * 4. Wikipedia REST Summary API (https://en.wikipedia.org/api/rest_v1/page/summary/...)
+     * With concurrent cast headshot hydration and smart TTL caching (60s for partial results).
+     */
+    suspend fun resolveMovieRichDetails(rawTitle: String, fallbackYear: String = ""): MovieRichDetails = withContext(Dispatchers.IO) {
+        val (cleanQuery, extractedYear) = extractMovieQueryAndYear(rawTitle)
+        val targetYear = fallbackYear.ifBlank { extractedYear ?: "" }
+        val cacheKey = "$cleanQuery:$targetYear".lowercase()
+        richDetailsCache[cacheKey]?.let { cached ->
+            if (!cached.isExpired()) {
+                return@withContext cached.details
+            } else {
+                richDetailsCache.remove(cacheKey)
+            }
+        }
+
+        var imdbId = ""
+        var officialTitle = cleanQuery
+        var releaseYear = targetYear
+        var posterUrl = ""
+        var topActorsFromSuggestion: List<String> = emptyList()
+
+        // -------------------------------------------------------------
+        // Provider 1: IMDb Suggestion API + IMDb Title Page scraping
+        // -------------------------------------------------------------
+        try {
+            val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+            if (slug.isNotBlank()) {
+                val firstChar = slug.first()
+                val endpoint = "https://v3.sg.media-imdb.com/suggestion/$firstChar/$slug.json"
+                val conn = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                }
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+                    val root = JsonParser.parseString(jsonText).asJsonObject
+                    val results = root.getAsJsonArray("d")
+                    if (results != null && results.size() > 0) {
+                        val movieQids = setOf("movie", "tvMovie", "short")
+                        var bestItem: JsonObject? = null
+                        for (i in 0 until results.size()) {
+                            val item = results.get(i).asJsonObject
+                            val title = item.get("l")?.asString ?: ""
+                            val year = item.get("y")?.asInt?.toString() ?: ""
+                            val qid = item.get("qid")?.asString ?: ""
+                            if (isTitleSimilar(cleanQuery, title)) {
+                                if (targetYear.isNotBlank() && year == targetYear && qid in movieQids) {
+                                    bestItem = item
+                                    break
+                                }
+                                if (bestItem == null) {
+                                    bestItem = item
+                                } else if (qid in movieQids && (bestItem.get("qid")?.asString ?: "") !in movieQids) {
+                                    bestItem = item
+                                }
+                            }
+                        }
+                        bestItem?.let { item ->
+                            imdbId = item.get("id")?.asString ?: ""
+                            officialTitle = item.get("l")?.asString?.trim() ?: cleanQuery
+                            val y = item.get("y")?.asInt?.toString() ?: ""
+                            if (y.isNotBlank()) releaseYear = y
+                            val img = item.getAsJsonObject("i")?.get("imageUrl")?.asString ?: ""
+                            if (img.isNotBlank()) {
+                                posterUrl = if (img.contains("._V1_")) {
+                                    img.replace(Regex("(?i)\\._V1_.*(\\.[a-zA-Z0-9]+)$"), "._V1_UX780_$1")
+                                } else img
+                            }
+                            val stars = item.get("s")?.asString ?: ""
+                            if (stars.isNotBlank()) {
+                                topActorsFromSuggestion = stars.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                            }
+                        }
+                    }
+                }
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            System.err.println("[IMDb Details] Suggestion lookup failed: ${e.message}")
+        }
+
+        var ratingValue = ""
+        var ratingCount = ""
+        var genres = ""
+        var director = ""
+        var plotSummary = ""
+        var castList = mutableListOf<MovieCastMember>()
+
+        if (imdbId.startsWith("tt")) {
+            try {
+                val pageUrl = "https://www.imdb.com/title/$imdbId/"
+                val conn = (URI(pageUrl).toURL().openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 6000
+                    readTimeout = 6000
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+                    setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                }
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val html = conn.inputStream.bufferedReader().use { it.readText() }
+
+                    // 1. Parse <script type="application/ld+json">
+                    val ldJsonMatcher = Pattern.compile("<script\\s+type=[\"']application/ld\\+json[\"']>(.*?)</script>", Pattern.DOTALL).matcher(html)
+                    while (ldJsonMatcher.find()) {
+                        val snippet = ldJsonMatcher.group(1).trim()
+                        try {
+                            val parsed = JsonParser.parseString(snippet)
+                            val ldObj = when {
+                                parsed.isJsonObject -> parsed.asJsonObject
+                                parsed.isJsonArray -> parsed.asJsonArray.mapNotNull { if (it.isJsonObject) it.asJsonObject else null }.firstOrNull { it.has("@type") && (it.get("@type").asString == "Movie" || it.has("aggregateRating")) }
+                                else -> null
+                            }
+                            if (ldObj != null) {
+                                val name = ldObj.get("name")?.takeIf { !it.isJsonNull }?.asString
+                                if (!name.isNullOrBlank()) officialTitle = cleanHtml(name)
+
+                                val desc = ldObj.get("description")?.takeIf { !it.isJsonNull }?.asString
+                                if (!desc.isNullOrBlank()) plotSummary = cleanHtml(desc)
+
+                                if (ldObj.has("aggregateRating")) {
+                                    val agg = ldObj.getAsJsonObject("aggregateRating")
+                                    val rVal = agg.get("ratingValue")?.takeIf { !it.isJsonNull }?.asDouble
+                                    if (rVal != null) {
+                                        ratingValue = "%.1f".format(rVal)
+                                    }
+                                    val rCnt = agg.get("ratingCount")?.takeIf { !it.isJsonNull }?.asLong
+                                    if (rCnt != null) {
+                                        ratingCount = formatCompactVotes(rCnt)
+                                    }
+                                }
+
+                                if (ldObj.has("genre")) {
+                                    val gElem = ldObj.get("genre")
+                                    genres = when {
+                                        gElem.isJsonArray -> gElem.asJsonArray.mapNotNull { it.asString }.take(3).joinToString(" • ")
+                                        gElem.isJsonPrimitive -> gElem.asString
+                                        else -> ""
+                                    }
+                                }
+
+                                if (ldObj.has("director")) {
+                                    val dElem = ldObj.get("director")
+                                    director = when {
+                                        dElem.isJsonArray -> dElem.asJsonArray.mapNotNull { if (it.isJsonObject) it.asJsonObject.get("name")?.asString else null }.joinToString(", ")
+                                        dElem.isJsonObject -> dElem.asJsonObject.get("name")?.asString ?: ""
+                                        else -> ""
+                                    }
+                                }
+
+                                if (ldObj.has("actor") && castList.isEmpty()) {
+                                    val aElem = ldObj.get("actor")
+                                    if (aElem.isJsonArray) {
+                                        aElem.asJsonArray.forEach { actorElem ->
+                                            if (actorElem.isJsonObject) {
+                                                val aObj = actorElem.asJsonObject
+                                                val aName = aObj.get("name")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                                                val aUrl = aObj.get("url")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                                                val aId = Regex("(nm\\d+)").find(aUrl)?.groupValues?.get(1) ?: ""
+                                                if (aName.isNotBlank()) {
+                                                    castList.add(MovieCastMember(id = aId, name = aName, character = "", photoUrl = ""))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    // 2. Extract rich cast with photos & characters from __NEXT_DATA__
+                    val nextDataMatcher = Pattern.compile("<script\\s+id=[\"']__NEXT_DATA__[\"']\\s+type=[\"']application/json[\"']>(.*?)</script>", Pattern.DOTALL).matcher(html)
+                    if (nextDataMatcher.find()) {
+                        try {
+                            val nextJson = JsonParser.parseString(nextDataMatcher.group(1)).asJsonObject
+                            val props = nextJson.getAsJsonObject("props")?.getAsJsonObject("pageProps")
+                            val above = props?.getAsJsonObject("aboveTheFoldData")
+                            val main = props?.getAsJsonObject("mainColumnData")
+
+                            val castEdges = above?.getAsJsonObject("castPageTitle")?.getAsJsonArray("edges")
+                                ?: main?.getAsJsonObject("cast")?.getAsJsonArray("edges")
+
+                            if (castEdges != null && castEdges.size() > 0) {
+                                val nextCast = mutableListOf<MovieCastMember>()
+                                for (i in 0 until castEdges.size().coerceAtMost(20)) {
+                                    val node = castEdges.get(i).asJsonObject.getAsJsonObject("node") ?: continue
+                                    val personId = node.get("id")?.asString ?: ""
+                                    val personName = node.getAsJsonObject("name")?.getAsJsonObject("nameText")?.get("text")?.asString ?: ""
+                                    val rawPhoto = node.getAsJsonObject("name")?.getAsJsonObject("primaryImage")?.get("url")?.asString ?: ""
+                                    val photoUrlFormatted = if (rawPhoto.contains("._V1_")) {
+                                        rawPhoto.replace(Regex("(?i)\\._V1_.*(\\.[a-zA-Z0-9]+)$"), "._V1_UX300_$1")
+                                    } else rawPhoto
+
+                                    var charName = ""
+                                    val charArray = node.getAsJsonArray("characters")
+                                    if (charArray != null && charArray.size() > 0) {
+                                        charName = charArray.get(0).asJsonObject.get("name")?.asString ?: ""
+                                    }
+
+                                    if (personName.isNotBlank()) {
+                                        nextCast.add(
+                                            MovieCastMember(
+                                                id = personId,
+                                                name = personName,
+                                                character = charName,
+                                                photoUrl = photoUrlFormatted
+                                            )
+                                        )
+                                    }
+                                }
+                                if (nextCast.isNotEmpty()) {
+                                    castList = nextCast
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                System.err.println("[IMDb Details] HTML extraction failed: ${e.message}")
+            }
+        }
+
+        if (castList.isEmpty() && topActorsFromSuggestion.isNotEmpty()) {
+            topActorsFromSuggestion.take(10).forEach { actorName ->
+                castList.add(MovieCastMember(name = actorName))
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Provider 2: TMDB v3 Full Details & Credits
+        // Always query TMDB whenever cast.size < 12, or any cast member lacks a character name,
+        // or plotSummary/rating/director is missing
+        // -------------------------------------------------------------
+        var tmdbMovieId = -1L
+        val shouldQueryTmdb = plotSummary.isBlank() ||
+            castList.size < 12 ||
+            castList.any { it.character.isBlank() } ||
+            ratingValue.isBlank() ||
+            director.isBlank()
+
+        if (shouldQueryTmdb) {
+            try {
+                if (imdbId.startsWith("tt")) {
+                    val findUrl = "https://api.themoviedb.org/3/find/$imdbId?api_key=$TMDB_API_KEY&external_source=imdb_id"
+                    val conn = (URI(findUrl).toURL().openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 4000
+                        readTimeout = 4000
+                    }
+                    if (conn.responseCode == 200) {
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        val root = JsonParser.parseString(text).asJsonObject
+                        val mResults = root.getAsJsonArray("movie_results")
+                        if (mResults != null && mResults.size() > 0) {
+                            tmdbMovieId = mResults.get(0).asJsonObject.get("id")?.asLong ?: -1L
+                        }
+                    }
+                    conn.disconnect()
+                }
+
+                if (tmdbMovieId <= 0L && targetYear.isNotBlank()) {
+                    val sQuery = URLEncoder.encode(officialTitle.ifBlank { cleanQuery }, "UTF-8")
+                    val sUrl = "https://api.themoviedb.org/3/search/movie?api_key=$TMDB_API_KEY&query=$sQuery&primary_release_year=$targetYear"
+                    val conn = (URI(sUrl).toURL().openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 4000
+                        readTimeout = 4000
+                    }
+                    if (conn.responseCode == 200) {
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        val root = JsonParser.parseString(text).asJsonObject
+                        val results = root.getAsJsonArray("results")
+                        if (results != null && results.size() > 0) {
+                            tmdbMovieId = results.get(0).asJsonObject.get("id")?.asLong ?: -1L
+                        }
+                    }
+                    conn.disconnect()
+                }
+
+                if (tmdbMovieId <= 0L) {
+                    val sQuery = URLEncoder.encode(officialTitle.ifBlank { cleanQuery }, "UTF-8")
+                    val sUrl = "https://api.themoviedb.org/3/search/movie?api_key=$TMDB_API_KEY&query=$sQuery"
+                    val conn = (URI(sUrl).toURL().openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 4000
+                        readTimeout = 4000
+                    }
+                    if (conn.responseCode == 200) {
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        val root = JsonParser.parseString(text).asJsonObject
+                        val results = root.getAsJsonArray("results")
+                        if (results != null && results.size() > 0) {
+                            tmdbMovieId = results.get(0).asJsonObject.get("id")?.asLong ?: -1L
+                        }
+                    }
+                    conn.disconnect()
+                }
+
+                if (tmdbMovieId > 0L) {
+                    val detailsUrl = "https://api.themoviedb.org/3/movie/$tmdbMovieId?api_key=$TMDB_API_KEY&append_to_response=credits,external_ids"
+                    val conn = (URI(detailsUrl).toURL().openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                    }
+                    if (conn.responseCode == 200) {
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        val root = JsonParser.parseString(text).asJsonObject
+
+                        val overview = root.get("overview")?.takeIf { !it.isJsonNull }?.asString?.trim() ?: ""
+                        if (plotSummary.isBlank() && overview.isNotBlank()) {
+                            plotSummary = overview
+                        }
+
+                        val voteAvg = root.get("vote_average")?.takeIf { !it.isJsonNull }?.asDouble ?: 0.0
+                        val voteCnt = root.get("vote_count")?.takeIf { !it.isJsonNull }?.asLong ?: 0L
+                        if (ratingValue.isBlank() && voteAvg > 0.0) {
+                            ratingValue = "%.1f".format(voteAvg)
+                            if (voteCnt > 0L) {
+                                ratingCount = formatCompactVotes(voteCnt)
+                            }
+                        }
+
+                        val rDate = root.get("release_date")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        if (releaseYear.isBlank() && rDate.length >= 4) {
+                            releaseYear = rDate.take(4)
+                        }
+
+                        if (genres.isBlank() && root.has("genres")) {
+                            val gArray = root.getAsJsonArray("genres")
+                            if (gArray != null) {
+                                genres = gArray.mapNotNull {
+                                    if (it.isJsonObject) it.asJsonObject.get("name")?.asString else null
+                                }.take(3).joinToString(" • ")
+                            }
+                        }
+
+                        if (posterUrl.isBlank()) {
+                            val pPath = root.get("poster_path")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                            if (pPath.isNotBlank()) {
+                                posterUrl = "$TMDB_IMAGE_BASE$pPath"
+                            }
+                        }
+
+                        val extIds = root.getAsJsonObject("external_ids")
+                        val extImdb = extIds?.get("imdb_id")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                        if (imdbId.isBlank() && extImdb.startsWith("tt")) {
+                            imdbId = extImdb
+                        }
+
+                        val credits = root.getAsJsonObject("credits")
+                        if (credits != null) {
+                            if (director.isBlank() && credits.has("crew")) {
+                                val crewArray = credits.getAsJsonArray("crew")
+                                if (crewArray != null) {
+                                    val directors = mutableListOf<String>()
+                                    for (i in 0 until crewArray.size()) {
+                                        val member = crewArray.get(i).asJsonObject
+                                        val job = member.get("job")?.asString ?: ""
+                                        if (job.equals("Director", ignoreCase = true)) {
+                                            val dName = member.get("name")?.asString ?: ""
+                                            if (dName.isNotBlank() && dName !in directors) {
+                                                directors.add(dName)
+                                            }
+                                        }
+                                    }
+                                    if (directors.isNotEmpty()) {
+                                        director = directors.joinToString(", ")
+                                    }
+                                }
+                            }
+
+                            if (credits.has("cast")) {
+                                val cArray = credits.getAsJsonArray("cast")
+                                if (cArray != null) {
+                                    val sortedCast = (0 until cArray.size())
+                                        .map { cArray.get(it).asJsonObject }
+                                        .sortedBy { it.get("order")?.asInt ?: 999 }
+                                        .take(20)
+
+                                    val tmdbCast = mutableListOf<MovieCastMember>()
+                                    for (cObj in sortedCast) {
+                                        val cName = cObj.get("name")?.asString ?: ""
+                                        val cChar = cObj.get("character")?.asString ?: ""
+                                        val cPath = cObj.get("profile_path")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                                        val cPhoto = if (cPath.isNotBlank()) "https://image.tmdb.org/t/p/w185$cPath" else ""
+                                        val cId = cObj.get("id")?.asString ?: ""
+                                        if (cName.isNotBlank()) {
+                                            tmdbCast.add(
+                                                MovieCastMember(
+                                                    id = cId,
+                                                    name = cName,
+                                                    character = cChar,
+                                                    photoUrl = cPhoto
+                                                )
+                                            )
+                                        }
+                                    }
+                                    if (tmdbCast.isNotEmpty()) {
+                                        castList = mergeCastLists(castList, tmdbCast, maxCast = 20).toMutableList()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    conn.disconnect()
+                }
+            } catch (e: Exception) {
+                System.err.println("[TMDB Fallback] Failed for $officialTitle: ${e.message}")
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Provider 3: Stremio Cinemeta Meta API
+        // Query Cinemeta whenever cast.size < 12, or any cast member lacks character,
+        // or plotSummary/rating/director is missing
+        // -------------------------------------------------------------
+        val shouldQueryCinemeta = imdbId.startsWith("tt") && (
+            plotSummary.isBlank() ||
+            castList.size < 12 ||
+            castList.any { it.character.isBlank() } ||
+            ratingValue.isBlank() ||
+            director.isBlank()
+        )
+
+        if (shouldQueryCinemeta) {
+            val meta = fetchFromCinemeta(imdbId)
+            if (meta != null) {
+                if (plotSummary.isBlank() && meta.plotSummary.isNotBlank()) {
+                    plotSummary = meta.plotSummary
+                }
+                if (ratingValue.isBlank() && meta.imdbRating.isNotBlank()) {
+                    ratingValue = meta.imdbRating
+                }
+                if (releaseYear.isBlank() && meta.releaseYear.isNotBlank()) {
+                    releaseYear = meta.releaseYear
+                }
+                if (director.isBlank() && meta.director.isNotBlank()) {
+                    director = meta.director
+                }
+                if (genres.isBlank() && meta.genres.isNotBlank()) {
+                    genres = meta.genres
+                }
+                if (posterUrl.isBlank() && meta.posterUrl.isNotBlank()) {
+                    posterUrl = meta.posterUrl
+                }
+                if (meta.cast.isNotEmpty()) {
+                    castList = mergeCastLists(castList, meta.cast, maxCast = 20).toMutableList()
+                }
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Provider 4: Wikipedia REST Summary API
+        // Trigger if plotSummary.isBlank() after IMDb, TMDB, and Cinemeta
+        // -------------------------------------------------------------
+        if (plotSummary.isBlank()) {
+            val wikiSummary = fetchWikipediaPlotSummary(officialTitle.ifBlank { cleanQuery }, releaseYear)
+            if (wikiSummary.isNotBlank()) {
+                plotSummary = wikiSummary
+            }
+        }
+
+        if (plotSummary.isBlank()) {
+            plotSummary = "No plot summary available for this title."
+        }
+
+        val result = MovieRichDetails(
+            imdbId = imdbId,
+            officialTitle = officialTitle,
+            releaseYear = releaseYear,
+            ratingValue = ratingValue,
+            ratingCount = ratingCount,
+            genres = genres,
+            director = director,
+            plotSummary = plotSummary,
+            posterUrl = posterUrl,
+            cast = castList
+        )
+        richDetailsCache[cacheKey] = CachedRichDetails(result)
+        result
+    }
+
+    private fun formatCompactVotes(count: Long): String {
+        return when {
+            count >= 1_000_000 -> "%.1fM".format(count / 1_000_000.0)
+            count >= 1_000 -> "${count / 1_000}K"
+            else -> count.toString()
+        }
+    }
+
+    fun mapTmdbLanguageCode(code: String?): String {
+        if (code.isNullOrBlank()) return ""
+        return when (code.lowercase().trim()) {
+            "en" -> "English"
+            "hi" -> "Hindi"
+            "bn" -> "Bengali"
+            "ta" -> "Tamil"
+            "te" -> "Telugu"
+            "ml" -> "Malayalam"
+            "kn" -> "Kannada"
+            "mr" -> "Marathi"
+            "pa" -> "Punjabi"
+            "gu" -> "Gujarati"
+            "ko" -> "Korean"
+            "ja" -> "Japanese"
+            "es" -> "Spanish"
+            "fr" -> "French"
+            "de" -> "German"
+            else -> {
+                try {
+                    val display = java.util.Locale.forLanguageTag(code).getDisplayLanguage(java.util.Locale.ENGLISH)
+                    if (display.isNotBlank()) display.replaceFirstChar { it.uppercase() } else "English"
+                } catch (_: Exception) {
+                    "English"
+                }
+            }
+        }
+    }
+
+    /**
+     * Resolves canonical movie metadata directly by IMDb ID using TMDB /find endpoint.
+     */
+    fun fetchFromTmdbByImdbId(imdbId: String): MovieMetadata? {
+        if (!imdbId.startsWith("tt")) return null
+        var connection: HttpURLConnection? = null
+        try {
+            val endpoint = "https://api.themoviedb.org/3/find/$imdbId?api_key=$TMDB_API_KEY&external_source=imdb_id"
+            connection = (URI(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                setRequestProperty("Accept", "application/json")
+            }
+
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                val root = JsonParser.parseString(jsonText).asJsonObject
+                val movieResults = root.getAsJsonArray("movie_results")
+                if (movieResults != null && movieResults.size() > 0) {
+                    val match = movieResults.get(0).asJsonObject
+                    val officialTitle = match.get("title")?.takeIf { !it.isJsonNull }?.asString?.trim()
+                        ?: match.get("original_title")?.takeIf { !it.isJsonNull }?.asString?.trim()
+                        ?: ""
+                    val posterPath = match.get("poster_path")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val posterUrl = if (posterPath.isNotBlank()) "$TMDB_IMAGE_BASE$posterPath" else ""
+                    val releaseYear = match.get("release_date")?.takeIf { !it.isJsonNull }?.asString?.take(4) ?: ""
+                    val origLang = match.get("original_language")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val lang = mapTmdbLanguageCode(origLang)
+
+                    val genreIds = match.getAsJsonArray("genre_ids")
+                    val genresList = mutableListOf<String>()
+                    genreIds?.forEach { idElement ->
+                        if (!idElement.isJsonNull) {
+                            TMDB_GENRE_MAP[idElement.asInt]?.let { genresList.add(it) }
+                        }
+                    }
+                    val cleanGenre = if (genresList.isNotEmpty()) genresList.take(3).joinToString(" • ") else "Drama"
 
                     return MovieMetadata(
                         officialTitle = officialTitle,
                         posterUrl = posterUrl,
-                        releaseYear = year,
-                        genre = ""
+                        releaseYear = releaseYear,
+                        genre = cleanGenre,
+                        language = lang,
+                        imdbId = imdbId
                     )
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            System.err.println("[TMDB] Find by IMDb ID failed for $imdbId: ${e.message}")
         } finally {
             connection?.disconnect()
         }
@@ -556,7 +1476,7 @@ object DesktopOnlineMetadataResolver {
     }
 
     /**
-     * Resolves movie title, high-res poster (w780), release year, and genres from TMDB.
+     * Resolves movie title, high-res poster (w780), release year, genres, and original language from TMDB.
      */
     private fun fetchFromTmdbMovie(query: String, targetYear: String?): MovieMetadata? {
         var connection: HttpURLConnection? = null
@@ -612,6 +1532,8 @@ object DesktopOnlineMetadataResolver {
                     val posterPath = bestMatch.get("poster_path")?.takeIf { !it.isJsonNull }?.asString ?: ""
                     val posterUrl = if (posterPath.isNotBlank()) "$TMDB_IMAGE_BASE$posterPath" else ""
                     val releaseYear = bestMatch.get("release_date")?.takeIf { !it.isJsonNull }?.asString?.take(4) ?: ""
+                    val origLang = bestMatch.get("original_language")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    val lang = mapTmdbLanguageCode(origLang)
 
                     val genreIds = bestMatch.getAsJsonArray("genre_ids")
                     val genresList = mutableListOf<String>()
@@ -626,7 +1548,8 @@ object DesktopOnlineMetadataResolver {
                         officialTitle = officialTitle,
                         posterUrl = posterUrl,
                         releaseYear = releaseYear,
-                        genre = cleanGenre
+                        genre = cleanGenre,
+                        language = lang
                     )
                 }
             }
@@ -699,12 +1622,7 @@ object DesktopOnlineMetadataResolver {
 
                             val parsedGenre = extractGenresFromText(fullText)
 
-                            val parsedLanguage = when {
-                                Regex("(?i)\\b(bengali-language|bengali film|bengali cinema)\\b").containsMatchIn(fullText) -> "Bengali"
-                                Regex("(?i)\\b(hindi-language|hindi film|hindi cinema|bollywood)\\b").containsMatchIn(fullText) -> "Hindi"
-                                Regex("(?i)\\b(english-language|american film|british film|hollywood)\\b").containsMatchIn(fullText) -> "English"
-                                else -> "Unknown"
-                            }
+                            val parsedLanguage = detectLanguageFromWikiText(fullText) ?: "Unknown"
 
                             return MovieMetadata(
                                 officialTitle = displayTitle,
@@ -821,7 +1739,7 @@ object DesktopOnlineMetadataResolver {
             "imax|remux|untouched|proper|repack|extended|unrated|" +
             "x264|x265|h\\.?264|h\\.?265|hevc|avc|10bit|8bit|" +
             "aac\\d*|ddp?\\d*|dd\\d*|ac3|eac3|dts[-_]?hd|dts|truehd|atmos|mp3|flac|opus|" +
-            "dual[-_\\s]*audio|multi[-_\\s]*audio|esubs?|msubs?|subbed|subs?|" +
+            "dual[-_\\s]*audio|multi[-_\\s]*audio|hindi[-_\\s]*dubbed|eng[-_\\s]*subbed|dubbed|esubs?|msubs?|subbed|subs?|" +
             "1337x\\w*|mlsbd\\w*|hub4u\\w*|filmy\\w*|fbm\\w*|wmr\\w*|vegamovies\\w*|hdhub4u\\w*|" +
             "bolly\\w*|katmovie\\w*|skymovies\\w*|cinevood\\w*|9xmovies\\w*|worldfree4u\\w*|" +
             "mkvcinemas\\w*|uindex\\w*|yts\\w*|yify\\w*|rarbg\\w*|psa\\w*|pahe\\w*|galaxytv\\w*|" +
@@ -938,6 +1856,21 @@ object DesktopOnlineMetadataResolver {
         return deduceLanguageFromTitle(item.title ?: "")
     }
 
+    fun detectLanguageFromWikiText(text: String): String? {
+        val lower = text.lowercase()
+        return when {
+            Regex("(?i)\\b(bengali-language|bengali film|bengali cinema)\\b").containsMatchIn(lower) -> "Bengali"
+            Regex("(?i)\\b(hindi-language|hindi film|hindi cinema|bollywood)\\b").containsMatchIn(lower) -> "Hindi"
+            Regex("(?i)\\b(tamil-language|tamil film|tamil cinema|kollywood)\\b").containsMatchIn(lower) -> "Tamil"
+            Regex("(?i)\\b(telugu-language|telugu film|telugu cinema|tollywood)\\b").containsMatchIn(lower) -> "Telugu"
+            Regex("(?i)\\b(malayalam-language|malayalam film|malayalam cinema|mollywood)\\b").containsMatchIn(lower) -> "Malayalam"
+            Regex("(?i)\\b(kannada-language|kannada film|sandalwood)\\b").containsMatchIn(lower) -> "Kannada"
+            Regex("(?i)\\b(marathi-language|marathi film)\\b").containsMatchIn(lower) -> "Marathi"
+            Regex("(?i)\\b(english-language|american film|british film|hollywood|canadian film|australian film)\\b").containsMatchIn(lower) -> "English"
+            else -> null
+        }
+    }
+
     fun deduceLanguageFromTitle(title: String?): String {
         if (title.isNullOrBlank()) return "English"
         val lower = title.lowercase().trim()
@@ -956,7 +1889,14 @@ object DesktopOnlineMetadataResolver {
         val hindiTitles = setOf(
             "12th fail", "sanju", "special 26", "phantom", "agent vinod", "atrangi re",
             "dunki", "half girlfriend", "kalki 2898 ad", "rustom", "bade miyan chote miyan",
-            "bhagwat chapter one raakshas", "bhool chuk maaf", "madras cafe", "dhurandhar"
+            "bhagwat chapter one raakshas", "bhool chuk maaf", "madras cafe", "dhurandhar",
+            "dhamaal", "dhamaal 4", "total dhamaal", "double dhamaal", "ikka", "raees",
+            "stree", "stree 2", "pushpa", "pushpa 2", "animal", "jawan", "pathaan",
+            "war", "war 2", "kabir singh", "uri", "article 15", "andhadhun", "badhaai ho",
+            "chhichhore", "kesari", "brahmastra", "rocky aur rani", "jogi", "heropanti",
+            "baaghi", "baaghi 2", "baaghi 3", "tiger zinda hai", "sultan", "dangal",
+            "pk", "3 idiots", "dil dhadakne do", "dilwale", "kapoor and sons",
+            "shershaah", "bhuj", "bell bottom", "sooryavanshi", "simba", "simmba"
         )
         if (hindiTitles.contains(lower)) return "Hindi"
 
@@ -1001,6 +1941,9 @@ object DesktopOnlineMetadataResolver {
             .replace(Regex("<[^>]*>"), "")
             .replace("&amp;", "&")
             .replace("&#39;", "'")
+            .replace("&#x27;", "'")
+            .replace("&apos;", "'")
+            .replace("&#x2F;", "/")
             .replace("&quot;", "\"")
             .replace("&lt;", "<")
             .replace("&gt;", ">")

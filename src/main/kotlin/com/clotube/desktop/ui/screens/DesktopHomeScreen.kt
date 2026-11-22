@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,7 +32,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
@@ -77,8 +80,10 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
+import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopContinueWatchingItem
 import com.clotube.desktop.data.DesktopGlobalSearchEngine
+import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopSearchHistoryManager
 import com.clotube.desktop.data.DesktopSeriesCache
 import com.clotube.desktop.data.DesktopWatchHistoryManager
@@ -261,6 +266,7 @@ fun DesktopHomeScreen(
 
     val isAnyPlayerActive = selectedMovieForPlayer != null || selectedSeriesForDetail != null
     val hideNavigation = effectiveFullscreen
+    val isSearchActive = !hideNavigation && (isSearchOverlayOpen || searchQuery.isNotBlank())
 
     Box(
         modifier = modifier
@@ -335,13 +341,14 @@ fun DesktopHomeScreen(
                     .fillMaxWidth()
                     .weight(1f)
             ) {
-            val activeView: DesktopActiveView = when {
-                selectedSeriesForDetail != null -> DesktopActiveView.Series(selectedSeriesForDetail!!, targetedEpisodeId)
-                selectedMovieForPlayer != null -> DesktopActiveView.Movie(selectedMovieForPlayer!!)
-                else -> DesktopActiveView.Library(currentSection)
-            }
+                if (!isSearchActive) {
+                    val activeView: DesktopActiveView = when {
+                        selectedSeriesForDetail != null -> DesktopActiveView.Series(selectedSeriesForDetail!!, targetedEpisodeId)
+                        selectedMovieForPlayer != null -> DesktopActiveView.Movie(selectedMovieForPlayer!!)
+                        else -> DesktopActiveView.Library(currentSection)
+                    }
 
-            AnimatedContent(
+                    AnimatedContent(
                 targetState = activeView,
                 transitionSpec = {
                     val enteringDetailOrPlayer = (targetState is DesktopActiveView.Movie || targetState is DesktopActiveView.Series) && initialState is DesktopActiveView.Library
@@ -601,11 +608,12 @@ fun DesktopHomeScreen(
                     }
                 }
             }
+                }
             }
         }
 
-        // Floating Hybrid Global Search Overlay (0 ms local Drive + 250 ms debounced external + Recent Searches)
-        if (!hideNavigation && (isSearchOverlayOpen || searchQuery.isNotBlank())) {
+        // Full-Page Workspace Global Search Overlay
+        if (isSearchActive) {
             DesktopGlobalSearchOverlay(
                 searchQuery = searchQuery,
                 userEmail = userEmail,
@@ -620,6 +628,7 @@ fun DesktopHomeScreen(
                     } catch (_: Throwable) {}
                 },
                 onDismiss = {
+                    searchQuery = ""
                     isSearchOverlayOpen = false
                     focusManager.clearFocus()
                 },
@@ -1557,79 +1566,80 @@ private fun FigmaHomeContent(
 ) {
     val scrollState = rememberScrollState()
 
+    val cachedData = remember(userEmail) {
+        if (userEmail.isNotBlank()) DesktopLibraryCache.loadSync(userEmail) else null
+    }
+    val effectiveMovies = if (movies.isNotEmpty()) movies else (cachedData?.movies ?: emptyList())
+    val effectiveSeries = if (series.isNotEmpty()) series else (cachedData?.series ?: emptyList())
+    val hasMedia = effectiveMovies.isNotEmpty() || effectiveSeries.isNotEmpty()
+
     val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
-    val continueWatchingItems = remember(userEmail, movies, series, watchHistoryRevision, globalRevision, watchlistRevision) {
-        DesktopWatchHistoryManager.getContinueWatching(userEmail, movies, series)
+    val continueWatchingItems = remember(userEmail, effectiveMovies, effectiveSeries, watchHistoryRevision, globalRevision, watchlistRevision) {
+        DesktopWatchHistoryManager.getContinueWatching(userEmail, effectiveMovies, effectiveSeries)
     }
 
     // Combine all indexed movies and series for the hero billboard slideshow pool
-    val allMediaPool = remember(movies, series) {
-        val combined = (movies + series).filter { !it.thumbnailUrl.isNullOrBlank() }
+    val allMediaPool = remember(effectiveMovies, effectiveSeries) {
+        val combined = (effectiveMovies + effectiveSeries).filter { !it.thumbnailUrl.isNullOrBlank() }
         if (combined.isNotEmpty()) combined else listOfNotNull(featuredItem)
     }
 
-    if (movies.isEmpty() && series.isEmpty()) {
+    if (!hasMedia) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(32.dp),
+                .padding(horizontal = 28.dp, vertical = 32.dp),
             contentAlignment = Alignment.Center
         ) {
             if (isSyncing) {
-                // 1. ACTIVE INDEXING STATE
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0D111A)),
-                    border = BorderStroke(1.dp, Color(0xFF1B2234)),
-                    modifier = Modifier.width(440.dp)
+                // Subtle inline indexing state (never an intrusive blocking popup)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF0D111A))
+                        .border(1.dp, Color(0xFF1B2234), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = Color(0xFF00E5FF),
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.size(44.dp)
-                        )
-                        Spacer(modifier = Modifier.height(20.dp))
+                    CircularProgressIndicator(
+                        color = Color(0xFF00E5FF),
+                        strokeWidth = 2.5.dp,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = "Indexing items from Drive...",
+                            text = "Indexing items from Google Drive...",
                             color = Color.White,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Scanning your Google Drive for 'Movies' and 'Series' folders. This will only take a moment.",
+                            text = "Scanning Movies and Series folders in the background.",
                             color = Color(0xFF8E9BAE),
-                            fontSize = 12.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            lineHeight = 18.sp
+                            fontSize = 11.5.sp
                         )
                     }
                 }
             } else {
-                // 2. VERIFIED EMPTY STATE (Only shown when scan is 100% finished and 0 items found)
+                // Subtle, non-intrusive inline card (never a floating popup)
                 Card(
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(14.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF0D111A)),
                     border = BorderStroke(1.dp, Color(0xFF1B2234)),
-                    modifier = Modifier.width(480.dp)
+                    modifier = Modifier.widthIn(max = 440.dp)
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(52.dp)
+                                .size(44.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFF131D2E)),
                             contentAlignment = Alignment.Center
@@ -1638,41 +1648,35 @@ private fun FigmaHomeContent(
                                 imageVector = Icons.Rounded.CloudQueue,
                                 contentDescription = null,
                                 tint = Color(0xFF00E5FF),
-                                modifier = Modifier.size(26.dp)
+                                modifier = Modifier.size(22.dp)
                             )
                         }
-
-                        Spacer(modifier = Modifier.height(16.dp))
 
                         Text(
                             text = "No Media Indexed in Google Drive",
                             color = Color.White,
-                            fontSize = 18.sp,
+                            fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
-
-                        Spacer(modifier = Modifier.height(8.dp))
 
                         Text(
                             text = "Clotube connected to your account, but found 0 movies or series folders in Drive. Check that your folders are named 'Movies' or 'Series', or verify your internet connection.",
                             color = Color(0xFF8E9BAE),
                             fontSize = 12.sp,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            lineHeight = 18.sp
+                            lineHeight = 17.sp
                         )
-
-                        Spacer(modifier = Modifier.height(22.dp))
 
                         Button(
                             onClick = onRescan,
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
                             shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 10.dp),
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 9.dp),
                             modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
                         ) {
-                            Icon(imageVector = Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = "Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Icon(imageVector = Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(text = "Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
                         }
                     }
                 }
@@ -1691,7 +1695,7 @@ private fun FigmaHomeContent(
         // 1. REPLACED: Randomized Auto-playing Hero Slideshow
         FigmaHeroSlideshowBanner(
             items = allMediaPool,
-            seriesList = series,
+            seriesList = effectiveSeries,
             userEmail = userEmail,
             accessToken = accessToken,
             onMovieClick = onMovieClick,
@@ -1721,25 +1725,27 @@ private fun FigmaHomeContent(
             )
         }
 
-        if (movies.isNotEmpty()) {
+        if (effectiveMovies.isNotEmpty()) {
             FigmaCarouselSection(
                 overline = "MOVIES COLLECTION",
                 title = "Movies",
                 actionLabel = "View all",
-                items = movies.take(5),
+                items = effectiveMovies.take(5),
                 accessToken = accessToken,
                 userEmail = userEmail,
+                cardWidth = 248.dp,
+                cardHeight = 144.dp,
                 onActionClick = { onNavigateSection(DesktopNavSection.MOVIES) },
                 onItemClick = onMovieClick
             )
         }
 
-        if (series.isNotEmpty()) {
+        if (effectiveSeries.isNotEmpty()) {
             FigmaCarouselSection(
                 overline = "MULTI-SEASON SHOWS",
                 title = "Series",
                 actionLabel = "View all",
-                items = series.take(5),
+                items = effectiveSeries.take(5),
                 accessToken = accessToken,
                 userEmail = userEmail,
                 onActionClick = { onNavigateSection(DesktopNavSection.SERIES) },
@@ -1812,11 +1818,16 @@ private fun FigmaMoviesContent(
         DesktopWatchHistoryManager.getLastWatchedMovie(userEmail, movies)
     }
 
-    val featuredMovie = remember(movies, lastWatchedMovie) {
-        lastWatchedMovie?.let { l -> movies.find { it.id == l.mediaId } }
-            ?: movies.find { it.title.equals("Crime 101", ignoreCase = true) }
-            ?: movies.firstOrNull()
+    val groupMoviesByLanguage = DesktopAppSettings.state.groupMoviesByLanguage
+
+    val detectedLanguages = remember(movies) {
+        val languages = movies.map { it.language.ifBlank { "English" } }.distinct()
+        val priority = listOf("Bengali", "Hindi", "English")
+        val sortedPriority = priority.filter { it in languages }
+        val others = languages.filter { it !in priority }.sorted()
+        listOf("All") + sortedPriority + others
     }
+    var selectedLanguage by remember { mutableStateOf("All") }
 
     val genreFilters = remember(movies) {
         val extracted = movies
@@ -1827,9 +1838,20 @@ private fun FigmaMoviesContent(
     }
     var selectedGenre by remember { mutableStateOf("All") }
 
-    val filteredMovies = remember(movies, selectedGenre) {
-        if (selectedGenre == "All") movies
-        else movies.filter { it.genre.contains(selectedGenre, ignoreCase = true) }
+    val displayMovies = remember(movies, selectedLanguage, groupMoviesByLanguage, selectedGenre) {
+        if (groupMoviesByLanguage) {
+            if (selectedLanguage == "All") movies
+            else movies.filter { it.language.ifBlank { "English" }.equals(selectedLanguage, ignoreCase = true) }
+        } else {
+            if (selectedGenre == "All") movies
+            else movies.filter { it.genre.contains(selectedGenre, ignoreCase = true) }
+        }
+    }
+
+    val featuredMovie = remember(displayMovies, lastWatchedMovie) {
+        lastWatchedMovie?.let { l -> displayMovies.find { it.id == l.mediaId } }
+            ?: displayMovies.find { it.title.equals("Crime 101", ignoreCase = true) }
+            ?: displayMovies.firstOrNull()
     }
 
     LazyColumn(
@@ -1869,13 +1891,13 @@ private fun FigmaMoviesContent(
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "${movies.size}",
+                        text = "${displayMovies.size}",
                         color = Color.White,
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Black
                     )
                     Text(
-                        text = "movies available",
+                        text = if (groupMoviesByLanguage && selectedLanguage != "All") "$selectedLanguage movies" else "movies available",
                         color = Color(0xFF64748B),
                         fontSize = 11.sp
                     )
@@ -1895,64 +1917,207 @@ private fun FigmaMoviesContent(
             }
         }
 
-        if (genreFilters.size > 1) {
-            item(key = "movies_genre_chips") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    genreFilters.forEach { genre ->
-                        val isSelected = selectedGenre.equals(genre, ignoreCase = true)
-                        val count = remember(movies, genre) {
-                            if (genre == "All") movies.size
-                            else movies.count { it.genre.contains(genre, ignoreCase = true) }
-                        }
-
-                        StudioCategoryChip(
-                            title = genre,
-                            count = count,
-                            isSelected = isSelected,
-                            onClick = { selectedGenre = genre }
-                        )
-                    }
-                }
-            }
-        }
-
-        // 5-Column Movies Grid
-        val rows = filteredMovies.chunked(5)
-        itemsIndexed(rows, key = { _, row -> row.joinToString { it.id } }) { rowIndex, rowItems ->
+        item(key = "movies_filter_chips") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                for (i in 0 until 5) {
-                    val item = rowItems.getOrNull(i)
-                    if (item != null) {
-                        val index = rowIndex * 5 + i
-                        FluidEntranceContainer(
-                            index = index,
-                            modifier = Modifier.weight(1f)
+                if (groupMoviesByLanguage) {
+                    if (detectedLanguages.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            MediaCardContextMenuBox(
-                                item = item,
-                                userEmail = userEmail,
-                                accessToken = accessToken
-                            ) {
-                                DesktopSeriesGridCard(
-                                    seriesItem = item,
-                                    userEmail = userEmail,
-                                    accessToken = accessToken,
-                                    onClick = { onMovieClick(item) },
-                                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
+                            detectedLanguages.forEach { lang ->
+                                val isSelected = selectedLanguage.equals(lang, ignoreCase = true)
+                                val count = remember(movies, lang) {
+                                    if (lang == "All") movies.size
+                                    else movies.count { it.language.ifBlank { "English" }.equals(lang, ignoreCase = true) }
+                                }
+
+                                StudioCategoryChip(
+                                    title = lang,
+                                    count = count,
+                                    isSelected = isSelected,
+                                    onClick = { selectedLanguage = lang }
                                 )
                             }
                         }
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
+                    }
+                } else {
+                    if (genreFilters.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            genreFilters.forEach { genre ->
+                                val isSelected = selectedGenre.equals(genre, ignoreCase = true)
+                                val count = remember(movies, genre) {
+                                    if (genre == "All") movies.size
+                                    else movies.count { it.genre.contains(genre, ignoreCase = true) }
+                                }
+
+                                StudioCategoryChip(
+                                    title = genre,
+                                    count = count,
+                                    isSelected = isSelected,
+                                    onClick = { selectedGenre = genre }
+                                )
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        if (groupMoviesByLanguage && selectedLanguage == "All") {
+            val languagesToRender = detectedLanguages.filter { it != "All" }
+            languagesToRender.forEach { lang ->
+                val shelfMovies = movies.filter { it.language.ifBlank { "English" }.equals(lang, ignoreCase = true) }
+                if (shelfMovies.isNotEmpty()) {
+                    item(key = "ott_shelf_$lang") {
+                        OttLanguageMovieShelf(
+                            language = lang,
+                            movies = shelfMovies,
+                            isPortraitLayout = true,
+                            userEmail = userEmail,
+                            accessToken = accessToken,
+                            onViewAllClick = { selectedLanguage = lang },
+                            onMovieClick = onMovieClick
+                        )
+                    }
+                }
+            }
+        } else {
+            // Dynamic Movies Grid: 5 columns landscape (16:9.5)
+            val columns = 5
+            val cardAspectRatio = (16f / 9.5f)
+            val rows = displayMovies.chunked(columns)
+            itemsIndexed(rows, key = { _, row -> row.joinToString { it.id } }) { rowIndex, rowItems ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    for (i in 0 until 5) {
+                        val item = rowItems.getOrNull(i)
+                        if (item != null) {
+                            val index = rowIndex * columns + i
+                            FluidEntranceContainer(
+                                index = index,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                MediaCardContextMenuBox(
+                                    item = item,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken
+                                ) {
+                                    DesktopSeriesGridCard(
+                                        seriesItem = item,
+                                        userEmail = userEmail,
+                                        accessToken = accessToken,
+                                        onClick = { onMovieClick(item) },
+                                        modifier = Modifier.fillMaxWidth().aspectRatio(cardAspectRatio)
+                                    )
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OttLanguageMovieShelf(
+    language: String,
+    movies: List<DesktopMediaItem>,
+    isPortraitLayout: Boolean,
+    userEmail: String,
+    accessToken: String,
+    onViewAllClick: () -> Unit,
+    onMovieClick: (DesktopMediaItem) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Header: title + count pill only (no scroll arrows or "View all")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "$language Movies",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = (-0.3).sp
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF1E293B))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "${movies.size}",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 5-column wrapped grid with landscape cards
+        val rows = movies.chunked(5)
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            rows.forEachIndexed { rowIndex, rowItems ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    for (i in 0 until 5) {
+                        val item = rowItems.getOrNull(i)
+                        if (item != null) {
+                            val index = rowIndex * 5 + i
+                            FluidEntranceContainer(
+                                index = index,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                MediaCardContextMenuBox(
+                                    item = item,
+                                    userEmail = userEmail,
+                                    accessToken = accessToken
+                                ) {
+                                    DesktopSeriesGridCard(
+                                        seriesItem = item,
+                                        userEmail = userEmail,
+                                        accessToken = accessToken,
+                                        onClick = { onMovieClick(item) },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(16f / 9.5f)
+                                    )
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
                     }
                 }
             }
@@ -2651,15 +2816,16 @@ fun MediaCardContextMenuBox(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
-    val revision = DesktopWatchlistManager.watchlistRevision.intValue
-    val currentStatus = remember(item.id, item.title, userEmail, revision) {
-        DesktopWatchlistManager.getStatusForMedia(userEmail, item.title, item.id)
-    }
-
     var isPopupMounted by remember { mutableStateOf(false) }
     var targetExpanded by remember { mutableStateOf(false) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     val coroutineScope = rememberCoroutineScope()
+    val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
+
+    val currentStatus = remember(item.id, item.title, userEmail, watchlistRevision) {
+        DesktopWatchlistManager.getStatusForMedia(userEmail, item.title, item.id)
+    }
+    val canRemoveFromWatchlist = currentStatus != null
 
     val dismissMenu: () -> Unit = {
         targetExpanded = false
@@ -2749,7 +2915,7 @@ fun MediaCardContextMenuBox(
                     border = BorderStroke(1.dp, Color(0xFF263248)),
                     shadowElevation = 18.dp,
                     modifier = Modifier
-                        .width(188.dp)
+                        .width(208.dp)
                         .graphicsLayer {
                             transformOrigin = TransformOrigin(0f, 0f)
                             scaleX = scaleAnim.value
@@ -2762,37 +2928,18 @@ fun MediaCardContextMenuBox(
                         Text(
                             text = "SET WATCH STATUS",
                             color = Color(0xFF64748B),
-                            fontSize = 9.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.1.sp,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                         )
 
-                        val options = listOf(
-                            Triple(WatchlistStatus.WATCHED, Icons.Rounded.CheckCircle, Color(0xFF10B981)),
-                            Triple(WatchlistStatus.WATCH_LATER, Icons.Rounded.BookmarkAdd, Color(0xFF60A5FA)),
-                            Triple(WatchlistStatus.REWATCH, Icons.Rounded.Replay, Color(0xFF3877EE))
-                        )
-
-                        options.forEachIndexed { index, (statusOption, iconVector, accentColor) ->
+                        WatchlistStatus.selectableStatuses.forEachIndexed { index, statusOption ->
                             val isSelected = currentStatus == statusOption
                             var rowHovered by remember { mutableStateOf(false) }
 
-                            val selectedBg = when (statusOption) {
-                                WatchlistStatus.WATCHED -> Color(0x1F10B981)
-                                WatchlistStatus.WATCH_LATER -> Color(0x2460A5FA)
-                                WatchlistStatus.REWATCH -> Color(0x2B3877EE)
-                                WatchlistStatus.UNWATCHED -> Color(0xFF1E2534)
-                            }
-                            val selectedTextColor = when (statusOption) {
-                                WatchlistStatus.WATCHED -> Color(0xFF6EE7B7)
-                                WatchlistStatus.WATCH_LATER -> Color(0xFF93C5FD)
-                                WatchlistStatus.REWATCH -> Color(0xFF60A5FA)
-                                WatchlistStatus.UNWATCHED -> Color(0xFF94A3B8)
-                            }
-
                             val itemAlpha = remember { Animatable(0f) }
-                            val itemSlideX = remember { Animatable(-8f) }
+                            val itemSlideX = remember { Animatable(-6f) }
 
                             LaunchedEffect(targetExpanded) {
                                 if (targetExpanded) {
@@ -2800,29 +2947,58 @@ fun MediaCardContextMenuBox(
                                     launch {
                                         itemAlpha.animateTo(
                                             targetValue = 1f,
-                                            animationSpec = tween(150, easing = FluidMotionKit.CinemaDecel)
+                                            animationSpec = tween(
+                                                durationMillis = 140,
+                                                easing = FluidMotionKit.CinemaDecel
+                                            )
                                         )
                                     }
                                     itemSlideX.animateTo(
                                         targetValue = 0f,
-                                        animationSpec = FluidMotionKit.SilkSpring
+                                        animationSpec = spring(
+                                            dampingRatio = 0.80f,
+                                            stiffness = 500f
+                                        )
                                     )
                                 }
                             }
 
                             val hoverNudgeX by animateFloatAsState(
                                 targetValue = if (rowHovered) 3f else 0f,
-                                animationSpec = FluidMotionKit.TactilePress,
-                                label = "ContextMenuRowNudge"
+                                animationSpec = tween(durationMillis = 110),
+                                label = "context_row_hover_nudge"
                             )
+
+                            val (iconVector, accentColor, selectedTextColor) = when (statusOption) {
+                                WatchlistStatus.WATCHED -> Triple(
+                                    Icons.Rounded.CheckCircle,
+                                    Color(0xFF10B981),
+                                    Color(0xFF6EE7B7)
+                                )
+                                WatchlistStatus.WATCH_LATER -> Triple(
+                                    Icons.Rounded.BookmarkAdd,
+                                    Color(0xFF60A5FA),
+                                    Color(0xFF93C5FD)
+                                )
+                                WatchlistStatus.REWATCH -> Triple(
+                                    Icons.Rounded.Replay,
+                                    Color(0xFF3877EE),
+                                    Color(0xFF60A5FA)
+                                )
+                                WatchlistStatus.UNWATCHED -> Triple(
+                                    Icons.Rounded.Check,
+                                    Color(0xFF94A3B8),
+                                    Color(0xFFCBD5E1)
+                                )
+                            }
 
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .background(
                                         when {
-                                            rowHovered -> Color(0xFF1A2436)
-                                            isSelected -> selectedBg
+                                            isSelected -> accentColor.copy(alpha = 0.14f)
+                                            rowHovered -> Color(0xFF161D2C)
                                             else -> Color.Transparent
                                         }
                                     )
@@ -2834,7 +3010,8 @@ fun MediaCardContextMenuBox(
                                                 title = item.title,
                                                 mediaType = if (item.isSeries) WatchlistMediaType.SERIES else WatchlistMediaType.MOVIE,
                                                 status = statusOption,
-                                                driveId = item.id
+                                                driveId = item.id,
+                                                posterUrl = item.thumbnailUrl
                                             )
                                             DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
                                         }
@@ -2886,6 +3063,122 @@ fun MediaCardContextMenuBox(
                                     )
                                 }
                             }
+                        }
+
+                        // Divider separating status options from destructive removal action
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp, horizontal = 10.dp)
+                                .height(1.dp)
+                                .background(Color(0xFF1E2638))
+                        )
+
+                        // Remove from Watchlist Row
+                        var removeHovered by remember { mutableStateOf(false) }
+                        val removeAlpha = remember { Animatable(0f) }
+                        val removeSlideX = remember { Animatable(-6f) }
+
+                        LaunchedEffect(targetExpanded) {
+                            if (targetExpanded) {
+                                delay(WatchlistStatus.selectableStatuses.size * 18L)
+                                launch {
+                                    removeAlpha.animateTo(
+                                        targetValue = 1f,
+                                        animationSpec = tween(
+                                            durationMillis = 140,
+                                            easing = FluidMotionKit.CinemaDecel
+                                        )
+                                    )
+                                }
+                                removeSlideX.animateTo(
+                                    targetValue = 0f,
+                                    animationSpec = spring(
+                                        dampingRatio = 0.80f,
+                                        stiffness = 500f
+                                    )
+                                )
+                            }
+                        }
+
+                        val removeHoverNudgeX by animateFloatAsState(
+                            targetValue = if (canRemoveFromWatchlist && removeHovered) 3f else 0f,
+                            animationSpec = tween(durationMillis = 110),
+                            label = "context_remove_hover_nudge"
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    if (canRemoveFromWatchlist && removeHovered) {
+                                        Color(0x1AE11D48)
+                                    } else {
+                                        Color.Transparent
+                                    }
+                                )
+                                .clickable(enabled = canRemoveFromWatchlist) {
+                                    dismissMenu()
+                                    coroutineScope.launch {
+                                        val removed = DesktopWatchlistManager.removeMediaFromWatchlist(
+                                            email = userEmail,
+                                            title = item.title,
+                                            driveId = item.id
+                                        )
+                                        if (removed) {
+                                            DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
+                                            if (!item.isSeries) {
+                                                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                                            }
+                                        }
+                                    }
+                                }
+                                .then(
+                                    if (canRemoveFromWatchlist) {
+                                        Modifier.pointerHoverIcon(PointerIcon.Hand)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .pointerInput(canRemoveFromWatchlist) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            val ev = awaitPointerEvent()
+                                            when (ev.type) {
+                                                PointerEventType.Enter -> removeHovered = true
+                                                PointerEventType.Exit -> removeHovered = false
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .graphicsLayer {
+                                    alpha = removeAlpha.value
+                                    translationX = removeSlideX.value + removeHoverNudgeX
+                                },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.BookmarkRemove,
+                                contentDescription = "Remove from Watchlist",
+                                tint = when {
+                                    !canRemoveFromWatchlist -> Color(0xFF475569)
+                                    removeHovered -> Color(0xFFFB7185)
+                                    else -> Color(0xFFFCA5A5)
+                                },
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = "Remove from Watchlist",
+                                color = when {
+                                    !canRemoveFromWatchlist -> Color(0xFF475569)
+                                    removeHovered -> Color(0xFFFB7185)
+                                    else -> Color(0xFFFCA5A5)
+                                },
+                                fontSize = 12.sp,
+                                fontWeight = if (canRemoveFromWatchlist) FontWeight.Medium else FontWeight.Normal
+                            )
                         }
                     }
                 }
@@ -2945,6 +3238,9 @@ fun DesktopSeriesGridCard(
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
     val historyRevision = DesktopWatchHistoryManager.historyRevision.intValue
 
+    val isExplicitlyRemoved = remember(seriesItem.id, seriesItem.title, userEmail, watchlistRevision) {
+        DesktopWatchlistManager.isExplicitlyRemovedFromWatchlist(userEmail, seriesItem.title, seriesItem.id)
+    }
     val cardWatchlistStatus = remember(seriesItem.id, seriesItem.title, userEmail, watchlistRevision) {
         if (userEmail.isBlank()) null
         else DesktopWatchlistManager.getStatusForMedia(userEmail, seriesItem.title, seriesItem.id)
@@ -2953,7 +3249,7 @@ fun DesktopSeriesGridCard(
         !seriesItem.isSeries && userEmail.isNotBlank() && DesktopWatchHistoryManager.isEpisodeWatched(userEmail, seriesItem.id)
     }
     val showWatchedBadge = cardWatchlistStatus == WatchlistStatus.WATCHED ||
-        (cardWatchlistStatus == null && isCardHistoryWatched)
+        (cardWatchlistStatus == null && !isExplicitlyRemoved && isCardHistoryWatched)
 
     Box(
         modifier = modifier
@@ -3194,6 +3490,12 @@ private fun FigmaRecentsContent(
     val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
     val historyItems = remember(userEmail, movies, series, watchHistoryRevision, globalRevision) {
         DesktopWatchHistoryManager.getAllWatchHistory(userEmail, movies, series)
+    }
+
+    LaunchedEffect(userEmail) {
+        if (userEmail.isNotBlank()) {
+            DesktopWatchHistorySync.pullAndMerge(userEmail, accessToken)
+        }
     }
 
     Column(
@@ -4260,6 +4562,9 @@ private fun FigmaCarouselSection(
     items: List<DesktopMediaItem>,
     accessToken: String = "",
     userEmail: String = "",
+    cardWidth: androidx.compose.ui.unit.Dp = 248.dp,
+    cardHeight: androidx.compose.ui.unit.Dp = 144.dp,
+    trailingHeaderContent: (@Composable () -> Unit)? = null,
     onActionClick: () -> Unit,
     onItemClick: (DesktopMediaItem) -> Unit
 ) {
@@ -4288,25 +4593,32 @@ private fun FigmaCarouselSection(
             }
 
             Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable { onActionClick() }
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Text(
-                    text = actionLabel,
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                    contentDescription = actionLabel,
-                    tint = Color(0xFF94A3B8),
-                    modifier = Modifier.size(16.dp)
-                )
+                trailingHeaderContent?.invoke()
+
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onActionClick() }
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = actionLabel,
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = actionLabel,
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
 
@@ -4344,8 +4656,8 @@ private fun FigmaCarouselSection(
                             userEmail = userEmail,
                             onClick = { onItemClick(item) },
                             modifier = Modifier
-                                .width(248.dp)
-                                .height(144.dp)
+                                .width(cardWidth)
+                                .height(cardHeight)
                         )
                     }
                 }
