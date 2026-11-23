@@ -142,6 +142,7 @@ data class DesktopMovieItem(
     val id: String,
     val title: String,
     val durationFormatted: String = "2h 19m",
+    val durationMs: Long = 0L,
     val genres: String = "Action • Thriller",
     val thumbnailUrl: String? = null,
     val streamUrl: String = ""
@@ -212,12 +213,12 @@ fun DesktopMoviePlayerScreen(
     val needsDriveHistorySync = movieRequiresDriveSync(currentPlayingMovie.id)
     var isDriveTimestampLoaded by remember(currentPlayingMovie.id) { mutableStateOf(!needsDriveHistorySync) }
     var resolvedInitialSeekMs by remember(currentPlayingMovie.id) { mutableLongStateOf(0L) }
-    var resolvedInitialDurationMs by remember(currentPlayingMovie.id) { mutableLongStateOf(0L) }
+    var resolvedInitialDurationMs by remember(currentPlayingMovie.id) { mutableLongStateOf(currentPlayingMovie.durationMs.coerceAtLeast(0L)) }
 
     LaunchedEffect(currentPlayingMovie.id, userEmail) {
         if (!movieRequiresDriveSync(currentPlayingMovie.id)) {
             resolvedInitialSeekMs = 0L
-            resolvedInitialDurationMs = 0L
+            resolvedInitialDurationMs = currentPlayingMovie.durationMs.coerceAtLeast(0L)
             isDriveTimestampLoaded = true
             return@LaunchedEffect
         }
@@ -232,7 +233,8 @@ fun DesktopMoviePlayerScreen(
             val syncedPos = DesktopWatchHistoryManager.getPlaybackPosition(userEmail, currentPlayingMovie.id)
             val syncedDur = DesktopWatchHistoryManager.getPlaybackDuration(userEmail, currentPlayingMovie.id)
             val finalPos = if (syncedPos > 1500L) syncedPos else initialSeekMs.coerceAtLeast(0L)
-            finalPos to syncedDur.coerceAtLeast(0L)
+            val finalDur = if (syncedDur > 0L) syncedDur else currentPlayingMovie.durationMs.coerceAtLeast(0L)
+            finalPos to finalDur
         }
 
         resolvedInitialSeekMs = targetSeek
@@ -299,7 +301,15 @@ fun DesktopMoviePlayerScreen(
         when {
             p != null && p.totalDurationMs > 0L -> p.totalDurationMs
             resolvedInitialDurationMs > 0L -> resolvedInitialDurationMs
+            currentPlayingMovie.durationMs > 0L -> currentPlayingMovie.durationMs
             else -> 0L
+        }
+    }
+
+    LaunchedEffect(effectiveTotalDurationMs()) {
+        val curDur = effectiveTotalDurationMs()
+        if (curDur > 0L && lastKnownDurationMs <= 0L) {
+            lastKnownDurationMs = curDur
         }
     }
 
@@ -338,9 +348,7 @@ fun DesktopMoviePlayerScreen(
                             isSeries = false,
                             accessToken = accessToken
                         )
-                        if (accessToken.isNotBlank()) {
-                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-                        }
+                        DesktopWatchHistorySync.pushHistoryAsync(force = !p.isPlaying)
                     } catch (t: Throwable) {
                         System.err.println("[MoviePlayer] Failed to save watch progress: ${t.message}")
                     }
@@ -390,11 +398,10 @@ fun DesktopMoviePlayerScreen(
                             positionMs = completedDur,
                             durationMs = completedDur,
                             isSeries = false,
-                            accessToken = accessToken
+                            accessToken = accessToken,
+                            allowZeroOverwrite = true
                         )
-                        if (accessToken.isNotBlank()) {
-                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
-                        }
+                        DesktopWatchHistorySync.pushHistoryAsync(force = true)
                     }
                 }
             }
@@ -411,6 +418,7 @@ fun DesktopMoviePlayerScreen(
             if (canRecordPlaybackProgress) {
                 saveMovieProgress()
             }
+            DesktopWatchHistorySync.pushHistoryAsync(force = true)
             p?.release()
         }
     }
@@ -804,7 +812,24 @@ fun DesktopMoviePlayerScreen(
                                 onToggleFullscreen = onToggleFullscreen,
                                 onSeek = { targetMs ->
                                     resolvedInitialSeekMs = targetMs
+                                    val liveDur = activePlayer?.totalDurationMs ?: 0L
+                                    if (liveDur > 0L && resolvedInitialDurationMs <= 0L) {
+                                        resolvedInitialDurationMs = liveDur
+                                    }
                                     activePlayer?.seekToTime(targetMs)
+                                    val effDur = if (liveDur > 0L) liveDur else lastKnownDurationMs
+                                    if (userEmail.isNotBlank()) {
+                                        DesktopWatchHistoryManager.recordPlaybackProgress(
+                                            email = userEmail,
+                                            fileId = currentPlayingMovie.id,
+                                            title = currentPlayingMovie.title,
+                                            positionMs = targetMs,
+                                            durationMs = effDur,
+                                            isSeries = false,
+                                            allowZeroOverwrite = true
+                                        )
+                                        DesktopWatchHistorySync.pushHistoryAsync(force = true)
+                                    }
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1088,7 +1113,24 @@ fun DesktopMoviePlayerScreen(
                                             onToggleFullscreen = onToggleFullscreen,
                                             onSeek = { targetMs ->
                                                 resolvedInitialSeekMs = targetMs
+                                                val liveDur = activePlayer?.totalDurationMs ?: 0L
+                                                if (liveDur > 0L && resolvedInitialDurationMs <= 0L) {
+                                                    resolvedInitialDurationMs = liveDur
+                                                }
                                                 activePlayer?.seekToTime(targetMs)
+                                                val effDur = if (liveDur > 0L) liveDur else lastKnownDurationMs
+                                                if (userEmail.isNotBlank()) {
+                                                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                                                        email = userEmail,
+                                                        fileId = currentPlayingMovie.id,
+                                                        title = currentPlayingMovie.title,
+                                                        positionMs = targetMs,
+                                                        durationMs = effDur,
+                                                        isSeries = false,
+                                                        allowZeroOverwrite = true
+                                                    )
+                                                    DesktopWatchHistorySync.pushHistoryAsync(force = true)
+                                                }
                                             },
                                             modifier = Modifier.fillMaxWidth()
                                         )
@@ -1907,24 +1949,30 @@ fun SlickVolumeSlider(
 
 @Composable
 private fun IsolatedPlayerTimecode(
+    player: DirectMemoryVideoPlayer?,
     timeMsProvider: () -> Long,
     durationMsProvider: () -> Long,
     formatTime: (Long) -> String,
     modifier: Modifier = Modifier
 ) {
-    val quantizedTick by remember {
-        derivedStateOf { timeMsProvider().coerceAtLeast(0L) / 250L }
-    }
-    val formattedText by remember {
+    val latestTimeMsProvider by rememberUpdatedState(timeMsProvider)
+    val latestDurationMsProvider by rememberUpdatedState(durationMsProvider)
+
+    val displayDurationMs by remember(player) {
         derivedStateOf {
-            val currentMs = quantizedTick * 250L
-            val totalMs = durationMsProvider().coerceAtLeast(0L)
-            "${formatTime(currentMs)} / ${formatTime(totalMs)}"
+            val provided = latestDurationMsProvider()
+            if (provided > 0L) provided else (player?.totalDurationMs ?: 0L)
+        }
+    }
+    val displayCurrentMs by remember(player) {
+        derivedStateOf {
+            val provided = latestTimeMsProvider()
+            if (provided > 0L) provided else (player?.currentTimeMs ?: 0L)
         }
     }
 
     Text(
-        text = formattedText,
+        text = "${formatTime(displayCurrentMs)} / ${formatTime(displayDurationMs)}",
         color = Color(0xFFCBD5E1),
         fontSize = 12.sp,
         fontFamily = FontFamily.Monospace,
@@ -1943,21 +1991,62 @@ private fun IsolatedPlayerScrubber(
     onSeek: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val latestTimeMsProvider by rememberUpdatedState(timeMsProvider)
+    val latestDurationMsProvider by rememberUpdatedState(durationMsProvider)
+
     var isScrubbing by remember { mutableStateOf(false) }
     var scrubProgress by remember { mutableFloatStateOf(0f) }
     var isTimelineHovered by remember { mutableStateOf(false) }
     var hoverFraction by remember { mutableFloatStateOf(0f) }
+    var pendingSeekFraction by remember { mutableStateOf<Float?>(null) }
     val density = LocalDensity.current
 
-    val playbackProgress by remember {
+    val liveFraction by remember(player) {
         derivedStateOf {
-            val quantizedMs = (timeMsProvider().coerceAtLeast(0L) / 250L) * 250L
-            val totalMs = durationMsProvider()
-            if (totalMs > 0L) (quantizedMs.toFloat() / totalMs.toFloat()).coerceIn(0f, 1f) else 0f
+            val p = player
+            val dur = latestDurationMsProvider().let { d ->
+                if (d > 0L) d else (p?.totalDurationMs ?: 0L)
+            }
+            if (dur <= 0L) {
+                0f
+            } else {
+                val cur = latestTimeMsProvider().let { t ->
+                    if (t > 0L) t else (p?.currentTimeMs ?: 0L)
+                }
+                (cur.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+            }
         }
     }
 
-    val currentFraction = if (isScrubbing) scrubProgress else playbackProgress
+    // Auto-clear pendingSeekFraction once playback catches up or timeout expires
+    LaunchedEffect(pendingSeekFraction, liveFraction) {
+        val target = pendingSeekFraction ?: return@LaunchedEffect
+        val totalDur = latestDurationMsProvider().let { d ->
+            if (d > 0L) d else (player?.totalDurationMs ?: 0L)
+        }
+        val targetMs = (target * totalDur).toLong()
+        val curMs = latestTimeMsProvider().let { t ->
+            if (t > 0L) t else (player?.currentTimeMs ?: 0L)
+        }
+        if (totalDur > 0L && kotlin.math.abs(curMs - targetMs) <= 2500L) {
+            pendingSeekFraction = null
+        }
+    }
+
+    LaunchedEffect(pendingSeekFraction) {
+        if (pendingSeekFraction != null) {
+            delay(1500L)
+            pendingSeekFraction = null
+        }
+    }
+
+    val activeFraction = when {
+        isScrubbing -> scrubProgress.coerceIn(0f, 1f)
+        pendingSeekFraction != null -> pendingSeekFraction!!.coerceIn(0f, 1f)
+        else -> liveFraction
+    }
+
+    val currentFraction = activeFraction
 
     val trackHeight by animateDpAsState(
         targetValue = if (isTimelineHovered || isScrubbing) 6.dp else 3.5.dp,
@@ -1982,9 +2071,12 @@ private fun IsolatedPlayerScrubber(
     }
 
     val onValueChangeFinished: () -> Unit = {
-        val totalDur = durationMsProvider()
+        val totalDur = latestDurationMsProvider().let { d ->
+            if (d > 0L) d else (player?.totalDurationMs ?: 0L)
+        }
         if (totalDur > 0L) {
             val targetMs = (scrubProgress * totalDur).toLong()
+            pendingSeekFraction = scrubProgress
             if (onSeek != null) onSeek(targetMs) else player?.seekToTime(targetMs)
         }
         isScrubbing = false
@@ -1998,7 +2090,10 @@ private fun IsolatedPlayerScrubber(
     ) {
         val containerWidthPx = with(density) { maxWidth.toPx() }
         val thumbRadiusPx = with(density) { (thumbSize / 2).toPx() }
-        val isSeekable = durationMsProvider() > 0L
+        val totalDuration = latestDurationMsProvider().let { d ->
+            if (d > 0L) d else (player?.totalDurationMs ?: 0L)
+        }
+        val isSeekable = totalDuration > 0L
 
         Box(
             modifier = Modifier
@@ -2106,9 +2201,9 @@ private fun IsolatedPlayerScrubber(
             )
 
             // Floating Magnetic Timecode Tooltip Bubble
-            if ((isTimelineHovered || isScrubbing) && durationMsProvider() > 0L) {
+            if ((isTimelineHovered || isScrubbing) && totalDuration > 0L) {
                 val previewFraction = if (isScrubbing) currentFraction else hoverFraction
-                val previewTimeMs = (previewFraction * durationMsProvider()).toLong()
+                val previewTimeMs = (previewFraction * totalDuration).toLong()
                 val tooltipWidthPx = with(density) { 62.dp.toPx() }
                 val tooltipOffsetXPx = (previewFraction * containerWidthPx) - (tooltipWidthPx / 2f)
 
@@ -2296,6 +2391,7 @@ private fun BottomTransportBar(
                 Spacer(modifier = Modifier.width(4.dp))
 
                 IsolatedPlayerTimecode(
+                    player = player,
                     timeMsProvider = timeMsProvider,
                     durationMsProvider = durationMsProvider,
                     formatTime = ::formatDuration
@@ -2470,6 +2566,7 @@ fun DesktopMoviePlayerScreen(
             id = id,
             title = title,
             durationFormatted = durFormatted,
+            durationMs = durationMs.coerceAtLeast(0L),
             genres = genresFormatted,
             thumbnailUrl = thumbnailUrl,
             streamUrl = streamUrl

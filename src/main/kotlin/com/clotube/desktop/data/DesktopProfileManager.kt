@@ -62,8 +62,6 @@ object DesktopProfileManager {
 
     // Account-isolated media and cache paths
     fun getLibraryFile(email: String): File = File(getProfileDir(email), "library.json")
-    fun getWatchHistoryFile(email: String): File = File(getProfileDir(email), "watch_history.json")
-    fun getWatchHistoryArchiveFile(email: String): File = File(getProfileDir(email), "watch_history_archive.json")
     fun getSeriesDir(email: String): File {
         val dir = File(getProfileDir(email), "series")
         if (!dir.exists()) dir.mkdirs()

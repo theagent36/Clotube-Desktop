@@ -21,6 +21,7 @@ import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.clotube.desktop.data.DesktopAppSettings
+import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.ui.components.DesktopReleaseNotesOverlay
@@ -196,6 +197,7 @@ fun main() {
 
     Runtime.getRuntime().addShutdownHook(Thread({
         try {
+            DesktopWatchHistorySync.flushBlockingOnWindowClose()
             LocalStreamServer.stop()
         } catch (_: Throwable) {}
     }, "Clotube-ShutdownHook"))
@@ -224,6 +226,7 @@ fun main() {
         Window(
             onCloseRequest = {
                 try {
+                    DesktopWatchHistorySync.flushBlockingOnWindowClose()
                     LocalStreamServer.stop()
                 } catch (_: Throwable) {}
                 exitApplication()

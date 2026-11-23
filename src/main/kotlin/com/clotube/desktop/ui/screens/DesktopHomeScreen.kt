@@ -1324,7 +1324,10 @@ private fun ContinueWatchingCard(
     // Calculate remaining runtime specifically for the top-right pill
     val remainingMs = (item.durationMs - item.positionMs).coerceAtLeast(0L)
     val remainingStr = remember(remainingMs) {
-        DesktopWatchHistoryManager.formatRemainingTime(remainingMs)
+        val formatted = DesktopWatchHistoryManager.formatRemainingTime(remainingMs)
+            .removeSuffix("left")
+            .trim()
+        if (formatted.isNotBlank()) "$formatted left" else ""
     }
 
     // Sanitize bottom subtitle: strip any residual "X left" or "• X left" text completely
@@ -1453,7 +1456,7 @@ private fun ContinueWatchingCard(
                         color = Color(0xCC000000)
                     ) {
                         Text(
-                            text = "$remainingStr left",
+                            text = remainingStr,
                             color = Color(0xFFCBD5E1),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Medium,
@@ -1711,17 +1714,6 @@ private fun FigmaHomeContent(
                 onItemClick = { item ->
                     onContinueWatchingClick?.invoke(item)
                 }
-            )
-        } else if (continueWatching.isNotEmpty()) {
-            FigmaCarouselSection(
-                overline = "CONTINUE WATCHING",
-                title = "Continue Watching",
-                actionLabel = "View all",
-                items = continueWatching.take(5),
-                accessToken = accessToken,
-                userEmail = userEmail,
-                onActionClick = { onNavigateSection(DesktopNavSection.RECENTS) },
-                onItemClick = onMovieClick
             )
         }
 
@@ -4086,7 +4078,7 @@ private fun HeroSlideCardContent(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isSeries) "View series" else "Resume watching",
+                        text = if (isSeries) "View series" else if (userEmail.isNotBlank() && DesktopWatchHistoryManager.hasSavedWatchProgress(userEmail, item.id)) "Resume watching" else "Play movie",
                         color = Color(0xFF090A0F),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold

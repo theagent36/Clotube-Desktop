@@ -317,9 +317,26 @@ class DirectMemoryVideoPlayer(
             mediaPlayer.audio().setVolume(volume)
         } catch (_: Throwable) {}
 
+        val isReleasedFlag = isReleased
+        fun syncDurationFromPlayer(mp: MediaPlayer) {
+            if (isReleasedFlag.get() || totalDurationMs > 0L) return
+            try {
+                val statusLen = mp.status()?.length() ?: 0L
+                if (statusLen > 0L) {
+                    totalDurationMs = statusLen
+                    return
+                }
+                val mediaDur = mp.media()?.info()?.duration() ?: 0L
+                if (mediaDur > 0L) {
+                    totalDurationMs = mediaDur
+                }
+            } catch (_: Throwable) {}
+        }
+
         mediaPlayer.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
             override fun playing(mp: MediaPlayer) {
                 if (isReleased.get()) return
+                syncDurationFromPlayer(mp)
                 updatePlayingState(true)
                 isBuffering = false
 
@@ -344,6 +361,7 @@ class DirectMemoryVideoPlayer(
 
             override fun videoOutput(mp: MediaPlayer, newCount: Int) {
                 if (isReleased.get()) return
+                syncDurationFromPlayer(mp)
                 if (newCount > 0) {
                     LibVlcLiveSubScale.applyLiveScale(mp, currentSubtitleScalePercent)
                 }
@@ -376,6 +394,7 @@ class DirectMemoryVideoPlayer(
 
             override fun timeChanged(mp: MediaPlayer, newTime: Long) {
                 if (isReleased.get()) return
+                syncDurationFromPlayer(mp)
                 if (!isResumeSeekSettled && targetResumeMs > 1500L) {
                     val minAcceptableMs = (targetResumeMs - 3000L).coerceAtLeast(1500L)
                     if (newTime >= minAcceptableMs) {
@@ -401,6 +420,8 @@ class DirectMemoryVideoPlayer(
                         positionFraction = (targetResumeMs.toFloat() / newLength.toFloat()).coerceIn(0f, 1f)
                     }
                     checkAndApplyInitialSeek(mp)
+                } else {
+                    syncDurationFromPlayer(mp)
                 }
             }
 

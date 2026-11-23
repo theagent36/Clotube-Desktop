@@ -25,7 +25,7 @@ object DesktopUpdateManager {
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.1.4"
+    private const val DEV_FALLBACK_VERSION = "2.1.5"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
     private const val CONNECT_TIMEOUT_SEC = 30L
@@ -72,25 +72,27 @@ object DesktopUpdateManager {
     }
 
     private fun getEmbeddedLatestRelease(version: String): CachedReleaseNoteEntry {
-        val targetVersion = if (version.isBlank() || version == "2.0.9" || version == "2.1.1" || version == "2.1.2" || version == "2.1.3" || version == "2.1.4") "2.1.4" else version
-        val title = if (targetVersion == "2.1.4") {
-            "Auto-Updater Verification Release"
+        val targetVersion = if (version.isBlank() || version == "2.0.9" || version == "2.1.1" || version == "2.1.2" || version == "2.1.3" || version == "2.1.4" || version == "2.1.5") "2.1.5" else version
+        val title = if (targetVersion == "2.1.5") {
+            "Zero-Cache Direct-to-Drive History Sync & UI Polish"
         } else {
             "What's New in Clotube v$targetVersion"
         }
 
         val body = """
-            ### In-App Auto-Updater Verification & Maintenance Release
-            - **Version Bump & Updater Verification:** Bumped application package metadata to `v2.1.4` to validate end-to-end IPv4-first `.msi` streaming, silent `wscript.exe` in-place installation, and automatic post-update release notes presentation.
+            ### Zero-Cache Direct-to-Drive Watch History Sync
+            - **Eliminated Local Disk Cache Conflicts:** Removed all local watch-history JSON caches (`watch_history.json`, `clotube_watch_history.json`) and added an automatic startup disk purge under `%APPDATA%\Clotube\profiles` (while preserving your Watchlist, recent searches, library metadata, and OAuth credentials) so stale local files never overwrite newer cross-device progress.
+            - **Pure RAM State & Android V2 Schema Parity:** Refactored `DesktopWatchHistoryManager` and `DesktopWatchHistorySync` to hold active and archived watch state purely in memory and sync directly with `clotube/History/clotube_active_sync.json` and `clotube/History/clotube_archive.json` using the unified V2 schema (`v = 2`, `active`, `resume`, `watchedIds`).
+            - **Cold-Launch Boot-Gating & Window-Focus Sync:** Awaits initial Google Drive watch-history sync before unlocking the Home Screen **Continue Watching** hero slot, and automatically pulls fresh progress whenever the Clotube Desktop window regains focus.
+            - **Clean Exit & Shutdown Flush:** Added synchronous window-close and JVM shutdown flushing so closing Clotube Desktop finishes uploading your latest playback position to Google Drive before exit.
 
-            ### Included from v2.1.3 & v2.1.2
-            - **3-Tier IPv4-First Auto-Updater:** Native Windows `curl.exe -4 --http1.1 --ssl-no-revoke` primary transfer with `HTTP/1.1` stream watchdog, PowerShell `WebClient` fallback, and direct **Open in Browser** option.
-            - **Smooth Virtualized Watchlist Scrolling:** Keyed `LazyColumn` items, memoized Drive title/filter lookups, and decode-time downsampled posters for stutter-free 60+ FPS Watchlist scrolling.
+            ### Continue Watching & UI Polish
+            - **Duplicate Remaining-Time Badge Fix:** Fixed the **Continue Watching** card capsule badge where `"left"` was appended twice (e.g., `1h 18m left left` -> `1h 18m left`).
         """.trimIndent()
 
         return CachedReleaseNoteEntry(
             version = targetVersion,
-            tagName = if (targetVersion == "2.1.4") "v2.1.4" else "v$targetVersion",
+            tagName = if (targetVersion == "2.1.5") "v2.1.5" else "v$targetVersion",
             title = title,
             body = body
         )

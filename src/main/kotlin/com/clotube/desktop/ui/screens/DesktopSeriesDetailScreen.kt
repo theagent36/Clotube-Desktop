@@ -459,11 +459,9 @@ fun DesktopSeriesDetailScreen(
             allowZeroOverwrite = allowZeroOverwrite
         )
 
-        if (accessToken.isNotBlank()) {
-            progressSaveScope.launch {
-                DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-            }
-        }
+        val isPaused = !(player?.isPlaying ?: false)
+        val isWatched = dur > 0L && (pos >= dur * 0.90f)
+        DesktopWatchHistorySync.pushHistoryAsync(force = isPaused || isWatched)
     }
     val saveSeriesProgress = { saveActiveEpisodeProgress(false) }
 
@@ -472,6 +470,7 @@ fun DesktopSeriesDetailScreen(
 
         // Flush outgoing episode progress while activeEpisode & player still match
         saveActiveEpisodeProgress(false)
+        DesktopWatchHistorySync.pushHistoryAsync(force = true)
 
         val outgoing = player
         player = null
@@ -508,6 +507,7 @@ fun DesktopSeriesDetailScreen(
     DisposableEffect(Unit) {
         onDispose {
             saveActiveEpisodeProgress(false)
+            DesktopWatchHistorySync.pushHistoryAsync(force = true)
             val p = player
             val pending = pendingReleasePlayer
             player = null
@@ -547,9 +547,10 @@ fun DesktopSeriesDetailScreen(
                         isSeries = true,
                         seriesId = series.id,
                         seasonNumber = nextEpisode.seasonNumber,
-                        episodeNumber = nextEpisode.episodeNumber
+                        episodeNumber = nextEpisode.episodeNumber,
+                        allowZeroOverwrite = true
                     )
-                    DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken, force = true)
+                    DesktopWatchHistorySync.pushHistoryAsync(force = true)
                 }
             }
             switchToEpisode(nextEpisode)
@@ -595,12 +596,8 @@ fun DesktopSeriesDetailScreen(
                         seasonNumber = ep.seasonNumber,
                         episodeNumber = ep.episodeNumber
                     )
-                    // Quiet background sync to Drive
-                    if (accessToken.isNotBlank()) {
-                        progressSaveScope.launch {
-                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-                        }
-                    }
+                    val isCompleted = ep.durationMs > 0L && currentPos >= (ep.durationMs * 0.90f)
+                    DesktopWatchHistorySync.pushHistoryAsync(force = isCompleted)
                 }
             },
             isFullscreen = true,
@@ -1094,12 +1091,8 @@ fun DesktopSeriesDetailScreen(
                                         seasonNumber = ep.seasonNumber,
                                         episodeNumber = ep.episodeNumber
                                     )
-                                    // Quiet background sync to Drive
-                                    if (accessToken.isNotBlank()) {
-                                        progressSaveScope.launch {
-                                            DesktopWatchHistorySync.pushLocalHistory(userEmail, accessToken)
-                                        }
-                                    }
+                                    val isCompleted = ep.durationMs > 0L && currentPos >= (ep.durationMs * 0.90f)
+                                    DesktopWatchHistorySync.pushHistoryAsync(force = isCompleted)
                                 }
                             },
                             isFullscreen = false,

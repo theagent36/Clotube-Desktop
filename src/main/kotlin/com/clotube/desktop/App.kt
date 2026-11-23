@@ -15,8 +15,10 @@ import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopOnlineMetadataResolver
 import com.clotube.desktop.data.DesktopProfileManager
 import com.clotube.desktop.data.DesktopThumbnailPrefetcher
+import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.data.DesktopWatchlistSync
+import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.network.DesktopNetworkMonitor
 import com.clotube.desktop.ui.components.OfflineConnectionPopup
@@ -153,25 +155,39 @@ fun App(
         }
     }
 
-    // Synchronize Android/Drive Watch History in Background
+    // 1. Startup & Profile Switch Boot-Gating: Configure RAM state holder, purge legacy disk cache, and pull latest V2 history
     LaunchedEffect(activeEmail, authState.accessToken) {
         val email = activeEmail
         val token = authState.accessToken
         if (email.isNotBlank() && token.isNotBlank() && authState.isSignedIn) {
             try {
+                DesktopWatchHistorySync.configure(email, token)
                 if (DesktopNetworkMonitor.isOnline.value) {
+                    withContext(Dispatchers.IO) {
+                        DesktopWatchHistorySync.syncFromCloud(force = true)
+                        DesktopWatchlistSync.pullRemoteWatchlist(email, token)
+                    }
                     DesktopWatchHistorySync.startAutoRecoveryWorker(email) {
                         DesktopAuthManager.getCredential(email)?.accessToken ?: token
-                    }
-                    withContext(Dispatchers.IO) {
-                        DesktopWatchHistorySync.pullAndMerge(email, token)
-                        DesktopWatchlistSync.pullRemoteWatchlist(email, token)
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 System.err.println("[App] Background sync/scan skipped due to network error: ${e.message}")
+            }
+        }
+    }
+
+    // 2. Foreground Window-Focus Sync: Update watch progress immediately when returning from Android
+    LaunchedEffect(AppLifecycleManager.isAppActive, activeEmail, authState.accessToken) {
+        val email = activeEmail
+        val token = authState.accessToken
+        if (AppLifecycleManager.isAppActive && email.isNotBlank() && token.isNotBlank() && authState.isSignedIn) {
+            if (DesktopNetworkMonitor.isOnline.value) {
+                withContext(Dispatchers.IO) {
+                    DesktopWatchHistorySync.syncFromCloud(force = false)
+                }
             }
         }
     }
@@ -377,17 +393,17 @@ fun App(
                             println("[App] Manual cloud rescan requested for: $activeEmail")
                             isScanning = true
                             rescanTrigger++
+                            coroutineScope.launch(Dispatchers.IO) {
+                                DesktopWatchHistorySync.syncFromCloud(force = true)
+                            }
                         },
                         onSignOut = {
                             println("[App] Signing out active session: $activeEmail")
                             DesktopUpdateManager.onHomeScreenExited()
+                            DesktopWatchHistorySync.flushBlockingOnWindowClose()
                             DesktopWatchHistorySync.stopAutoRecoveryWorker()
-                            if (activeEmail.isNotBlank() && authState.accessToken.isNotBlank()) {
-                                @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-                                GlobalScope.launch(Dispatchers.IO) {
-                                    DesktopWatchHistorySync.pushLocalHistory(activeEmail, authState.accessToken, force = true)
-                                }
-                            }
+                            DesktopWatchHistoryManager.clearInMemory()
+                            DesktopWatchHistorySync.invalidateCache()
                             clearThumbnailMemoryCache()
                             DesktopLibraryCache.clearMemory(activeEmail)
                             DesktopAuthManager.signOut()
