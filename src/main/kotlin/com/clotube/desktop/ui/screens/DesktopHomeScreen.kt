@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -80,8 +81,10 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
+import com.clotube.desktop.data.ContinueWatchingDisplayData
 import com.clotube.desktop.data.DesktopAppSettings
 import com.clotube.desktop.data.DesktopContinueWatchingItem
+import com.clotube.desktop.data.DesktopContinueWatchingSnapshotStore
 import com.clotube.desktop.data.DesktopGlobalSearchEngine
 import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopSearchHistoryManager
@@ -92,13 +95,15 @@ import com.clotube.desktop.data.DesktopWatchlistManager
 import com.clotube.desktop.data.DesktopWatchlistSync
 import com.clotube.desktop.data.WatchlistMediaType
 import com.clotube.desktop.data.WatchlistStatus
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.GlobalSearchResult
 import com.clotube.desktop.ui.components.DesktopGlobalSearchOverlay
 import com.clotube.desktop.ui.components.ExternalTitlePreviewModal
-import com.clotube.desktop.ui.components.ThumbnailSize
-import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.ui.state.HeroSlotState
+import com.clotube.desktop.ui.state.HeroSlotStateMachine
 import com.clotube.desktop.ui.components.DesktopFramePacer
 import com.clotube.desktop.ui.motion.FluidEntranceContainer
 import com.clotube.desktop.ui.motion.FluidMotionKit
@@ -497,7 +502,7 @@ fun DesktopHomeScreen(
                         when (viewState.section) {
                             DesktopNavSection.HOME -> {
                                 FigmaHomeContent(
-                                    featuredItem = featuredItem ?: filteredMovies.firstOrNull() ?: filteredSeries.firstOrNull(),
+                                    featuredItem = featuredItem,
                                     continueWatching = continueWatching,
                                     movies = filteredMovies,
                                     series = filteredSeries,
@@ -515,16 +520,31 @@ fun DesktopHomeScreen(
                                     onContinueWatchingClick = { item ->
                                         val isMovie = movies.any { it.id == item.mediaId }
                                         if (item.isSeries && !item.seriesId.isNullOrBlank() && !isMovie) {
-                                            val matchedSeries = series.find { it.id == item.seriesId }
-                                            if (matchedSeries != null) {
-                                                targetedEpisodeId = item.mediaId
-                                                selectedSeriesForDetail = matchedSeries
-                                            }
+                                            val matchedSeries = series.find { it.id == item.seriesId } ?: DesktopMediaItem(
+                                                id = item.seriesId,
+                                                title = item.subtitle.substringBefore("•").trim().ifBlank { item.title },
+                                                durationMs = item.durationMs,
+                                                progressMs = item.positionMs,
+                                                genre = "Series",
+                                                thumbnailUrl = item.thumbnailUrl,
+                                                fallbackThumbnailUrl = item.fallbackThumbnailUrl.ifBlank { null },
+                                                isSeries = true
+                                            )
+                                            targetedEpisodeId = item.mediaId
+                                            selectedSeriesForDetail = matchedSeries
                                         } else {
-                                            val matchedMovie = movies.find { it.id == item.mediaId }
-                                            if (matchedMovie != null) {
-                                                selectedMovieForPlayer = matchedMovie
-                                            }
+                                            val matchedMovie = movies.find { it.id == item.mediaId } ?: DesktopMediaItem(
+                                                id = item.mediaId,
+                                                title = item.title,
+                                                durationMs = item.durationMs,
+                                                progressMs = item.positionMs,
+                                                genre = "Movie",
+                                                thumbnailUrl = item.thumbnailUrl,
+                                                fallbackThumbnailUrl = item.fallbackThumbnailUrl.ifBlank { null },
+                                                streamUrl = "https://www.googleapis.com/drive/v3/files/${item.mediaId}?alt=media",
+                                                isSeries = false
+                                            )
+                                            selectedMovieForPlayer = matchedMovie
                                         }
                                     },
                                     onRescan = onRescan,
@@ -889,7 +909,14 @@ private fun DesktopFigmaTopBar(
     onOpenSettings: () -> Unit = {}
 ) {
     var showAccountMenu by remember { mutableStateOf(false) }
-    val avatarBitmap = rememberThumbnailBitmap(primaryUrl = userAvatarUrl)
+    val avatarKey = remember(userEmail) {
+        val safeEmail = userEmail.trim().lowercase().replace(Regex("[^a-z0-9._@-]"), "_").ifBlank { "guest" }
+        "user_avatar_$safeEmail"
+    }
+    val avatarBitmap = rememberCanonicalArtwork(
+        canonicalKey = avatarKey,
+        candidateUrl = userAvatarUrl
+    )
 
     val initials = remember(userName) {
         userName.split(" ")
@@ -1195,7 +1222,9 @@ private fun ContinueWatchingShelf(
     userEmail: String,
     accessToken: String,
     onItemClick: (DesktopContinueWatchingItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    movies: List<DesktopMediaItem> = emptyList(),
+    series: List<DesktopMediaItem> = emptyList()
 ) {
     val displayItems = remember(items) { items.take(5) }
     if (displayItems.isEmpty()) return
@@ -1254,16 +1283,16 @@ private fun ContinueWatchingShelf(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            itemsIndexed(displayItems, key = { _, it -> it.mediaId }) { index, item ->
-                FluidEntranceContainer(index = index) {
-                    ContinueWatchingCard(
-                        item = item,
-                        userEmail = userEmail,
-                        accessToken = accessToken,
-                        onClick = { onItemClick(item) },
-                        modifier = Modifier.width(248.dp).height(142.dp)
-                    )
-                }
+            itemsIndexed(displayItems, key = { _, it -> it.mediaId }) { _, item ->
+                ContinueWatchingCard(
+                    item = item,
+                    userEmail = userEmail,
+                    accessToken = accessToken,
+                    onClick = { onItemClick(item) },
+                    modifier = Modifier.width(248.dp).height(142.dp),
+                    movies = movies,
+                    series = series
+                )
             }
         }
     }
@@ -1275,7 +1304,9 @@ private fun ContinueWatchingCard(
     userEmail: String,
     accessToken: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    movies: List<DesktopMediaItem> = emptyList(),
+    series: List<DesktopMediaItem> = emptyList()
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
@@ -1313,12 +1344,59 @@ private fun ContinueWatchingCard(
         )
     }
 
-    val posterBitmap = rememberThumbnailBitmap(
-        primaryUrl = item.thumbnailUrl,
-        fallbackUrl = item.fallbackThumbnailUrl,
+    val catalogMovie = remember(item.mediaId, movies) {
+        movies.find { it.id == item.mediaId }
+    }
+    val catalogSeries = remember(item.seriesId, series) {
+        if (!item.seriesId.isNullOrBlank()) series.find { it.id == item.seriesId } else null
+    }
+    val resolvedArtworkUrl = remember(
+        item.thumbnailUrl,
+        item.fallbackThumbnailUrl,
+        catalogSeries?.thumbnailUrl,
+        catalogSeries?.fallbackThumbnailUrl,
+        catalogMovie?.thumbnailUrl,
+        catalogMovie?.fallbackThumbnailUrl
+    ) {
+        val candidates = listOf(
+            item.thumbnailUrl,
+            item.fallbackThumbnailUrl,
+            catalogSeries?.thumbnailUrl,
+            catalogSeries?.fallbackThumbnailUrl,
+            catalogMovie?.thumbnailUrl,
+            catalogMovie?.fallbackThumbnailUrl
+        )
+        candidates
+            .firstOrNull { !it.isNullOrBlank() && !DesktopContinueWatchingSnapshotStore.isPoisonedDriveFrameUrl(it) }
+            ?: candidates.firstOrNull { !it.isNullOrBlank() }
+            ?: ""
+    }
+    val secondaryPosterUrl = remember(
+        item.fallbackThumbnailUrl,
+        catalogSeries?.thumbnailUrl,
+        catalogSeries?.fallbackThumbnailUrl,
+        catalogMovie?.thumbnailUrl
+    ) {
+        listOf(
+            item.fallbackThumbnailUrl,
+            catalogSeries?.thumbnailUrl,
+            catalogSeries?.fallbackThumbnailUrl,
+            catalogMovie?.thumbnailUrl
+        ).firstOrNull { !it.isNullOrBlank() && !DesktopContinueWatchingSnapshotStore.isPoisonedDriveFrameUrl(it) }
+    }
+    val fallbackCacheKey = remember(item.mediaId, item.seriesId, item.isSeries) {
+        if (item.isSeries && !item.seriesId.isNullOrBlank()) {
+            DesktopCanonicalImageCache.seriesPosterKey(item.seriesId)
+        } else {
+            DesktopCanonicalImageCache.moviePosterKey(item.mediaId)
+        }
+    }
+    val posterBitmap = rememberCanonicalArtwork(
+        canonicalKey = DesktopCanonicalImageCache.heroKey(item.mediaId),
+        candidateUrl = resolvedArtworkUrl,
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
+        fallbackUrl = secondaryPosterUrl,
+        fallbackCanonicalKey = fallbackCacheKey
     )
 
     // Calculate remaining runtime specifically for the top-right pill
@@ -1398,11 +1476,15 @@ private fun ContinueWatchingCard(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF161E2E)),
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(Color(0xFF141A26), Color(0xFF0B0F17))
+                            )
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = item.title.take(1),
+                        text = item.title.take(1).uppercase(),
                         color = Color(0xFF94A3B8),
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold
@@ -1576,110 +1658,160 @@ private fun FigmaHomeContent(
     val effectiveSeries = if (series.isNotEmpty()) series else (cachedData?.series ?: emptyList())
     val hasMedia = effectiveMovies.isNotEmpty() || effectiveSeries.isNotEmpty()
 
+    remember(userEmail) {
+        if (userEmail.isNotBlank()) {
+            HeroSlotStateMachine.hydrateFromLocalSnapshot(userEmail)
+        }
+        userEmail
+    }
+
     val globalRevision = DesktopWatchHistoryManager.historyRevision.intValue
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue
     val continueWatchingItems = remember(userEmail, effectiveMovies, effectiveSeries, watchHistoryRevision, globalRevision, watchlistRevision) {
         DesktopWatchHistoryManager.getContinueWatching(userEmail, effectiveMovies, effectiveSeries)
     }
 
-    // Combine all indexed movies and series for the hero billboard slideshow pool
-    val allMediaPool = remember(effectiveMovies, effectiveSeries) {
-        val combined = (effectiveMovies + effectiveSeries).filter { !it.thumbnailUrl.isNullOrBlank() }
-        if (combined.isNotEmpty()) combined else listOfNotNull(featuredItem)
+    val heroSlotState by HeroSlotStateMachine.heroState.collectAsState()
+
+    LaunchedEffect(featuredItem?.id, featuredItem?.thumbnailUrl) {
+        if (featuredItem != null) {
+            HeroSlotStateMachine.onCatalogFeaturedAvailable(featuredItem)
+        }
     }
 
-    if (!hasMedia) {
-        Box(
+    val handleResumeHero: (ContinueWatchingDisplayData) -> Unit = { cw ->
+        val matchedMovie = effectiveMovies.find { it.id == cw.mediaId }
+        val isMovie = matchedMovie != null && !cw.isSeries
+        val headerSub = cw.seriesTitle?.takeIf { it.isNotBlank() } ?: cw.displayHeader
+        val cwItem = DesktopContinueWatchingItem(
+            mediaId = cw.mediaId,
+            title = cw.displayTitle.ifBlank { cw.seriesTitle ?: cw.episodeTitle ?: "Resume" },
+            subtitle = headerSub,
+            thumbnailUrl = cw.canonicalArtworkUrl,
+            fallbackThumbnailUrl = cw.canonicalArtworkUrl,
+            positionMs = cw.currentPositionMs,
+            durationMs = cw.durationMs,
+            progressFraction = cw.progressFraction,
+            isSeries = cw.isSeries && !isMovie,
+            seriesId = cw.seriesId,
+            seasonNumber = cw.seasonNumber,
+            episodeNumber = cw.episodeNumber,
+            episodeTitle = cw.episodeTitle.orEmpty(),
+            timestamp = cw.updatedAt
+        )
+        onContinueWatchingClick?.invoke(cwItem)
+    }
+
+    val handleFeaturedHeroClick: (DesktopMediaItem) -> Unit = { media ->
+        if (media.isSeries || effectiveSeries.any { it.id == media.id }) {
+            onSeriesClick(media)
+        } else {
+            onMovieClick(media)
+        }
+    }
+
+    if (!hasMedia && heroSlotState !is HeroSlotState.ContinueWatching && continueWatchingItems.isEmpty()) {
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 28.dp, vertical = 32.dp),
-            contentAlignment = Alignment.Center
+                .verticalScroll(scrollState)
+                .padding(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 48.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            if (isSyncing) {
-                // Subtle inline indexing state (never an intrusive blocking popup)
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF0D111A))
-                        .border(1.dp, Color(0xFF1B2234), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    CircularProgressIndicator(
-                        color = Color(0xFF00E5FF),
-                        strokeWidth = 2.5.dp,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "Indexing items from Google Drive...",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "Scanning Movies and Series folders in the background.",
-                            color = Color(0xFF8E9BAE),
-                            fontSize = 11.5.sp
-                        )
-                    }
-                }
-            } else {
-                // Subtle, non-intrusive inline card (never a floating popup)
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0D111A)),
-                    border = BorderStroke(1.dp, Color(0xFF1B2234)),
-                    modifier = Modifier.widthIn(max = 440.dp)
-                ) {
-                    Column(
+            HomeHeroSlotBanner(
+                heroState = heroSlotState,
+                accessToken = accessToken,
+                onResumeContinueWatching = handleResumeHero,
+                onFeaturedClick = handleFeaturedHeroClick
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 28.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isSyncing) {
+                    // Subtle inline indexing pill underneath the Hero skeleton (no centered blocking spinner)
+                    Row(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF0D111A))
+                            .border(1.dp, Color(0xFF1B2234), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF131D2E)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.CloudQueue,
-                                contentDescription = null,
-                                tint = Color(0xFF00E5FF),
-                                modifier = Modifier.size(22.dp)
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "Indexing items from Google Drive...",
+                                color = Color.White,
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Scanning Movies and Series folders in the background.",
+                                color = Color(0xFF8E9BAE),
+                                fontSize = 11.5.sp
                             )
                         }
-
-                        Text(
-                            text = "No Media Indexed in Google Drive",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Text(
-                            text = "Clotube connected to your account, but found 0 movies or series folders in Drive. Check that your folders are named 'Movies' or 'Series', or verify your internet connection.",
-                            color = Color(0xFF8E9BAE),
-                            fontSize = 12.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            lineHeight = 17.sp
-                        )
-
-                        Button(
-                            onClick = onRescan,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 9.dp),
-                            modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                    }
+                } else {
+                    // Subtle, non-intrusive inline card (never a floating popup)
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0D111A)),
+                        border = BorderStroke(1.dp, Color(0xFF1B2234)),
+                        modifier = Modifier.widthIn(max = 440.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Icon(imageVector = Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(text = "Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF131D2E)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CloudQueue,
+                                    contentDescription = null,
+                                    tint = Color(0xFF00E5FF),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+
+                            Text(
+                                text = "No Media Indexed in Google Drive",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Text(
+                                text = "Clotube connected to your account, but found 0 movies or series folders in Drive. Check that your folders are named 'Movies' or 'Series', or verify your internet connection.",
+                                color = Color(0xFF8E9BAE),
+                                fontSize = 12.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                lineHeight = 17.sp
+                            )
+
+                            Button(
+                                onClick = onRescan,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 9.dp),
+                                modifier = Modifier.pointerHoverIcon(PointerIcon.Hand)
+                            ) {
+                                Icon(imageVector = Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(text = "Rescan Cloud Library", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                            }
                         }
                     }
                 }
@@ -1695,17 +1827,15 @@ private fun FigmaHomeContent(
             .padding(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 48.dp),
         verticalArrangement = Arrangement.spacedBy(28.dp)
     ) {
-        // 1. REPLACED: Randomized Auto-playing Hero Slideshow
-        FigmaHeroSlideshowBanner(
-            items = allMediaPool,
-            seriesList = effectiveSeries,
-            userEmail = userEmail,
+        // 1. LAYER 2 MONOTONIC HERO SLOT: Frame-1 Snapshot -> Continue Watching -> Featured Fallback
+        HomeHeroSlotBanner(
+            heroState = heroSlotState,
             accessToken = accessToken,
-            onMovieClick = onMovieClick,
-            onSeriesClick = onSeriesClick
+            onResumeContinueWatching = handleResumeHero,
+            onFeaturedClick = handleFeaturedHeroClick
         )
 
-        // 2. NEW: Continue Watching Shelf (Only renders when in-progress media exists)
+        // 2. Continue Watching Shelf (Renders immediately on Frame 1 from cw_shelf_snapshot.json or RAM)
         if (continueWatchingItems.isNotEmpty()) {
             ContinueWatchingShelf(
                 items = continueWatchingItems,
@@ -1713,7 +1843,9 @@ private fun FigmaHomeContent(
                 accessToken = accessToken,
                 onItemClick = { item ->
                     onContinueWatchingClick?.invoke(item)
-                }
+                },
+                movies = effectiveMovies,
+                series = effectiveSeries
             )
         }
 
@@ -1728,7 +1860,8 @@ private fun FigmaHomeContent(
                 cardWidth = 248.dp,
                 cardHeight = 144.dp,
                 onActionClick = { onNavigateSection(DesktopNavSection.MOVIES) },
-                onItemClick = onMovieClick
+                onItemClick = onMovieClick,
+                isSeriesSection = false
             )
         }
 
@@ -1741,7 +1874,8 @@ private fun FigmaHomeContent(
                 accessToken = accessToken,
                 userEmail = userEmail,
                 onActionClick = { onNavigateSection(DesktopNavSection.SERIES) },
-                onItemClick = onSeriesClick
+                onItemClick = onSeriesClick,
+                isSeriesSection = true
             )
         }
     }
@@ -2019,7 +2153,8 @@ private fun FigmaMoviesContent(
                                         userEmail = userEmail,
                                         accessToken = accessToken,
                                         onClick = { onMovieClick(item) },
-                                        modifier = Modifier.fillMaxWidth().aspectRatio(cardAspectRatio)
+                                        modifier = Modifier.fillMaxWidth().aspectRatio(cardAspectRatio),
+                                        isSeries = false
                                     )
                                 }
                             }
@@ -2103,7 +2238,8 @@ private fun OttLanguageMovieShelf(
                                         onClick = { onMovieClick(item) },
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .aspectRatio(16f / 9.5f)
+                                            .aspectRatio(16f / 9.5f),
+                                        isSeries = false
                                     )
                                 }
                             }
@@ -2126,12 +2262,11 @@ private fun MovieHeroBillboard(
     onPlayClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val bannerBitmap = rememberThumbnailBitmap(
-        primaryUrl = movieItem.thumbnailUrl,
-        fallbackUrl = movieItem.fallbackThumbnailUrl,
+    val bannerBitmap = rememberCanonicalArtwork(
+        canonicalKey = DesktopCanonicalImageCache.moviePosterKey(movieItem.id),
+        candidateUrl = movieItem.thumbnailUrl.orEmpty(),
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.HERO
+        fallbackUrl = movieItem.fallbackThumbnailUrl
     )
 
     val isResume = resumeItem != null && resumeItem.mediaId == movieItem.id && resumeItem.positionMs > 0L
@@ -2141,61 +2276,19 @@ private fun MovieHeroBillboard(
             .fillMaxWidth()
             .height(340.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF0C1018))
+            .background(Color(0xFF0B0F17))
             .border(1.dp, Color(0xFF1A2233), RoundedCornerShape(16.dp))
     ) {
-        if (bannerBitmap != null) {
-            Image(
-                bitmap = bannerBitmap,
-                contentDescription = movieItem.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF161E2E), Color(0xFF0A0E17))
-                        )
-                    )
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            Color(0xF5080B11),
-                            Color(0xDD080B11),
-                            Color(0x88080B11),
-                            Color.Transparent
-                        )
-                    )
-                )
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color(0x99080B11),
-                            Color(0xE6080B11)
-                        )
-                    )
-                )
+        HeroRightFadeBackdrop(
+            bitmap = bannerBitmap,
+            contentDescription = movieItem.title
         )
 
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
+                .fillMaxWidth(0.54f)
                 .padding(horizontal = 36.dp, vertical = 28.dp)
-                .widthIn(max = 580.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -2306,36 +2399,6 @@ private fun MovieHeroBillboard(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
-                }
-
-                Surface(
-                    modifier = Modifier
-                        .height(38.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { }
-                        .pointerHoverIcon(PointerIcon.Hand),
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0x1FFFFFFF),
-                    border = BorderStroke(1.dp, Color(0x26FFFFFF))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "My list",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
                 }
             }
         }
@@ -2524,7 +2587,8 @@ private fun FigmaSeriesContent(
                                     userEmail = userEmail,
                                     accessToken = accessToken,
                                     onClick = { onSeriesClick(item, null) },
-                                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f)
+                                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9.5f),
+                                    isSeries = true
                                 )
                             }
                         }
@@ -2547,12 +2611,20 @@ private fun SeriesHeroBillboard(
     onViewEpisodes: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val bannerBitmap = rememberThumbnailBitmap(
-        primaryUrl = resumeItem?.thumbnailUrl ?: seriesItem.thumbnailUrl,
-        fallbackUrl = seriesItem.fallbackThumbnailUrl,
+    val seriesBannerUrl = remember(seriesItem.thumbnailUrl, resumeItem?.thumbnailUrl) {
+        val primary = seriesItem.thumbnailUrl?.takeIf { it.isNotBlank() }
+        val resume = resumeItem?.thumbnailUrl?.takeIf { it.isNotBlank() }
+        if (primary != null && !DesktopContinueWatchingSnapshotStore.isPoisonedDriveFrameUrl(primary)) {
+            primary
+        } else {
+            resume ?: primary.orEmpty()
+        }
+    }
+    val bannerBitmap = rememberCanonicalArtwork(
+        canonicalKey = DesktopCanonicalImageCache.seriesPosterKey(seriesItem.id),
+        candidateUrl = seriesBannerUrl,
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.HERO
+        fallbackUrl = seriesItem.fallbackThumbnailUrl ?: resumeItem?.thumbnailUrl?.takeIf { it.isNotBlank() }
     )
 
     val isResume = resumeItem != null && resumeItem.mediaId.isNotBlank()
@@ -2562,61 +2634,19 @@ private fun SeriesHeroBillboard(
             .fillMaxWidth()
             .height(340.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF0C1018))
+            .background(Color(0xFF0B0F17))
             .border(1.dp, Color(0xFF1A2233), RoundedCornerShape(16.dp))
     ) {
-        if (bannerBitmap != null) {
-            Image(
-                bitmap = bannerBitmap,
-                contentDescription = seriesItem.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF161E2E), Color(0xFF0A0E17))
-                        )
-                    )
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            Color(0xF5080B11),
-                            Color(0xDD080B11),
-                            Color(0x88080B11),
-                            Color.Transparent
-                        )
-                    )
-                )
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color(0x99080B11),
-                            Color(0xE6080B11)
-                        )
-                    )
-                )
+        HeroRightFadeBackdrop(
+            bitmap = bannerBitmap,
+            contentDescription = seriesItem.title
         )
 
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
+                .fillMaxWidth(0.54f)
                 .padding(horizontal = 36.dp, vertical = 28.dp)
-                .widthIn(max = 600.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -3185,7 +3215,8 @@ fun DesktopSeriesGridCard(
     userEmail: String,
     accessToken: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isSeries: Boolean = seriesItem.isSeries
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
@@ -3214,12 +3245,15 @@ fun DesktopSeriesGridCard(
         )
     }
 
-    val posterBitmap = rememberThumbnailBitmap(
-        primaryUrl = seriesItem.thumbnailUrl,
-        fallbackUrl = seriesItem.fallbackThumbnailUrl,
+    val posterKey = remember(seriesItem.id, isSeries) {
+        if (isSeries) DesktopCanonicalImageCache.seriesPosterKey(seriesItem.id)
+        else DesktopCanonicalImageCache.moviePosterKey(seriesItem.id)
+    }
+    val posterBitmap = rememberCanonicalArtwork(
+        canonicalKey = posterKey,
+        candidateUrl = seriesItem.thumbnailUrl.orEmpty(),
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
+        fallbackUrl = seriesItem.fallbackThumbnailUrl
     )
 
     val cachedSeries = remember(seriesItem.id, userEmail) {
@@ -3733,11 +3767,11 @@ private fun DesktopRecentHistoryCard(
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color(0xFF0A0D14))
             ) {
-                val thumb = rememberThumbnailBitmap(
-                    primaryUrl = item.thumbnailUrl,
-                    fallbackUrl = item.fallbackThumbnailUrl,
+                val thumb = rememberCanonicalArtwork(
+                    canonicalKey = DesktopCanonicalImageCache.heroKey(item.mediaId),
+                    candidateUrl = item.thumbnailUrl,
                     accessToken = accessToken,
-                    userEmail = userEmail
+                    fallbackUrl = item.fallbackThumbnailUrl.ifBlank { null }
                 )
                 if (thumb != null) {
                     Image(
@@ -3894,71 +3928,29 @@ private fun HeroSlideCardContent(
     val isSeries = remember(item.id, seriesList) {
         seriesList.any { it.id == item.id }
     }
-    val backdrop = rememberThumbnailBitmap(
-        primaryUrl = item.thumbnailUrl,
-        fallbackUrl = item.fallbackThumbnailUrl,
+    val slideKey = remember(item.id, isSeries) {
+        if (isSeries) DesktopCanonicalImageCache.seriesPosterKey(item.id)
+        else DesktopCanonicalImageCache.moviePosterKey(item.id)
+    }
+    val backdrop = rememberCanonicalArtwork(
+        canonicalKey = slideKey,
+        candidateUrl = item.thumbnailUrl.orEmpty(),
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.HERO
+        fallbackUrl = item.fallbackThumbnailUrl
     )
 
     Box(modifier = modifier) {
-        // Poster Artwork
-        if (backdrop != null) {
-            Image(
-                bitmap = backdrop,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF161E2E), Color(0xFF090D14))
-                        )
-                    )
-            )
-        }
-
-        // Cinema Vignette Gradients
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            Color(0xF8080B11),
-                            Color(0xEE080B11),
-                            Color(0xB3080B11),
-                            Color(0x4D080B11),
-                            Color.Transparent
-                        )
-                    )
-                )
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color(0x66080B11),
-                            Color(0xE607090E)
-                        )
-                    )
-                )
+        HeroRightFadeBackdrop(
+            bitmap = backdrop,
+            contentDescription = item.title
         )
 
         // Metadata Details Column
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
+                .fillMaxWidth(0.54f)
                 .padding(horizontal = 36.dp, vertical = 28.dp)
-                .widthIn(max = 620.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -4198,7 +4190,7 @@ fun FigmaHeroSlideshowBanner(
             .fillMaxWidth()
             .height(380.dp)
             .clip(RoundedCornerShape(18.dp))
-            .background(Color(0xFF101520))
+            .background(Color(0xFF0B0F17))
             .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
     ) {
         val currentItem = shuffledItems[currentIndex.coerceIn(0, shuffledItems.lastIndex)]
@@ -4344,6 +4336,334 @@ fun FigmaHeroSlideshowBanner(
 }
 
 @Composable
+private fun HomeHeroSlotBanner(
+    heroState: HeroSlotState,
+    accessToken: String = "",
+    onResumeContinueWatching: (ContinueWatchingDisplayData) -> Unit,
+    onFeaturedClick: (DesktopMediaItem) -> Unit
+) {
+    when (heroState) {
+        is HeroSlotState.Resolving -> {
+            // Layer 2 invariant: render calm Obsidian skeleton placeholder while resolving; never flash wrong movie or spinner.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(370.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(Color(0xFF10131B), Color(0xFF181C26), Color(0xFF10131B))
+                        )
+                    )
+                    .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(horizontal = 36.dp, vertical = 28.dp)
+                        .widthIn(max = 460.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(120.dp)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFF1E2636))
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(340.dp)
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF182030))
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(220.dp)
+                            .height(16.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFF161D2C))
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .width(116.dp)
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF1F283A))
+                        )
+                    }
+                }
+            }
+        }
+
+        is HeroSlotState.ContinueWatching -> {
+            ContinueWatchingHeroBanner(
+                item = heroState.item,
+                accessToken = accessToken,
+                onResumeClick = { onResumeContinueWatching(heroState.item) }
+            )
+        }
+
+        is HeroSlotState.FeaturedFallback -> {
+            FigmaHeroBanner(
+                item = heroState.movie,
+                overline = "FEATURED",
+                primaryButtonText = "Watch now",
+                accessToken = accessToken,
+                onPrimaryClick = { onFeaturedClick(heroState.movie) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun HeroRightFadeBackdrop(
+    bitmap: ImageBitmap?,
+    contentDescription: String,
+    baseColor: Color = Color(0xFF0B0F17),
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(baseColor)
+    ) {
+        if (bitmap != null) {
+            val isPortraitPoster = bitmap.height > bitmap.width
+            // Anchor portrait headshots to the upper third (-0.58f) so foreheads/eyes never clip;
+            // keep landscape thumbnails slightly upper-biased (-0.22f) to preserve full framing.
+            val smartAlignment = remember(isPortraitPoster) {
+                if (isPortraitPoster) {
+                    BiasAlignment(horizontalBias = 0.0f, verticalBias = -0.58f)
+                } else {
+                    BiasAlignment(horizontalBias = 0.0f, verticalBias = -0.22f)
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.62f)
+                    .align(Alignment.CenterEnd)
+            ) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = contentDescription,
+                    contentScale = ContentScale.Crop,
+                    alignment = smartAlignment,
+                    filterQuality = FilterQuality.High,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                // Multi-stop horizontal feathering from solid left background into transparent right stage
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.horizontalGradient(
+                                0.00f to baseColor,
+                                0.14f to baseColor.copy(alpha = 0.94f),
+                                0.30f to baseColor.copy(alpha = 0.62f),
+                                0.48f to baseColor.copy(alpha = 0.18f),
+                                0.65f to Color.Transparent,
+                                1.00f to Color.Transparent
+                            )
+                        )
+                )
+
+                // Subtle bottom edge vignette so slide indicators/badges remain legible without dimming faces
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.00f to Color.Transparent,
+                                0.72f to Color.Transparent,
+                                1.00f to baseColor.copy(alpha = 0.75f)
+                            )
+                        )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContinueWatchingHeroBanner(
+    item: ContinueWatchingDisplayData,
+    accessToken: String = "",
+    onResumeClick: () -> Unit
+) {
+    val heroBitmap = rememberCanonicalArtwork(
+        canonicalKey = DesktopCanonicalImageCache.heroKey(item.mediaId),
+        candidateUrl = item.canonicalArtworkUrl,
+        accessToken = accessToken
+    )
+
+    val heroTitle = remember(item) {
+        if (item.isSeries && !item.seriesTitle.isNullOrBlank()) {
+            item.seriesTitle
+        } else {
+            item.displayTitle.ifBlank { item.seriesTitle ?: item.episodeTitle ?: "Continue Watching" }
+        }
+    }
+
+    val episodeSubtitle = remember(item) {
+        buildString {
+            if (item.isSeries && item.seasonNumber != null && item.episodeNumber != null) {
+                append("S%02dE%02d".format(item.seasonNumber, item.episodeNumber))
+                val epName = item.episodeTitle?.takeIf { it.isNotBlank() }
+                if (epName != null && !epName.equals(heroTitle, ignoreCase = true)) {
+                    append(" • ")
+                    append(epName)
+                }
+            }
+        }
+    }
+
+    val remainingLabel = remember(item.currentPositionMs, item.durationMs) {
+        val remainingMs = (item.durationMs - item.currentPositionMs).coerceAtLeast(0L)
+        if (item.durationMs > 0L && remainingMs > 0L) {
+            DesktopWatchHistoryManager.formatRemainingTime(remainingMs)
+        } else {
+            ""
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(370.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF0B0F17))
+            .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
+    ) {
+        HeroRightFadeBackdrop(
+            bitmap = heroBitmap,
+            contentDescription = heroTitle
+        )
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxWidth(0.54f)
+                .padding(horizontal = 36.dp, vertical = 28.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(12.dp)
+                        .background(Color(0xFF3877EE))
+                )
+                Text(
+                    text = item.displayHeader.ifBlank { "CONTINUE WATCHING" },
+                    color = Color(0xFF94A3B8),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.6.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = heroTitle.uppercase(),
+                color = Color.White,
+                fontSize = 42.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 0.5.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (episodeSubtitle.isNotBlank()) {
+                    Text(
+                        text = episodeSubtitle,
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (episodeSubtitle.isNotBlank() && remainingLabel.isNotBlank()) {
+                    Text(text = "•", color = Color(0xFF64748B), fontSize = 13.sp)
+                }
+                if (remainingLabel.isNotBlank()) {
+                    Text(
+                        text = remainingLabel,
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            val clampedProgress = item.progressFraction.coerceIn(0.02f, 1f)
+            Box(
+                modifier = Modifier
+                    .width(260.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color(0x33FFFFFF))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(clampedProgress)
+                        .fillMaxHeight()
+                        .background(Color(0xFF3877EE))
+                )
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onResumeClick,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF090A0F)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .height(40.dp)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = Color(0xFF090A0F),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Resume",
+                        color = Color(0xFF090A0F),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun FigmaHeroBanner(
     item: DesktopMediaItem,
     overline: String,
@@ -4351,11 +4671,15 @@ private fun FigmaHeroBanner(
     accessToken: String = "",
     onPrimaryClick: () -> Unit
 ) {
-    val heroBitmap = rememberThumbnailBitmap(
-        primaryUrl = item.thumbnailUrl,
-        fallbackUrl = item.fallbackThumbnailUrl,
+    val heroKey = remember(item.id, item.isSeries) {
+        if (item.isSeries) DesktopCanonicalImageCache.seriesPosterKey(item.id)
+        else DesktopCanonicalImageCache.moviePosterKey(item.id)
+    }
+    val heroBitmap = rememberCanonicalArtwork(
+        canonicalKey = heroKey,
+        candidateUrl = item.thumbnailUrl.orEmpty(),
         accessToken = accessToken,
-        size = ThumbnailSize.HERO
+        fallbackUrl = item.fallbackThumbnailUrl
     )
 
     Box(
@@ -4363,38 +4687,19 @@ private fun FigmaHeroBanner(
             .fillMaxWidth()
             .height(370.dp)
             .clip(RoundedCornerShape(18.dp))
-            .background(Color(0xFF101520))
+            .background(Color(0xFF0B0F17))
             .border(1.dp, Color(0xFF1B2333), RoundedCornerShape(18.dp))
     ) {
-        if (heroBitmap != null) {
-            Image(
-                bitmap = heroBitmap,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                filterQuality = FilterQuality.High,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            Color(0xF8080B11),
-                            Color(0xCC080B11),
-                            Color(0x4D080B11)
-                        )
-                    )
-                )
+        HeroRightFadeBackdrop(
+            bitmap = heroBitmap,
+            contentDescription = item.title
         )
 
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
+                .fillMaxWidth(0.54f)
                 .padding(horizontal = 36.dp, vertical = 28.dp)
-                .widthIn(max = 580.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -4511,36 +4816,6 @@ private fun FigmaHeroBanner(
                         fontWeight = FontWeight.Bold
                     )
                 }
-
-                Surface(
-                    modifier = Modifier
-                        .height(40.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { }
-                        .pointerHoverIcon(PointerIcon.Hand),
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0x1FFFFFFF),
-                    border = BorderStroke(1.dp, Color(0x26FFFFFF))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "My list",
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
             }
         }
     }
@@ -4558,7 +4833,8 @@ private fun FigmaCarouselSection(
     cardHeight: androidx.compose.ui.unit.Dp = 144.dp,
     trailingHeaderContent: (@Composable () -> Unit)? = null,
     onActionClick: () -> Unit,
-    onItemClick: (DesktopMediaItem) -> Unit
+    onItemClick: (DesktopMediaItem) -> Unit,
+    isSeriesSection: Boolean = false
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -4649,7 +4925,8 @@ private fun FigmaCarouselSection(
                             onClick = { onItemClick(item) },
                             modifier = Modifier
                                 .width(cardWidth)
-                                .height(cardHeight)
+                                .height(cardHeight),
+                            isSeries = isSeriesSection || item.isSeries
                         )
                     }
                 }

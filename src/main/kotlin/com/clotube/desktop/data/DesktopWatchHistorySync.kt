@@ -1,6 +1,7 @@
 package com.clotube.desktop.data
 
 import com.clotube.desktop.auth.DesktopAuthManager
+import com.clotube.desktop.ui.state.HeroSlotStateMachine
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
 import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import com.google.api.client.http.ByteArrayContent
@@ -8,6 +9,7 @@ import com.google.api.client.json.gson.GsonFactory
 import com.google.api.services.drive.Drive
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +24,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -65,7 +68,7 @@ object DesktopWatchHistorySync {
 
     fun configure(userEmail: String, accessToken: String) {
         val normalizedEmail = userEmail.trim()
-        if (normalizedEmail != activeUserEmail) {
+        if (!normalizedEmail.equals(activeUserEmail, ignoreCase = true)) {
             invalidateCache()
             DesktopWatchHistoryManager.bindProfile(normalizedEmail)
         }
@@ -96,7 +99,7 @@ object DesktopWatchHistorySync {
 
     fun normalizeTimestampMs(raw: Long): Long {
         if (raw <= 0L) return 0L
-        return if (raw < 10_000_000_000L) raw * 1000L else raw
+        return DesktopContinueWatchingSnapshotStore.normalizeEpochMs(raw)
     }
 
     private fun buildDriveService(overrideToken: String = ""): Drive? {
@@ -221,9 +224,26 @@ object DesktopWatchHistorySync {
         return syncFromCloud(force = force)
     }
 
+    private data class ParsedActiveSync(
+        val entries: Map<String, DesktopTypedEntry>,
+        val latestTimestampMs: Long
+    )
+
+    private data class ParsedArchiveSync(
+        val watchedIds: Set<String>,
+        val items: Map<String, DesktopArchivedHistoryEntry>,
+        val latestTimestampMs: Long
+    )
+
     /**
-     * Authoritative pull from clotube/History/clotube_active_sync.json and clotube_archive.json.
-     * Replaces volatile RAM state completely—zero local disk caching or stale merging.
+     * Authoritative timestamp-fenced reconciliation with `clotube/History/clotube_active_sync.json`
+     * and `clotube_archive.json` (`v = 2`).
+     *
+     * - If `remoteLatestTs > localLatestTs`: Replaces RAM state from Drive, writes `cw_hero_snapshot.json`
+     *   (or `confirmedEmpty = true` if 0 in-progress items), and updates `HeroSlotStateMachine`.
+     * - If `localLatestTs > remoteLatestTs`: Keeps local state and `cw_hero_snapshot.json` authoritative
+     *   (recovering Drive's older history into RAM on cold boot if needed) and pushes local V2 payload to Drive.
+     * - If `remoteLatestTs == localLatestTs`: Hydrates RAM on cold boot while preserving snapshot & Hero state.
      */
     suspend fun syncFromCloud(force: Boolean = false, overrideToken: String = ""): Boolean = withContext(Dispatchers.IO) {
         if (overrideToken.isNotBlank()) {
@@ -254,16 +274,208 @@ object DesktopWatchHistorySync {
             val activeJson = activeFileId?.let { downloadJsonFile(drive, it) }
             val archiveJson = archiveFileId?.let { downloadJsonFile(drive, it) }
 
-            val activeEntries = if (activeJson != null) parseActiveSyncJson(activeJson) else emptyMap()
-            val (archivedIds, archivedMetadata) = if (archiveJson != null) {
+            val parsedActive = if (activeJson != null) parseActiveSyncJson(activeJson) else ParsedActiveSync(emptyMap(), 0L)
+            val parsedArchive = if (archiveJson != null) {
                 parseArchiveJson(archiveJson)
             } else {
-                emptySet<String>() to emptyMap()
+                ParsedArchiveSync(emptySet(), emptyMap(), 0L)
             }
 
-            DesktopWatchHistoryManager.replaceAllFromDrive(activeEntries, archivedIds, archivedMetadata)
+            val activeEntries = parsedActive.entries
+            val archivedIds = parsedArchive.watchedIds
+            val archivedMetadata = parsedArchive.items
+
+            val remoteLatestTs = if (activeJson != null) {
+                parsedActive.latestTimestampMs
+            } else {
+                parsedArchive.latestTimestampMs
+            }
+
+            val email = activeUserEmail.ifBlank { DesktopProfileManager.getActiveEmail().orEmpty() }
+            val localSnap = if (email.isNotBlank()) DesktopContinueWatchingSnapshotStore.readSnapshot(email) else null
+            val localShelfSnap = if (email.isNotBlank()) DesktopContinueWatchingSnapshotStore.readShelfSnapshot(email) else null
+            val localSnapTs = DesktopContinueWatchingSnapshotStore.normalizeEpochMs(localSnap?.updatedAt ?: 0L)
+            val localShelfTs = DesktopContinueWatchingSnapshotStore.normalizeEpochMs(localShelfSnap?.updatedAt ?: 0L)
+            val localRamTs = DesktopWatchHistoryManager.getLatestTimestampMs()
+            val localLatestTs = maxOf(localRamTs, localSnapTs, localShelfTs)
+
+            when {
+                remoteLatestTs > localLatestTs -> {
+                    DesktopWatchHistoryManager.replaceAllFromDrive(
+                        activeEntries = activeEntries,
+                        archiveIds = archivedIds,
+                        archiveMetadata = archivedMetadata,
+                        remoteLatestTs = remoteLatestTs
+                    )
+                    val cwItem = DesktopWatchHistoryManager.resolveLatestContinueWatching(email)
+                    if (email.isNotBlank()) {
+                        val snapshotPayload = cwItem ?: ContinueWatchingDisplayData(
+                            mediaId = "",
+                            confirmedEmpty = true,
+                            updatedAt = remoteLatestTs
+                        )
+                        DesktopContinueWatchingSnapshotStore.writeSnapshot(email, snapshotPayload)
+                        val cachedLib = DesktopLibraryCache.loadSync(email)
+                        val shelfItems = DesktopWatchHistoryManager.getContinueWatching(
+                            email,
+                            cachedLib?.movies.orEmpty(),
+                            cachedLib?.series.orEmpty()
+                        )
+                        DesktopContinueWatchingSnapshotStore.writeShelfSnapshot(
+                            userEmail = email,
+                            items = shelfItems,
+                            updatedAt = remoteLatestTs,
+                            confirmedEmpty = shelfItems.isEmpty()
+                        )
+                    }
+                    HeroSlotStateMachine.onContinueWatchingResolved(
+                        item = cwItem,
+                        explicitClear = (cwItem == null)
+                    )
+                    println("[ClotubeSync] Remote newer ($remoteLatestTs > $localLatestTs): activeEntries=${activeEntries.size}, cw=${cwItem?.mediaId ?: "none"}")
+                }
+
+                localLatestTs > remoteLatestTs -> {
+                    val ramWasEmpty = DesktopWatchHistoryManager.snapshotEntries().isEmpty()
+                    if (ramWasEmpty && (localSnap != null || (localShelfSnap != null && localShelfSnap.items.isNotEmpty()))) {
+                        val isExplicitLocalClear = localSnap != null &&
+                            localSnap.confirmedEmpty &&
+                            localSnap.mediaId.isBlank() &&
+                            localSnapTs >= localShelfTs
+                        if (isExplicitLocalClear) {
+                            // Local history was explicitly cleared while offline/before exit
+                            DesktopWatchHistoryManager.replaceAllFromDrive(
+                                activeEntries = emptyMap(),
+                                archiveIds = emptySet(),
+                                archiveMetadata = emptyMap(),
+                                remoteLatestTs = localLatestTs
+                            )
+                            HeroSlotStateMachine.onContinueWatchingResolved(null, explicitClear = true)
+                        } else {
+                            // Seed older Drive history into RAM and restore all newer local shelf items + hero snapshot
+                            DesktopWatchHistoryManager.replaceAllFromDrive(
+                                activeEntries = activeEntries,
+                                archiveIds = archivedIds,
+                                archiveMetadata = archivedMetadata,
+                                remoteLatestTs = remoteLatestTs
+                            )
+                            if (localShelfSnap != null && localShelfSnap.items.isNotEmpty()) {
+                                localShelfSnap.items.asReversed().forEachIndexed { idx, shelfItem ->
+                                    val asDisplay = ContinueWatchingDisplayData(
+                                        mediaId = shelfItem.mediaId,
+                                        seriesId = shelfItem.seriesId,
+                                        isSeries = shelfItem.isSeries,
+                                        displayHeader = shelfItem.subtitle,
+                                        displayTitle = shelfItem.title,
+                                        seriesTitle = if (shelfItem.isSeries) shelfItem.title else null,
+                                        seasonNumber = shelfItem.seasonNumber,
+                                        episodeNumber = shelfItem.episodeNumber,
+                                        episodeTitle = shelfItem.episodeTitle.takeIf { it.isNotBlank() },
+                                        canonicalArtworkUrl = shelfItem.thumbnailUrl.ifBlank { shelfItem.fallbackThumbnailUrl },
+                                        progressFraction = shelfItem.progressFraction,
+                                        currentPositionMs = shelfItem.positionMs,
+                                        durationMs = shelfItem.durationMs,
+                                        updatedAt = shelfItem.timestamp,
+                                        confirmedEmpty = false
+                                    )
+                                    DesktopWatchHistoryManager.applySnapshotRecovery(
+                                        email = email,
+                                        snapshot = asDisplay,
+                                        persistShelfSnapshot = (idx == localShelfSnap.items.lastIndex && localSnap == null)
+                                    )
+                                }
+                            }
+                            if (localSnap != null && !localSnap.confirmedEmpty && localSnap.mediaId.isNotBlank()) {
+                                DesktopWatchHistoryManager.applySnapshotRecovery(email, localSnap, persistShelfSnapshot = true)
+                            }
+                            val resolved = DesktopWatchHistoryManager.resolveLatestContinueWatching(email) ?: localSnap
+                            HeroSlotStateMachine.onContinueWatchingResolved(resolved, explicitClear = (resolved == null))
+                        }
+                    } else {
+                        val cwItem = DesktopWatchHistoryManager.resolveLatestContinueWatching(email)
+                        if (cwItem != null) {
+                            HeroSlotStateMachine.onContinueWatchingResolved(cwItem, explicitClear = false)
+                        }
+                    }
+
+                    // Push authoritative local V2 payload so Android/other devices catch up
+                    executeDirectUpload(
+                        priority = DesktopSyncPriority.CRITICAL_WATCH_STATE,
+                        updateArchive = false,
+                        overrideToken = overrideToken
+                    )
+                    println("[ClotubeSync] Local newer ($localLatestTs > $remoteLatestTs): kept local snapshot & pushed V2 payload to Drive")
+                }
+
+                else -> {
+                    val ramIsEmpty = DesktopWatchHistoryManager.snapshotEntries().isEmpty()
+                    if (ramIsEmpty && (activeEntries.isNotEmpty() || archivedIds.isNotEmpty())) {
+                        val promotedFromArchive = DesktopWatchHistoryManager.replaceAllFromDrive(
+                            activeEntries = activeEntries,
+                            archiveIds = archivedIds,
+                            archiveMetadata = archivedMetadata,
+                            remoteLatestTs = remoteLatestTs
+                        )
+                        val cwItem = DesktopWatchHistoryManager.resolveLatestContinueWatching(email)
+                        if (email.isNotBlank()) {
+                            val snapshotPayload = cwItem ?: ContinueWatchingDisplayData(
+                                mediaId = "",
+                                confirmedEmpty = true,
+                                updatedAt = remoteLatestTs
+                            )
+                            DesktopContinueWatchingSnapshotStore.writeSnapshot(email, snapshotPayload)
+                            val cachedLib = DesktopLibraryCache.loadSync(email)
+                            val shelfItems = DesktopWatchHistoryManager.getContinueWatching(
+                                email,
+                                cachedLib?.movies.orEmpty(),
+                                cachedLib?.series.orEmpty()
+                            )
+                            DesktopContinueWatchingSnapshotStore.writeShelfSnapshot(
+                                userEmail = email,
+                                items = shelfItems,
+                                updatedAt = remoteLatestTs,
+                                confirmedEmpty = shelfItems.isEmpty()
+                            )
+                        }
+                        HeroSlotStateMachine.onContinueWatchingResolved(
+                            item = cwItem,
+                            explicitClear = (cwItem == null)
+                        )
+                        if (promotedFromArchive) {
+                            pushHistoryAsync(force = true, updateArchive = true)
+                        }
+                    } else if (ramIsEmpty && activeJson == null && archiveJson == null) {
+                        if (email.isNotBlank() && localSnap == null) {
+                            DesktopContinueWatchingSnapshotStore.writeSnapshot(
+                                email,
+                                ContinueWatchingDisplayData(
+                                    mediaId = "",
+                                    confirmedEmpty = true,
+                                    updatedAt = 0L
+                                )
+                            )
+                            DesktopContinueWatchingSnapshotStore.writeShelfSnapshot(
+                                userEmail = email,
+                                items = emptyList(),
+                                updatedAt = 0L,
+                                confirmedEmpty = true
+                            )
+                        }
+                        HeroSlotStateMachine.onContinueWatchingResolved(null, explicitClear = true)
+                    } else if (!HeroSlotStateMachine.hasResolvedContinueWatchingLatch &&
+                        !HeroSlotStateMachine.hasConfirmedEmptyHistoryLatch
+                    ) {
+                        val cwItem = DesktopWatchHistoryManager.resolveLatestContinueWatching(email)
+                        HeroSlotStateMachine.onContinueWatchingResolved(
+                            item = cwItem,
+                            explicitClear = (cwItem == null)
+                        )
+                    }
+                    println("[ClotubeSync] Drive & local timestamps aligned ($remoteLatestTs)")
+                }
+            }
+
             lastCloudPullTimeMs.set(System.currentTimeMillis())
-            println("[ClotubeSync] Pulled directly from Drive: activeEntries=${activeEntries.size}, archivedIds=${archivedIds.size}")
             true
         } catch (e: Exception) {
             println("[ClotubeSync] Direct Drive pull failed: ${e.message}")
@@ -273,40 +485,42 @@ object DesktopWatchHistorySync {
         }
     }
 
-    private fun parseActiveSyncJson(remoteJson: String): Map<String, DesktopTypedEntry> {
+    private fun parseActiveSyncJson(remoteJson: String): ParsedActiveSync {
         val result = mutableMapOf<String, DesktopTypedEntry>()
         val root = JsonParser.parseString(remoteJson).asJsonObject
-        val updatedAt = normalizeTimestampMs(root.get("updatedAt")?.asLong ?: 0L)
-        if (updatedAt > 0L) {
-            result["global_latest_timestamp"] = DesktopTypedEntry("long", updatedAt)
-        }
+        val updatedAt = normalizeTimestampMs(optLong(root, "updatedAt") ?: 0L)
+        var maxTs = updatedAt
 
         // 1. Parse watchedIds
-        root.getAsJsonArray("watchedIds")?.forEach { el ->
-            val wid = el.asString.trim()
-            if (wid.isNotBlank()) {
-                result["${wid}_is_watched"] = DesktopTypedEntry("boolean", true)
-                result["${wid}_fraction"] = DesktopTypedEntry("float", 1.0f)
+        root.get("watchedIds")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { el ->
+            if (el != null && !el.isJsonNull && el.isJsonPrimitive) {
+                val wid = el.asString.trim()
+                if (wid.isNotBlank()) {
+                    result["${wid}_is_watched"] = DesktopTypedEntry("boolean", true)
+                    result["${wid}_fraction"] = DesktopTypedEntry("float", 1.0f)
+                }
             }
         }
 
         // 2. Parse active items (supports both compact keys t/p/d/ts/w/sid/sn/en and verbose keys)
         val activeTitlesById = mutableMapOf<String, String>()
-        root.getAsJsonArray("active")?.forEach { el ->
-            if (!el.isJsonObject) return@forEach
+        root.get("active")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { el ->
+            if (el == null || !el.isJsonObject) return@forEach
             val obj = el.asJsonObject
-            val id = obj.get("id")?.asString?.trim().orEmpty()
+            val id = optString(obj, "id")?.trim().orEmpty()
             if (id.isBlank()) return@forEach
 
-            val title = obj.get("t")?.asString ?: obj.get("title")?.asString ?: ""
-            val pos = obj.get("p")?.asLong ?: obj.get("positionMs")?.asLong ?: 0L
-            val dur = obj.get("d")?.asLong ?: obj.get("durationMs")?.asLong ?: 0L
-            val rawTs = obj.get("ts")?.asLong ?: obj.get("timestamp")?.asLong ?: 0L
+            val title = optString(obj, "t") ?: optString(obj, "title") ?: ""
+            val pos = optLong(obj, "p") ?: optLong(obj, "positionMs") ?: 0L
+            val dur = optLong(obj, "d") ?: optLong(obj, "durationMs") ?: 0L
+            val rawTs = optLong(obj, "ts") ?: optLong(obj, "timestamp") ?: optLong(obj, "timestampMs") ?: 0L
             val ts = normalizeTimestampMs(rawTs)
-            val isWatched = obj.get("w")?.asBoolean ?: obj.get("isWatched")?.asBoolean ?: false
-            val seriesId = (obj.get("sid")?.asString ?: obj.get("seriesId")?.asString)?.trim()?.ifBlank { null }
-            val sNum = obj.get("sn")?.asInt ?: obj.get("s")?.asInt ?: obj.get("seasonNumber")?.asInt ?: 0
-            val eNum = obj.get("en")?.asInt ?: obj.get("e")?.asInt ?: obj.get("episodeNumber")?.asInt ?: 0
+            if (ts > maxTs) maxTs = ts
+
+            val isWatched = optBoolean(obj, "w") ?: optBoolean(obj, "isWatched") ?: false
+            val seriesId = (optString(obj, "sid") ?: optString(obj, "seriesId"))?.trim()?.ifBlank { null }
+            val sNum = optInt(obj, "sn") ?: optInt(obj, "s") ?: optInt(obj, "seasonNumber") ?: 0
+            val eNum = optInt(obj, "en") ?: optInt(obj, "e") ?: optInt(obj, "episodeNumber") ?: 0
             val isSeries = !seriesId.isNullOrBlank() || sNum > 0 || eNum > 0
             val frac = if (isWatched) 1.0f else if (dur > 0L) (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -325,17 +539,21 @@ object DesktopWatchHistorySync {
         }
 
         // 3. Parse resume pointers ("resume" map) and link directly onto target episodeId
-        root.getAsJsonObject("resume")?.entrySet()?.forEach { (seriesId, valEl) ->
-            if (seriesId.isBlank() || !valEl.isJsonObject) return@forEach
+        root.get("resume")?.takeIf { it.isJsonObject }?.asJsonObject?.entrySet()?.forEach { (seriesId, valEl) ->
+            if (seriesId.isBlank() || valEl == null || !valEl.isJsonObject) return@forEach
             val obj = valEl.asJsonObject
-            val epId = (obj.get("id")?.asString ?: obj.get("episodeId")?.asString)?.trim().orEmpty()
+            val epId = (optString(obj, "id") ?: optString(obj, "episodeId"))?.trim().orEmpty()
             if (epId.isBlank()) return@forEach
 
-            val sNum = obj.get("s")?.asInt ?: obj.get("seasonNumber")?.asInt ?: 1
-            val eNum = obj.get("e")?.asInt ?: obj.get("episodeNumber")?.asInt ?: 1
-            val pos = obj.get("p")?.asLong ?: obj.get("positionMs")?.asLong ?: 0L
-            val dur = obj.get("d")?.asLong ?: obj.get("durationMs")?.asLong ?: 0L
-            val ts = normalizeTimestampMs(obj.get("ts")?.asLong ?: obj.get("timestamp")?.asLong ?: 0L)
+            val sNum = optInt(obj, "s") ?: optInt(obj, "sn") ?: optInt(obj, "seasonNumber") ?: 1
+            val eNum = optInt(obj, "e") ?: optInt(obj, "en") ?: optInt(obj, "episodeNumber") ?: 1
+            val pos = optLong(obj, "p") ?: optLong(obj, "positionMs") ?: 0L
+            val dur = optLong(obj, "d") ?: optLong(obj, "durationMs") ?: 0L
+            val ts = normalizeTimestampMs(
+                optLong(obj, "ts") ?: optLong(obj, "timestamp") ?: optLong(obj, "timestampMs") ?: 0L
+            )
+            if (ts > maxTs) maxTs = ts
+
             val frac = if (dur > 0L) (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f) else 0f
             val epTitle = activeTitlesById[epId].orEmpty()
 
@@ -367,32 +585,45 @@ object DesktopWatchHistorySync {
             }
         }
 
-        return result
+        if (maxTs > 0L) {
+            result["global_latest_timestamp"] = DesktopTypedEntry("long", maxTs)
+        }
+
+        return ParsedActiveSync(entries = result, latestTimestampMs = maxTs)
     }
 
-    private fun parseArchiveJson(archiveJson: String): Pair<Set<String>, Map<String, DesktopArchivedHistoryEntry>> {
+    private fun parseArchiveJson(archiveJson: String): ParsedArchiveSync {
         val ids = mutableSetOf<String>()
         val items = mutableMapOf<String, DesktopArchivedHistoryEntry>()
+        var maxTs = 0L
         try {
             val root = JsonParser.parseString(archiveJson).asJsonObject
-            root.getAsJsonArray("watchedIds")?.forEach { el ->
-                val id = el.asString.trim()
-                if (id.isNotBlank()) ids.add(id)
+            maxTs = normalizeTimestampMs(optLong(root, "updatedAt") ?: 0L)
+
+            root.get("watchedIds")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { el ->
+                if (el != null && !el.isJsonNull && el.isJsonPrimitive) {
+                    val id = el.asString.trim()
+                    if (id.isNotBlank()) ids.add(id)
+                }
             }
-            root.getAsJsonArray("items")?.forEach { el ->
-                if (!el.isJsonObject) return@forEach
+            root.get("items")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { el ->
+                if (el == null || !el.isJsonObject) return@forEach
                 val obj = el.asJsonObject
-                val id = obj.get("id")?.asString?.trim().orEmpty()
+                val id = optString(obj, "id")?.trim().orEmpty()
                 if (id.isBlank()) return@forEach
 
-                val title = obj.get("t")?.asString ?: obj.get("title")?.asString ?: ""
-                val pos = obj.get("p")?.asLong ?: obj.get("positionMs")?.asLong ?: 0L
-                val dur = obj.get("d")?.asLong ?: obj.get("durationMs")?.asLong ?: 0L
-                val ts = normalizeTimestampMs(obj.get("ts")?.asLong ?: obj.get("timestamp")?.asLong ?: 0L)
-                val isWatched = obj.get("w")?.asBoolean ?: obj.get("isWatched")?.asBoolean ?: true
-                val seriesId = (obj.get("sid")?.asString ?: obj.get("seriesId")?.asString)?.trim()?.ifBlank { null }
-                val sNum = obj.get("sn")?.asInt ?: obj.get("s")?.asInt ?: obj.get("seasonNumber")?.asInt ?: 0
-                val eNum = obj.get("en")?.asInt ?: obj.get("e")?.asInt ?: obj.get("episodeNumber")?.asInt ?: 0
+                val title = optString(obj, "t") ?: optString(obj, "title") ?: ""
+                val pos = optLong(obj, "p") ?: optLong(obj, "positionMs") ?: 0L
+                val dur = optLong(obj, "d") ?: optLong(obj, "durationMs") ?: 0L
+                val ts = normalizeTimestampMs(
+                    optLong(obj, "ts") ?: optLong(obj, "timestamp") ?: optLong(obj, "timestampMs") ?: 0L
+                )
+                if (ts > maxTs) maxTs = ts
+
+                val isWatched = optBoolean(obj, "w") ?: optBoolean(obj, "isWatched") ?: true
+                val seriesId = (optString(obj, "sid") ?: optString(obj, "seriesId"))?.trim()?.ifBlank { null }
+                val sNum = optInt(obj, "sn") ?: optInt(obj, "s") ?: optInt(obj, "seasonNumber") ?: 0
+                val eNum = optInt(obj, "en") ?: optInt(obj, "e") ?: optInt(obj, "episodeNumber") ?: 0
 
                 if (isWatched) ids.add(id)
                 items[id] = DesktopArchivedHistoryEntry(
@@ -408,9 +639,33 @@ object DesktopWatchHistorySync {
                 )
             }
         } catch (e: Exception) {
-            println("[ClotubeSync] Could not parse $ARCHIVE_SYNC_FILE:${e.message}")
+            println("[ClotubeSync] Could not parse $ARCHIVE_SYNC_FILE: ${e.message}")
         }
-        return ids to items
+        return ParsedArchiveSync(watchedIds = ids, items = items, latestTimestampMs = maxTs)
+    }
+
+    private fun optString(obj: JsonObject, key: String): String? {
+        val el: JsonElement = obj.get(key) ?: return null
+        if (el.isJsonNull || !el.isJsonPrimitive) return null
+        return runCatching { el.asString }.getOrNull()
+    }
+
+    private fun optLong(obj: JsonObject, key: String): Long? {
+        val el: JsonElement = obj.get(key) ?: return null
+        if (el.isJsonNull || !el.isJsonPrimitive) return null
+        return runCatching { el.asLong }.getOrNull()
+    }
+
+    private fun optInt(obj: JsonObject, key: String): Int? {
+        val el: JsonElement = obj.get(key) ?: return null
+        if (el.isJsonNull || !el.isJsonPrimitive) return null
+        return runCatching { el.asInt }.getOrNull()
+    }
+
+    private fun optBoolean(obj: JsonObject, key: String): Boolean? {
+        val el: JsonElement = obj.get(key) ?: return null
+        if (el.isJsonNull || !el.isJsonPrimitive) return null
+        return runCatching { el.asBoolean }.getOrNull()
     }
 
     private fun buildActiveSyncJsonString(entries: Map<String, DesktopTypedEntry>): String {
@@ -435,13 +690,18 @@ object DesktopWatchHistorySync {
 
         val watchedArr = JsonArray()
         val activeArr = JsonArray()
+        var maxPayloadTs = normalizeTimestampMs(
+            (entries["global_latest_timestamp"]?.value as? Number)?.toLong() ?: 0L
+        )
 
         val sortedItems = itemIds.mapNotNull { id ->
             val title = (entries["${id}_title"]?.value as? String).orEmpty()
             val pos = (entries["${id}_pos"]?.value as? Number)?.toLong() ?: 0L
             val dur = (entries["${id}_dur"]?.value as? Number)?.toLong() ?: 0L
             val frac = (entries["${id}_fraction"]?.value as? Number)?.toFloat() ?: 0f
-            val ts = (entries["${id}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+            val ts = normalizeTimestampMs((entries["${id}_timestamp"]?.value as? Number)?.toLong() ?: 0L)
+            if (ts > maxPayloadTs) maxPayloadTs = ts
+
             val explicitWatched = entries["${id}_is_watched"]?.value as? Boolean
             val isWatched = explicitWatched ?: (frac >= 0.90f)
             val seriesId = (entries["${id}_series_id"]?.value as? String)?.ifBlank { null }
@@ -481,7 +741,8 @@ object DesktopWatchHistorySync {
             val eNum = (entries["${prefix}_episode_num"]?.value as? Number)?.toInt() ?: 1
             val posMs = (entries["${prefix}_pos_ms"]?.value as? Number)?.toLong() ?: 0L
             val durMs = (entries["${prefix}_dur_ms"]?.value as? Number)?.toLong() ?: 0L
-            val ts = (entries["${prefix}_timestamp"]?.value as? Number)?.toLong() ?: 0L
+            val ts = normalizeTimestampMs((entries["${prefix}_timestamp"]?.value as? Number)?.toLong() ?: 0L)
+            if (ts > maxPayloadTs) maxPayloadTs = ts
 
             resumeObj.add(sid, JsonObject().apply {
                 addProperty("id", epId)
@@ -493,9 +754,10 @@ object DesktopWatchHistorySync {
             })
         }
 
+        val effectiveUpdatedAt = if (maxPayloadTs > 0L) maxPayloadTs else System.currentTimeMillis()
         val root = JsonObject().apply {
             addProperty("v", 2)
-            addProperty("updatedAt", System.currentTimeMillis())
+            addProperty("updatedAt", effectiveUpdatedAt)
             add("active", activeArr)
             add("resume", resumeObj)
             add("watchedIds", watchedArr)
@@ -517,7 +779,7 @@ object DesktopWatchHistorySync {
                 addProperty("t", item.title)
                 addProperty("p", item.positionMs)
                 addProperty("d", item.durationMs)
-                addProperty("ts", item.timestamp)
+                addProperty("ts", normalizeTimestampMs(item.timestamp))
                 addProperty("w", item.isWatched)
                 if (!item.seriesId.isNullOrBlank()) addProperty("sid", item.seriesId)
                 if (item.seasonNumber > 0) addProperty("sn", item.seasonNumber)
@@ -558,9 +820,44 @@ object DesktopWatchHistorySync {
                 )
 
                 if (updateArchive) {
+                    val activeItemIds = activeSnapshot.keys
+                        .filter { it.endsWith("_timestamp") && !it.startsWith("series_resume_") && !it.startsWith("global_") }
+                        .map { it.removeSuffix("_timestamp") }
+                        .toSet()
+
+                    val archiveFileId = cachedArchiveFileId.get()
+                        ?: findFileInHistoryFolder(drive, historyFolderId, ARCHIVE_SYNC_FILE)?.also {
+                            cachedArchiveFileId.set(it)
+                        }
+                    val remoteArchiveRaw = archiveFileId?.let { downloadJsonFile(drive, it) }
+                    val remoteParsed = if (!remoteArchiveRaw.isNullOrBlank()) {
+                        parseArchiveJson(remoteArchiveRaw)
+                    } else {
+                        ParsedArchiveSync(emptySet(), emptyMap(), 0L)
+                    }
+
+                    val mergedItems = LinkedHashMap<String, DesktopArchivedHistoryEntry>()
+                    for ((id, remoteItem) in remoteParsed.items) {
+                        if (id !in activeItemIds) {
+                            mergedItems[id] = remoteItem
+                        }
+                    }
+                    for ((id, localItem) in DesktopWatchHistoryManager.snapshotArchivedItems()) {
+                        if (id in activeItemIds) continue
+                        val existing = mergedItems[id]
+                        if (existing == null || normalizeTimestampMs(localItem.timestamp) >= normalizeTimestampMs(existing.timestamp)) {
+                            mergedItems[id] = localItem
+                        }
+                    }
+
+                    val mergedIds = LinkedHashSet<String>()
+                    remoteParsed.watchedIds.filterTo(mergedIds) { it !in activeItemIds }
+                    DesktopWatchHistoryManager.snapshotArchivedIds().filterTo(mergedIds) { it !in activeItemIds }
+                    mergedItems.values.filter { it.isWatched }.mapTo(mergedIds) { it.id }
+
                     val archiveJson = buildArchiveJsonString(
-                        archiveIds = DesktopWatchHistoryManager.snapshotArchivedIds(),
-                        archivedItems = DesktopWatchHistoryManager.snapshotArchivedItems()
+                        archiveIds = mergedIds,
+                        archivedItems = mergedItems
                     )
                     val archiveMedia = ByteArrayContent.fromString("application/json", archiveJson)
                     upsertHistoryFile(
@@ -661,10 +958,39 @@ object DesktopWatchHistorySync {
 
     fun flushBlockingOnWindowClose() {
         debouncedProgressJob?.cancel()
-        if (DesktopWatchHistoryManager.snapshotEntries().isEmpty()) return
+        val email = activeUserEmail.ifBlank { DesktopProfileManager.getActiveEmail().orEmpty() }
+        if (email.isNotBlank()) {
+            val latestTs = DesktopWatchHistoryManager.getLatestTimestampMs()
+            val cachedLib = DesktopLibraryCache.loadSync(email)
+            val cachedMovies = cachedLib?.movies.orEmpty()
+            val cachedSeries = cachedLib?.series.orEmpty()
+            val latestCw = DesktopWatchHistoryManager.resolveLatestContinueWatching(email, cachedMovies, cachedSeries)
+            val snapshotPayload = latestCw ?: ContinueWatchingDisplayData(
+                mediaId = "",
+                confirmedEmpty = true,
+                updatedAt = latestTs
+            )
+            DesktopContinueWatchingSnapshotStore.writeSnapshotBlocking(email, snapshotPayload)
+
+            val shelfItems = DesktopWatchHistoryManager.getContinueWatching(email, cachedMovies, cachedSeries)
+            DesktopContinueWatchingSnapshotStore.writeShelfSnapshotBlocking(
+                userEmail = email,
+                items = shelfItems,
+                updatedAt = latestTs,
+                confirmedEmpty = shelfItems.isEmpty()
+            )
+        }
+        if (DesktopWatchHistoryManager.snapshotEntries().isEmpty() &&
+            DesktopWatchHistoryManager.getLatestTimestampMs() <= 0L
+        ) {
+            return
+        }
+        if (!isInternetAvailable()) return
         runCatching {
             runBlocking(Dispatchers.IO) {
-                executeDirectUpload(DesktopSyncPriority.CRITICAL_WATCH_STATE, updateArchive = false)
+                withTimeoutOrNull(4000L) {
+                    executeDirectUpload(DesktopSyncPriority.CRITICAL_WATCH_STATE, updateArchive = false)
+                }
             }
         }
     }

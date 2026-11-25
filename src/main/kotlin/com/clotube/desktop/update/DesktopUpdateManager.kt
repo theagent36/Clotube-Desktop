@@ -25,7 +25,7 @@ object DesktopUpdateManager {
         "https://api.github.com/repos/theagent36/Clotube-Desktop/releases/latest"
 
     // Fallback version used only when running via `.\gradlew.bat run` (where jpackage.app-version is null)
-    private const val DEV_FALLBACK_VERSION = "2.1.5"
+    private const val DEV_FALLBACK_VERSION = "2.1.6"
 
     private const val MAX_DOWNLOAD_ATTEMPTS = 5
     private const val CONNECT_TIMEOUT_SEC = 30L
@@ -72,27 +72,34 @@ object DesktopUpdateManager {
     }
 
     private fun getEmbeddedLatestRelease(version: String): CachedReleaseNoteEntry {
-        val targetVersion = if (version.isBlank() || version == "2.0.9" || version == "2.1.1" || version == "2.1.2" || version == "2.1.3" || version == "2.1.4" || version == "2.1.5") "2.1.5" else version
-        val title = if (targetVersion == "2.1.5") {
-            "Zero-Cache Direct-to-Drive History Sync & UI Polish"
+        val targetVersion = if (version.isBlank() || version in listOf("2.0.9", "2.1.1", "2.1.2", "2.1.3", "2.1.4", "2.1.5", "2.1.6")) "2.1.6" else version
+        val title = if (targetVersion == "2.1.6") {
+            "Clotube Desktop v2.1.6 - Hero Framing, About Credit & Full Release"
         } else {
             "What's New in Clotube v$targetVersion"
         }
 
         val body = """
-            ### Zero-Cache Direct-to-Drive Watch History Sync
-            - **Eliminated Local Disk Cache Conflicts:** Removed all local watch-history JSON caches (`watch_history.json`, `clotube_watch_history.json`) and added an automatic startup disk purge under `%APPDATA%\Clotube\profiles` (while preserving your Watchlist, recent searches, library metadata, and OAuth credentials) so stale local files never overwrite newer cross-device progress.
-            - **Pure RAM State & Android V2 Schema Parity:** Refactored `DesktopWatchHistoryManager` and `DesktopWatchHistorySync` to hold active and archived watch state purely in memory and sync directly with `clotube/History/clotube_active_sync.json` and `clotube/History/clotube_archive.json` using the unified V2 schema (`v = 2`, `active`, `resume`, `watchedIds`).
-            - **Cold-Launch Boot-Gating & Window-Focus Sync:** Awaits initial Google Drive watch-history sync before unlocking the Home Screen **Continue Watching** hero slot, and automatically pulls fresh progress whenever the Clotube Desktop window regains focus.
-            - **Clean Exit & Shutdown Flush:** Added synchronous window-close and JVM shutdown flushing so closing Clotube Desktop finishes uploading your latest playback position to Google Drive before exit.
+            ### Hero Banner Framing & About Section Polish
+            - **Right-Aligned Hero Artwork & Face-Safe Framing:** Constrained hero banner artwork to the right 62% of **Home**, **Movies**, and **Series** with a multi-stop horizontal fade into `#0B0F17`, keeping titles, episode metadata, and action buttons 100% legible while preventing top-edge cropping on portrait headshots and landscape thumbnails.
+            - **Developer Attribution in Settings:** Added **"Made by Angshuman Mondal"** with a direct clickable link to `github.com/theagent36` inside **Settings → About**.
 
-            ### Continue Watching & UI Polish
-            - **Duplicate Remaining-Time Badge Fix:** Fixed the **Continue Watching** card capsule badge where `"left"` was appended twice (e.g., `1h 18m left left` -> `1h 18m left`).
+            ### Zero-Cache Direct-to-Drive Watch History & Cross-Device V2 Sync
+            - **Pure RAM State & Drive V2 Parity:** Eliminated local disk watch-history JSON caches and synced active and archived playback state directly with `clotube/History/clotube_active_sync.json` and `clotube/History/clotube_archive.json` (`v = 2`, `active`, `resume`, `watchedIds`).
+            - **Dedicated Watchlist & Off-Drive Additions:** Track movies and series independently of Google Drive file IDs with Studio Obsidian status chips (**All**, **Watched**, **Watch Later**, **Rewatch**, **Not in Drive**), `+ Add Title` for off-Drive titles, right-click status tagging, and global search badges.
+
+            ### Resilient 3-Tier IPv4 In-App Auto-Updater & Release Notes
+            - **IPv4-First 3-Tier Download Pipeline:** Eliminated `0.0 MB` download stalls using IPv4-enforced `curl.exe` with HTTP Range resume, an `HTTP/1.1` `HttpClient` with active stall watchdog, and a `.NET WebClient` fallback.
+            - **Zero-Popup Background Installer & What's New Modal:** Uses a silent GUI-subsystem `wscript.exe` runner with zero `cmd.exe` console windows or UAC prompts, paired with a Studio Obsidian **What's New** release notes showcase.
+
+            ### VLC-Style Subtitle Scaling, Fullscreen Stability & UI Cleanup
+            - **Real-Time `Ctrl + Scroll` Subtitle Zoom:** Resize subtitles dynamically between **25% and 300%** (`±5%` steps) with a live OSD percentage badge, default scale presets in **Settings → Audio & Subtitles**, and a native Windows 11 dark-mode external subtitle file picker (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`).
+            - **Fullscreen Episode-Switching & Offline Resilience:** Fixed native LibVLC teardown/init races and keyboard focus loss during fullscreen `Next Episode` transitions, added a pure-black player loading fade-out, live **Online / Offline** network indicator, and streamlined navigation.
         """.trimIndent()
 
         return CachedReleaseNoteEntry(
             version = targetVersion,
-            tagName = if (targetVersion == "2.1.5") "v2.1.5" else "v$targetVersion",
+            tagName = if (targetVersion == "2.1.6") "v2.1.6" else "v$targetVersion",
             title = title,
             body = body
         )

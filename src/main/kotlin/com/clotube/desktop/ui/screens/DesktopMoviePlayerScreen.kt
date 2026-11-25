@@ -84,11 +84,13 @@ import com.clotube.desktop.data.DesktopWatchlistSync
 import com.clotube.desktop.data.MovieRichDetails
 import com.clotube.desktop.data.WatchlistMediaType
 import com.clotube.desktop.data.WatchlistStatus
+import com.clotube.desktop.image.ArtworkProvenance
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopMediaItem
-import com.clotube.desktop.ui.components.ThumbnailSize
-import com.clotube.desktop.ui.components.rememberThumbnailBitmap
+import com.clotube.desktop.ui.state.HeroSlotStateMachine
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import uk.co.caprica.vlcj.player.base.MediaPlayer
@@ -180,7 +182,22 @@ fun DesktopMoviePlayerScreen(
     LaunchedEffect(currentPlayingMovie.id, currentPlayingMovie.title) {
         isFetchingRichDetails = true
         try {
-            richDetails = DesktopOnlineMetadataResolver.resolveMovieRichDetails(currentPlayingMovie.title)
+            val resolved = DesktopOnlineMetadataResolver.resolveMovieRichDetails(currentPlayingMovie.title)
+            richDetails = resolved
+            if (resolved != null &&
+                DesktopCanonicalImageCache.classifyProvenance(resolved.posterUrl) == ArtworkProvenance.OFFICIAL_CATALOG
+            ) {
+                DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                    canonicalKey = DesktopCanonicalImageCache.moviePosterKey(currentPlayingMovie.id),
+                    officialUrl = resolved.posterUrl,
+                    linkedMediaId = currentPlayingMovie.id
+                )
+                HeroSlotStateMachine.enrichContinueWatchingInPlace(
+                    mediaId = currentPlayingMovie.id,
+                    officialArtworkUrl = resolved.posterUrl,
+                    resolvedTitle = resolved.officialTitle.ifBlank { null }
+                )
+            }
         } catch (_: Exception) {
         } finally {
             isFetchingRichDetails = false
@@ -337,21 +354,19 @@ fun DesktopMoviePlayerScreen(
             val curMs = if (p.currentTimeMs > 0L) p.currentTimeMs else maxObservedPositionMs
             val durMs = if (p.totalDurationMs > 0L) p.totalDurationMs else lastKnownDurationMs
             if (curMs > 1000L && userEmail.isNotBlank()) {
-                progressSaveScope.launch {
-                    try {
-                        DesktopWatchHistoryManager.recordPlaybackProgress(
-                            email = userEmail,
-                            fileId = currentPlayingMovie.id,
-                            title = currentPlayingMovie.title,
-                            positionMs = curMs,
-                            durationMs = durMs,
-                            isSeries = false,
-                            accessToken = accessToken
-                        )
-                        DesktopWatchHistorySync.pushHistoryAsync(force = !p.isPlaying)
-                    } catch (t: Throwable) {
-                        System.err.println("[MoviePlayer] Failed to save watch progress: ${t.message}")
-                    }
+                try {
+                    DesktopWatchHistoryManager.recordPlaybackProgress(
+                        email = userEmail,
+                        fileId = currentPlayingMovie.id,
+                        title = currentPlayingMovie.title,
+                        positionMs = curMs,
+                        durationMs = durMs,
+                        isSeries = false,
+                        accessToken = accessToken
+                    )
+                    DesktopWatchHistorySync.pushHistoryAsync(force = !p.isPlaying)
+                } catch (t: Throwable) {
+                    System.err.println("[MoviePlayer] Failed to save watch progress: ${t.message}")
                 }
             }
         }
@@ -1447,9 +1462,10 @@ fun DesktopMoviePlayerScreen(
                                                     .clip(RoundedCornerShape(6.dp))
                                                     .background(Color(0xFF0A0D14))
                                             ) {
-                                                val railThumbBitmap = rememberThumbnailBitmap(
-                                                    primaryUrl = movie.thumbnailUrl,
-                                                    size = ThumbnailSize.CARD
+                                                val railThumbBitmap = rememberCanonicalArtwork(
+                                                    canonicalKey = DesktopCanonicalImageCache.moviePosterKey(movie.id),
+                                                    candidateUrl = movie.thumbnailUrl.orEmpty(),
+                                                    accessToken = accessToken
                                                 )
                                                 if (railThumbBitmap != null) {
                                                     Image(

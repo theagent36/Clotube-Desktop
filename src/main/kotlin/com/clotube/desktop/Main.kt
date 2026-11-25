@@ -20,13 +20,16 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.clotube.desktop.auth.DesktopAuthManager
 import com.clotube.desktop.data.DesktopAppSettings
+import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.ui.components.DesktopReleaseNotesOverlay
 import com.clotube.desktop.ui.components.DesktopUpdateOverlay
 import com.clotube.desktop.ui.screens.DesktopBootScreen
+import com.clotube.desktop.ui.state.HeroSlotStateMachine
 import com.clotube.desktop.update.DesktopUpdateManager
 import com.sun.jna.Native
 import com.sun.jna.NativeLibrary
@@ -203,6 +206,14 @@ fun main() {
     }, "Clotube-ShutdownHook"))
 
     LocalStreamServer.start()
+
+    runCatching {
+        val savedAuth = DesktopAuthManager.getSavedAuthState()
+        if (savedAuth.isSignedIn && savedAuth.userEmail.isNotBlank()) {
+            DesktopWatchHistoryManager.bindProfile(savedAuth.userEmail)
+            HeroSlotStateMachine.hydrateFromLocalSnapshot(savedAuth.userEmail)
+        }
+    }
 
     application {
         val initialPlacement = if (DesktopAppSettings.state.launchMaximized) {

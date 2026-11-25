@@ -38,9 +38,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.clotube.desktop.data.*
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.model.DesktopMediaItem
-import com.clotube.desktop.ui.components.ThumbnailSize
-import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -730,12 +730,23 @@ private fun WatchlistRowCard(
             ?: entry.posterUrl?.takeIf { it.isNotBlank() }
     }
 
-    val thumbBitmap = rememberThumbnailBitmap(
-        primaryUrl = primaryPosterUrl,
-        fallbackUrl = fallbackPosterUrl,
+    val canonicalKey = remember(matchedMedia?.id, entry.driveId, entry.id, entry.mediaType) {
+        val driveKeyId = matchedMedia?.id?.takeIf { it.isNotBlank() } ?: entry.driveId?.takeIf { it.isNotBlank() }
+        if (driveKeyId != null) {
+            if (entry.mediaType == WatchlistMediaType.SERIES) {
+                DesktopCanonicalImageCache.seriesPosterKey(driveKeyId)
+            } else {
+                DesktopCanonicalImageCache.moviePosterKey(driveKeyId)
+            }
+        } else {
+            "watchlist_poster_${entry.id}"
+        }
+    }
+    val thumbBitmap = rememberCanonicalArtwork(
+        canonicalKey = canonicalKey,
+        candidateUrl = primaryPosterUrl.orEmpty(),
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
+        fallbackUrl = fallbackPosterUrl
     )
 
     Surface(

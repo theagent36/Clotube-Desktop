@@ -3,6 +3,7 @@ package com.clotube.desktop.data
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.clotube.desktop.image.DesktopCanonicalImageCache
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
@@ -105,6 +106,7 @@ object DesktopAppSettings {
             if (seriesDir.exists()) {
                 seriesDir.walkTopDown().filter { it.isFile }.forEach { total += it.length() }
             }
+            total += DesktopCanonicalImageCache.calculateDiskCacheBytes()
         } catch (_: Exception) {}
         total
     }
@@ -116,6 +118,7 @@ object DesktopAppSettings {
                 thumbDir.deleteRecursively()
                 thumbDir.mkdirs()
             }
+            DesktopCanonicalImageCache.clearDiskCache()
         } catch (_: Exception) {}
     }
 }

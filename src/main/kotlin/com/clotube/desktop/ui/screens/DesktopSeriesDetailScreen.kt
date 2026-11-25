@@ -69,14 +69,16 @@ import com.clotube.desktop.data.DesktopWatchlistManager
 import com.clotube.desktop.data.DesktopWatchlistSync
 import com.clotube.desktop.data.WatchlistMediaType
 import com.clotube.desktop.data.WatchlistStatus
+import com.clotube.desktop.image.ArtworkProvenance
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.media.DirectMemoryVideoPlayer
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.DesktopSeason
 import com.clotube.desktop.model.DesktopSeries
-import com.clotube.desktop.ui.components.rememberThumbnailBitmap
-import com.clotube.desktop.ui.components.ThumbnailSize
+import com.clotube.desktop.ui.state.HeroSlotStateMachine
 import com.clotube.desktop.ui.components.PacedEqualizerBars
 import com.clotube.desktop.ui.components.PacedLoadingSpinner
 import com.clotube.desktop.ui.components.SubtitleCanvasOverlay
@@ -156,6 +158,7 @@ fun DesktopSeriesDetailScreen(
     // 2. Off-Thread Drive Scanning (Runs strictly on Dispatchers.IO to never block the EDT)
     LaunchedEffect(seriesItem.id, userEmail) {
         yield()
+        seriesDetails?.let { registerSeriesOfficialArtwork(it) }
         if (seriesDetails == null) {
             isLoading = true
             val loaded = withContext(Dispatchers.IO) {
@@ -163,6 +166,7 @@ fun DesktopSeriesDetailScreen(
                     val scanner = DesktopDriveScanner(accessToken)
                     val result = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
                     DesktopSeriesCache.save(userEmail, result)
+                    registerSeriesOfficialArtwork(result)
                     result
                 } catch (e: Exception) {
                     System.err.println("[DesktopSeriesDetailScreen] Failed to scan series: ${e.message}")
@@ -203,6 +207,7 @@ fun DesktopSeriesDetailScreen(
                     val fresh = scanner.loadSeriesDetails(seriesItem.id, seriesItem.title)
                     if (fresh.seasons.isNotEmpty()) {
                         DesktopSeriesCache.save(userEmail, fresh)
+                        registerSeriesOfficialArtwork(fresh)
 
                         val currentCount = seriesDetails?.seasons?.sumOf { it.episodes.size } ?: 0
                         val freshCount = fresh.seasons.sumOf { it.episodes.size }
@@ -957,74 +962,6 @@ fun DesktopSeriesDetailScreen(
                         }
                     }
                 }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    val isWatchLater = currentSeriesStatus == WatchlistStatus.WATCH_LATER
-                    Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable {
-                                val next = when (currentSeriesStatus) {
-                                    WatchlistStatus.WATCH_LATER -> WatchlistStatus.REWATCH
-                                    WatchlistStatus.REWATCH -> WatchlistStatus.WATCHED
-                                    else -> WatchlistStatus.WATCH_LATER
-                                }
-                                coroutineScope.launch {
-                                    DesktopWatchlistManager.upsertEntry(
-                                        email = userEmail,
-                                        title = seriesItem.title,
-                                        mediaType = WatchlistMediaType.SERIES,
-                                        status = next,
-                                        driveId = seriesItem.id
-                                    )
-                                    DesktopWatchlistSync.pushLocalWatchlist(userEmail, accessToken)
-                                }
-                            }
-                            .pointerHoverIcon(PointerIcon.Hand),
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (isWatchLater) Color(0xFF1E293B) else Color(0xFF131824),
-                        border = BorderStroke(1.dp, if (isWatchLater) Color(0xFF3B82F6) else Color(0xFF263346))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isWatchLater) Icons.Rounded.BookmarkAdded else Icons.Rounded.Add,
-                                contentDescription = null,
-                                tint = if (isWatchLater) Color(0xFF60A5FA) else Color.White,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = if (isWatchLater) "In Watchlist" else "My list",
-                                color = if (isWatchLater) Color(0xFF93C5FD) else Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-
-                    Surface(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { }
-                            .pointerHoverIcon(PointerIcon.Hand),
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFF131824),
-                        border = BorderStroke(1.dp, Color(0xFF263346)),
-                        contentColor = Color.White
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Rounded.MoreHoriz,
-                                contentDescription = "More",
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
             }
         }
 
@@ -1421,12 +1358,11 @@ fun DesktopSeriesDetailScreen(
                                                 }
                                             }
 
-                                            val thumbnail = rememberThumbnailBitmap(
-                                                primaryUrl = primaryEpisodeThumb,
-                                                fallbackUrl = episodeDriveThumb,
+                                            val thumbnail = rememberCanonicalArtwork(
+                                                canonicalKey = DesktopCanonicalImageCache.heroKey(ep.id),
+                                                candidateUrl = primaryEpisodeThumb ?: episodeDriveThumb,
                                                 accessToken = accessToken,
-                                                userEmail = userEmail,
-                                                size = ThumbnailSize.CARD
+                                                fallbackUrl = episodeDriveThumb
                                             )
 
                                             if (thumbnail != null) {
@@ -1766,9 +1702,50 @@ private fun AnimatedEqualizerBars(
     )
 }
 
+private fun registerSeriesOfficialArtwork(series: DesktopSeries) {
+    val seriesArt = series.backdropUrl.ifBlank { series.posterUrl }
+    if (DesktopCanonicalImageCache.classifyProvenance(seriesArt) == ArtworkProvenance.OFFICIAL_CATALOG) {
+        DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+            canonicalKey = DesktopCanonicalImageCache.seriesPosterKey(series.id),
+            officialUrl = seriesArt
+        )
+        HeroSlotStateMachine.enrichContinueWatchingInPlace(
+            mediaId = "",
+            seriesId = series.id,
+            officialArtworkUrl = seriesArt,
+            resolvedSeriesTitle = series.title
+        )
+    }
+    for (season in series.seasons) {
+        for (ep in season.episodes) {
+            val epArt = ep.thumbnailUrl
+            if (DesktopCanonicalImageCache.classifyProvenance(epArt) == ArtworkProvenance.OFFICIAL_CATALOG) {
+                DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                    canonicalKey = DesktopCanonicalImageCache.heroKey(ep.id),
+                    officialUrl = epArt,
+                    linkedMediaId = ep.id
+                )
+                HeroSlotStateMachine.enrichContinueWatchingInPlace(
+                    mediaId = ep.id,
+                    seriesId = series.id,
+                    officialArtworkUrl = epArt,
+                    resolvedSeriesTitle = series.title,
+                    resolvedEpisodeTitle = ep.title
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun rememberDriveThumbnail(url: String?, accessToken: String = "", userEmail: String = ""): ImageBitmap? {
-    return rememberThumbnailBitmap(primaryUrl = url, accessToken = accessToken, userEmail = userEmail)
+    val effectiveUrl = url.orEmpty()
+    val canonicalKey = "drive_thumb_${effectiveUrl.substringBefore('?')}"
+    return rememberCanonicalArtwork(
+        canonicalKey = canonicalKey,
+        candidateUrl = effectiveUrl,
+        accessToken = accessToken
+    )
 }
 
 @Composable

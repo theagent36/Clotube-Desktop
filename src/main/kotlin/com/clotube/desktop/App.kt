@@ -2,22 +2,21 @@ package com.clotube.desktop
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import com.clotube.desktop.auth.DesktopAuthManager
+import com.clotube.desktop.data.DesktopContinueWatchingSnapshotStore
 import com.clotube.desktop.data.DesktopDriveScanner
 import com.clotube.desktop.data.DesktopLibraryCache
 import com.clotube.desktop.data.DesktopOnlineMetadataResolver
-import com.clotube.desktop.data.DesktopProfileManager
 import com.clotube.desktop.data.DesktopThumbnailPrefetcher
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchHistorySync
 import com.clotube.desktop.data.DesktopWatchlistSync
+import com.clotube.desktop.image.ArtworkProvenance
+import com.clotube.desktop.image.DesktopCanonicalImageCache
 import com.clotube.desktop.lifecycle.AppLifecycleManager
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.network.DesktopNetworkMonitor
@@ -27,10 +26,10 @@ import com.clotube.desktop.ui.components.invalidateFailedUrl
 import com.clotube.desktop.ui.screens.DesktopHomeScreen
 import com.clotube.desktop.ui.screens.DesktopLoginScreen
 import com.clotube.desktop.ui.screens.DesktopSetupWizardScreen
+import com.clotube.desktop.ui.state.HeroSlotStateMachine
 import com.clotube.desktop.update.DesktopUpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -51,13 +50,30 @@ fun App(
     }
 
     var movies by remember(activeEmail) {
-        mutableStateOf(initialCache?.movies ?: emptyList())
+        mutableStateOf<List<DesktopMediaItem>>(initialCache?.movies ?: emptyList())
     }
     var series by remember(activeEmail) {
-        mutableStateOf(initialCache?.series ?: emptyList())
+        mutableStateOf<List<DesktopMediaItem>>(
+            initialCache?.series?.map { if (it.isSeries) it else it.copy(isSeries = true) } ?: emptyList()
+        )
     }
-    var continueWatching by remember(activeEmail) {
-        mutableStateOf<List<DesktopMediaItem>>(emptyList())
+
+    // Frame-1 cold-boot hydration from profile-scoped cw_hero_snapshot.json & cw_shelf_snapshot.json before first render
+    remember(activeEmail, authState.isSignedIn) {
+        if (activeEmail.isNotBlank() && authState.isSignedIn) {
+            DesktopWatchHistoryManager.bindProfile(activeEmail)
+            HeroSlotStateMachine.hydrateFromLocalSnapshot(activeEmail)
+            DesktopContinueWatchingSnapshotStore.readShelfSnapshot(activeEmail)
+            val cachedMovies = initialCache?.movies.orEmpty()
+            val cachedSeries = initialCache?.series?.map { if (it.isSeries) it else it.copy(isSeries = true) }.orEmpty()
+            registerCatalogOfficialArtwork(cachedMovies, cachedSeries)
+            HeroSlotStateMachine.onCatalogFeaturedAvailable(
+                selectFeaturedCatalogItem(cachedMovies, cachedSeries)
+            )
+        } else {
+            HeroSlotStateMachine.resetForProfileSwitch("")
+        }
+        activeEmail
     }
 
     // Active scan flag: True on cold start when cache is empty, or during manual rescan
@@ -149,6 +165,10 @@ fun App(
                 }
                 if (cacheModified) {
                     movies = updatedMovies
+                    registerCatalogOfficialArtwork(updatedMovies, series)
+                    HeroSlotStateMachine.onCatalogFeaturedAvailable(
+                        selectFeaturedCatalogItem(updatedMovies, series)
+                    )
                     DesktopLibraryCache.save(email, updatedMovies, series)
                 }
             }
@@ -170,6 +190,8 @@ fun App(
                     DesktopWatchHistorySync.startAutoRecoveryWorker(email) {
                         DesktopAuthManager.getCredential(email)?.accessToken ?: token
                     }
+                } else if (DesktopContinueWatchingSnapshotStore.readSnapshot(email) == null) {
+                    HeroSlotStateMachine.onContinueWatchingResolved(null, explicitClear = false)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -192,15 +214,13 @@ fun App(
         }
     }
 
-    // App shutdown flush
+    // App shutdown flush (persist cw_hero_snapshot.json synchronously + flush Drive V2)
     DisposableEffect(activeEmail, authState.accessToken) {
         val email = activeEmail
         val token = authState.accessToken
         val hook = Thread {
             if (email.isNotBlank() && token.isNotBlank()) {
-                kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                    DesktopWatchHistorySync.pushLocalHistory(email, token, force = true)
-                }
+                DesktopWatchHistorySync.flushBlockingOnWindowClose()
             }
         }
         Runtime.getRuntime().addShutdownHook(hook)
@@ -238,16 +258,19 @@ fun App(
                 val moviesJob = launch {
                     scanner.streamMovies().collect { chunk ->
                         if (authState.userEmail.equals(email, ignoreCase = true)) {
-                            if (hasExistingMedia) {
-                                // Merge without shrinking or jumping existing list
-                                movies = mergeLibraryItems(movies, chunk)
+                            val nextMovies = if (hasExistingMedia) {
+                                mergeLibraryItems(movies, chunk)
                             } else {
-                                // Cold start: assign chunk and unlock UI on first 4 items!
-                                movies = chunk
                                 if (chunk.isNotEmpty()) {
                                     isScanning = false
                                 }
+                                chunk
                             }
+                            movies = nextMovies
+                            registerCatalogOfficialArtwork(nextMovies, series)
+                            HeroSlotStateMachine.onCatalogFeaturedAvailable(
+                                selectFeaturedCatalogItem(nextMovies, series)
+                            )
                         }
                     }
                 }
@@ -256,14 +279,20 @@ fun App(
                 val seriesJob = launch {
                     scanner.streamSeriesFolders().collect { chunk ->
                         if (authState.userEmail.equals(email, ignoreCase = true)) {
-                            if (hasExistingMedia) {
-                                series = mergeLibraryItems(series, chunk)
+                            val normalizedChunk = chunk.map { if (it.isSeries) it else it.copy(isSeries = true) }
+                            val nextSeries = if (hasExistingMedia) {
+                                mergeLibraryItems(series, normalizedChunk)
                             } else {
-                                series = chunk
-                                if (chunk.isNotEmpty()) {
+                                if (normalizedChunk.isNotEmpty()) {
                                     isScanning = false
                                 }
+                                normalizedChunk
                             }
+                            series = nextSeries
+                            registerCatalogOfficialArtwork(movies, nextSeries)
+                            HeroSlotStateMachine.onCatalogFeaturedAvailable(
+                                selectFeaturedCatalogItem(movies, nextSeries)
+                            )
                         }
                     }
                 }
@@ -328,12 +357,18 @@ fun App(
                         coroutineScope.launch {
                             val newState = DesktopAuthManager.startDesktopOAuthFlow()
                             clearThumbnailMemoryCache()
+                            DesktopCanonicalImageCache.clearMemory()
+                            DesktopContinueWatchingSnapshotStore.clearMemoryForProfileSwitch()
+                            HeroSlotStateMachine.resetForProfileSwitch(newState.userEmail)
                             authState = newState
                             isAuthenticating = false
                         }
                     },
                     onSelectProfile = { selectedEmail ->
                         clearThumbnailMemoryCache()
+                        DesktopCanonicalImageCache.clearMemory()
+                        DesktopContinueWatchingSnapshotStore.clearMemoryForProfileSwitch()
+                        HeroSlotStateMachine.resetForProfileSwitch(selectedEmail)
                         val switchedState = DesktopAuthManager.switchProfile(selectedEmail)
                         authState = switchedState
                     },
@@ -342,6 +377,9 @@ fun App(
                         coroutineScope.launch {
                             val newState = DesktopAuthManager.startDesktopOAuthFlow()
                             clearThumbnailMemoryCache()
+                            DesktopCanonicalImageCache.clearMemory()
+                            DesktopContinueWatchingSnapshotStore.clearMemoryForProfileSwitch()
+                            HeroSlotStateMachine.resetForProfileSwitch(newState.userEmail)
                             authState = newState
                             isAuthenticating = false
                         }
@@ -370,20 +408,10 @@ fun App(
                         userAvatarUrl = authState.userPhotoUrl ?: "",
                         movies = movies,
                         series = series,
-                        continueWatching = continueWatching,
-                        onMediaClick = { clickedItem ->
-                            val simDuration = if (clickedItem.durationMs > 0L) clickedItem.durationMs else 7200000L
-                            val existing = continueWatching.find { it.id == clickedItem.id }
-                            val updated = existing?.copy(progressMs = (simDuration * 0.5f).toLong())
-                                ?: clickedItem.copy(durationMs = simDuration, progressMs = (simDuration * 0.2f).toLong())
-                            continueWatching = listOf(updated) + continueWatching.filter { it.id != clickedItem.id }
-                        },
-                        onClearHistory = {
-                            continueWatching = emptyList()
-                        },
-                        onRemoveHistoryItem = { item ->
-                            continueWatching = continueWatching.filter { it.id != item.id }
-                        },
+                        continueWatching = emptyList(),
+                        onMediaClick = {},
+                        onClearHistory = {},
+                        onRemoveHistoryItem = {},
                         isFullscreen = isFullscreen,
                         onToggleFullscreen = onToggleFullscreen,
                         isAppFullscreen = isFullscreen,
@@ -403,6 +431,9 @@ fun App(
                             DesktopWatchHistorySync.flushBlockingOnWindowClose()
                             DesktopWatchHistorySync.stopAutoRecoveryWorker()
                             DesktopWatchHistoryManager.clearInMemory()
+                            DesktopContinueWatchingSnapshotStore.clearMemoryForProfileSwitch(activeEmail)
+                            HeroSlotStateMachine.resetForProfileSwitch("")
+                            DesktopCanonicalImageCache.clearMemory()
                             DesktopWatchHistorySync.invalidateCache()
                             clearThumbnailMemoryCache()
                             DesktopLibraryCache.clearMemory(activeEmail)
@@ -410,7 +441,6 @@ fun App(
                             // Immediately flush in-memory states
                             movies = emptyList()
                             series = emptyList()
-                            continueWatching = emptyList()
                             isScanning = false
                             authState = DesktopAuthManager.getSavedAuthState()
                         }
@@ -429,6 +459,59 @@ fun App(
 }
 }
 
+private fun selectFeaturedCatalogItem(
+    movies: List<DesktopMediaItem>,
+    series: List<DesktopMediaItem>
+): DesktopMediaItem? {
+    return movies.firstOrNull {
+        DesktopCanonicalImageCache.classifyProvenance(it.thumbnailUrl) == ArtworkProvenance.OFFICIAL_CATALOG
+    } ?: movies.firstOrNull()
+        ?: series.firstOrNull {
+            DesktopCanonicalImageCache.classifyProvenance(it.thumbnailUrl) == ArtworkProvenance.OFFICIAL_CATALOG
+        }?.let { if (it.isSeries) it else it.copy(isSeries = true) }
+        ?: series.firstOrNull()?.let { if (it.isSeries) it else it.copy(isSeries = true) }
+}
+
+private fun registerCatalogOfficialArtwork(
+    movies: List<DesktopMediaItem>,
+    series: List<DesktopMediaItem>
+) {
+    for (movie in movies) {
+        val url = movie.thumbnailUrl?.takeIf {
+            DesktopCanonicalImageCache.classifyProvenance(it) == ArtworkProvenance.OFFICIAL_CATALOG
+        }
+        if (url != null) {
+            DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                canonicalKey = DesktopCanonicalImageCache.moviePosterKey(movie.id),
+                officialUrl = url,
+                linkedMediaId = movie.id
+            )
+            HeroSlotStateMachine.enrichContinueWatchingInPlace(
+                mediaId = movie.id,
+                officialArtworkUrl = url,
+                resolvedTitle = movie.title
+            )
+        }
+    }
+    for (show in series) {
+        val url = show.thumbnailUrl?.takeIf {
+            DesktopCanonicalImageCache.classifyProvenance(it) == ArtworkProvenance.OFFICIAL_CATALOG
+        }
+        if (url != null) {
+            DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                canonicalKey = DesktopCanonicalImageCache.seriesPosterKey(show.id),
+                officialUrl = url
+            )
+            HeroSlotStateMachine.enrichContinueWatchingInPlace(
+                mediaId = "",
+                seriesId = show.id,
+                officialArtworkUrl = url,
+                resolvedSeriesTitle = show.title
+            )
+        }
+    }
+}
+
 /**
  * Merges fresh items while keeping existing item references and positions stable.
  */
@@ -437,7 +520,19 @@ private fun mergeLibraryItems(
     fresh: List<DesktopMediaItem>
 ): List<DesktopMediaItem> {
     if (current.isEmpty()) return fresh
-    val currentIds = current.map { it.id }.toSet()
-    val newAdditions = fresh.filterNot { currentIds.contains(it.id) }
-    return if (newAdditions.isEmpty()) current else current + newAdditions
+    val currentById = current.associateBy { it.id }
+    val freshById = fresh.associateBy { it.id }
+    val updatedExisting = current.map { existing ->
+        val incoming = freshById[existing.id]
+        if (incoming != null &&
+            DesktopCanonicalImageCache.classifyProvenance(incoming.thumbnailUrl) == ArtworkProvenance.OFFICIAL_CATALOG &&
+            incoming.thumbnailUrl != existing.thumbnailUrl
+        ) {
+            incoming
+        } else {
+            existing
+        }
+    }
+    val newAdditions = fresh.filterNot { currentById.containsKey(it.id) }
+    return if (newAdditions.isEmpty()) updatedExisting else updatedExisting + newAdditions
 }

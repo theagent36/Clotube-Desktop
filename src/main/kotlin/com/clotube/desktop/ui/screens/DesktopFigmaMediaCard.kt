@@ -40,8 +40,9 @@ import androidx.compose.ui.unit.sp
 import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchlistManager
 import com.clotube.desktop.data.WatchlistStatus
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.model.DesktopMediaItem
-import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.launch
 
 @Composable
@@ -50,7 +51,8 @@ fun DesktopFigmaMediaCard(
     accessToken: String = "",
     userEmail: String = "",
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isSeries: Boolean = item.isSeries
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
@@ -81,10 +83,15 @@ fun DesktopFigmaMediaCard(
         )
     }
 
-    val thumbnailBitmap = rememberThumbnailBitmap(
-        primaryUrl = item.thumbnailUrl,
-        fallbackUrl = item.fallbackThumbnailUrl,
-        accessToken = accessToken
+    val canonicalKey = remember(item.id, isSeries) {
+        if (isSeries) DesktopCanonicalImageCache.seriesPosterKey(item.id)
+        else DesktopCanonicalImageCache.moviePosterKey(item.id)
+    }
+    val thumbnailBitmap = rememberCanonicalArtwork(
+        canonicalKey = canonicalKey,
+        candidateUrl = item.thumbnailUrl.orEmpty(),
+        accessToken = accessToken,
+        fallbackUrl = item.fallbackThumbnailUrl
     )
 
     val watchlistRevision = DesktopWatchlistManager.watchlistRevision.intValue

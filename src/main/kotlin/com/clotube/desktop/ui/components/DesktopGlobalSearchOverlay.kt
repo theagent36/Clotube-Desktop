@@ -51,6 +51,8 @@ import com.clotube.desktop.data.DesktopWatchHistoryManager
 import com.clotube.desktop.data.DesktopWatchlistManager
 import com.clotube.desktop.data.RecentSearchEntry
 import com.clotube.desktop.data.WatchlistStatus
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.model.DesktopMediaItem
 import com.clotube.desktop.model.GlobalSearchResult
 import com.clotube.desktop.model.SearchMediaType
@@ -1166,12 +1168,25 @@ private fun GlobalSearchResultCard(
         result.driveMediaItem?.fallbackThumbnailUrl.orEmpty()
     }.ifBlank { null }
 
-    val thumb = rememberThumbnailBitmap(
-        primaryUrl = result.posterUrl.ifBlank { null },
-        fallbackUrl = fallbackThumb,
+    val canonicalKey = remember(result.id, result.mediaType, result.driveMediaItem?.id) {
+        val driveId = result.driveMediaItem?.id?.takeIf { it.isNotBlank() }
+        when (result.mediaType) {
+            SearchMediaType.EPISODE ->
+                if (driveId != null) DesktopCanonicalImageCache.heroKey(driveId)
+                else "search_ep_${result.id}"
+            SearchMediaType.TV_SERIES ->
+                if (driveId != null) DesktopCanonicalImageCache.seriesPosterKey(driveId)
+                else "search_series_${result.id}"
+            SearchMediaType.MOVIE ->
+                if (driveId != null) DesktopCanonicalImageCache.moviePosterKey(driveId)
+                else "search_movie_${result.id}"
+        }
+    }
+    val thumb = rememberCanonicalArtwork(
+        canonicalKey = canonicalKey,
+        candidateUrl = result.posterUrl,
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
+        fallbackUrl = fallbackThumb
     )
 
     val isEpisode = result.mediaType == SearchMediaType.EPISODE
@@ -1539,20 +1554,17 @@ fun ExternalTitlePreviewModal(
     }
     val activeStatus = existingEntry?.status
 
-    val posterBitmap = rememberThumbnailBitmap(
-        primaryUrl = enrichedResult.posterUrl.ifBlank { null },
-        fallbackUrl = enrichedResult.backdropUrl.ifBlank { null },
+    val posterBitmap = rememberCanonicalArtwork(
+        canonicalKey = "search_preview_poster_${enrichedResult.id}",
+        candidateUrl = enrichedResult.posterUrl,
         accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
+        fallbackUrl = enrichedResult.backdropUrl.ifBlank { null }
     )
 
-    val backdropBitmap = rememberThumbnailBitmap(
-        primaryUrl = enrichedResult.backdropUrl.ifBlank { null },
-        fallbackUrl = null,
-        accessToken = accessToken,
-        userEmail = userEmail,
-        size = ThumbnailSize.CARD
+    val backdropBitmap = rememberCanonicalArtwork(
+        canonicalKey = "search_preview_backdrop_${enrichedResult.id}",
+        candidateUrl = enrichedResult.backdropUrl,
+        accessToken = accessToken
     )
 
     fun applyWatchlistStatus(status: WatchlistStatus) {

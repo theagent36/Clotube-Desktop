@@ -44,10 +44,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clotube.desktop.data.DesktopAppSettings
+import com.clotube.desktop.image.DesktopCanonicalImageCache
+import com.clotube.desktop.image.rememberCanonicalArtwork
 import com.clotube.desktop.media.LocalStreamServer
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
-import com.clotube.desktop.ui.components.rememberThumbnailBitmap
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
@@ -712,7 +713,10 @@ private fun InlineEpisodePlaylistItem(
         label = "InlineEpisodeBorder"
     )
 
-    val thumb = rememberThumbnailBitmap(primaryUrl = episode.thumbnailUrl)
+    val thumb = rememberCanonicalArtwork(
+        canonicalKey = DesktopCanonicalImageCache.heroKey(episode.id),
+        candidateUrl = episode.thumbnailUrl.orEmpty()
+    )
 
     Box(
         modifier = Modifier

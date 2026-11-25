@@ -1,5 +1,7 @@
 package com.clotube.desktop.data
 
+import com.clotube.desktop.image.ArtworkProvenance
+import com.clotube.desktop.image.DesktopCanonicalImageCache
 import com.clotube.desktop.network.DesktopNetworkMonitor
 import com.clotube.desktop.model.DesktopEpisode
 import com.clotube.desktop.model.DesktopMediaItem
@@ -131,6 +133,13 @@ class DesktopDriveScanner(
                             ?: "https://drive.google.com/thumbnail?id=$resolvedId&sz=w800"
 
                         val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
+                        if (DesktopCanonicalImageCache.classifyProvenance(meta.posterUrl) == ArtworkProvenance.OFFICIAL_CATALOG) {
+                            DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                                canonicalKey = DesktopCanonicalImageCache.moviePosterKey(resolvedId),
+                                officialUrl = meta.posterUrl,
+                                linkedMediaId = resolvedId
+                            )
+                        }
 
                         val effectiveLanguage = currentNode.inheritedLanguage
                             ?: detectLanguageFromFolderName(currentNode.folderName)
@@ -218,6 +227,12 @@ class DesktopDriveScanner(
                 val driveThumb = folder.thumbnailLink?.replace("s220", "s800")
                     ?: "https://drive.google.com/thumbnail?id=$targetId&sz=w800"
                 val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
+                if (DesktopCanonicalImageCache.classifyProvenance(meta.posterUrl) == ArtworkProvenance.OFFICIAL_CATALOG) {
+                    DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                        canonicalKey = DesktopCanonicalImageCache.seriesPosterKey(targetId),
+                        officialUrl = meta.posterUrl
+                    )
+                }
 
                 discoveredSeries.add(
                     DesktopMediaItem(
@@ -225,7 +240,8 @@ class DesktopDriveScanner(
                         title = meta.officialTitle,
                         thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
                         fallbackThumbnailUrl = driveThumb,
-                        genre = meta.genres
+                        genre = meta.genres,
+                        isSeries = true
                     )
                 )
 
@@ -299,6 +315,13 @@ class DesktopDriveScanner(
                         val driveThumb = item.thumbnailLink?.replace("s220", "s800") ?: ""
 
                         val meta = DesktopOnlineMetadataResolver.resolveMovie(rawName)
+                        if (DesktopCanonicalImageCache.classifyProvenance(meta.posterUrl) == ArtworkProvenance.OFFICIAL_CATALOG) {
+                            DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                                canonicalKey = DesktopCanonicalImageCache.moviePosterKey(resolvedId),
+                                officialUrl = meta.posterUrl,
+                                linkedMediaId = resolvedId
+                            )
+                        }
                         val effectiveLanguage = currentNode.inheritedLanguage
                             ?: detectLanguageFromFolderName(currentNode.folderName)
                             ?: meta.language.ifBlank { DesktopOnlineMetadataResolver.deduceLanguageFromTitle(meta.officialTitle) }
@@ -349,16 +372,24 @@ class DesktopDriveScanner(
             for (folder in seriesFolders) {
                 if (!DesktopNetworkMonitor.isOnline.value) break
                 val rawName = folder.name ?: "Unknown"
+                val targetId = resolveTargetId(folder)
                 val driveThumb = folder.thumbnailLink?.replace("s220", "s800") ?: ""
                 val meta = DesktopOnlineMetadataResolver.resolveSeries(rawName)
+                if (DesktopCanonicalImageCache.classifyProvenance(meta.posterUrl) == ArtworkProvenance.OFFICIAL_CATALOG) {
+                    DesktopCanonicalImageCache.registerOfficialArtworkUrl(
+                        canonicalKey = DesktopCanonicalImageCache.seriesPosterKey(targetId),
+                        officialUrl = meta.posterUrl
+                    )
+                }
 
                 discoveredSeries.add(
                     DesktopMediaItem(
-                        id = resolveTargetId(folder),
+                        id = targetId,
                         title = meta.officialTitle,
                         thumbnailUrl = meta.posterUrl.ifBlank { driveThumb },
                         fallbackThumbnailUrl = driveThumb,
-                        genre = meta.genres
+                        genre = meta.genres,
+                        isSeries = true
                     )
                 )
             }
